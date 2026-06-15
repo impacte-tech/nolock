@@ -1,0 +1,21 @@
+[package]
+name = "zencode"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "=2.6.2", features = [] }
+
+[dependencies]
+tauri = { version = "=2.11.2", features = ["unstable"] }
+tauri-plugin-fs = "=2.5.1"
+tauri-plugin-shell = "=2.3.5"
+tauri-plugin-dialog = "=2.7.1"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+reqwest = { version = "=0.12.28", features = ["json"] }
+portable-pty = "=0.8.1"
+
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+gtk = { version = "=0.18.2", features = ["v3_24"] }
+wry = { version = "=0.55.1", default-features = false, features = ["protocol", "os-webview", "linux-body"] }
