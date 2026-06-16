@@ -19,7 +19,7 @@ describe("BrowserPanel", () => {
   });
 
   it("renders the toolbar with URL input and buttons", () => {
-    render(<BrowserPanel url="https://example.com" onClose={vi.fn()} />);
+    render(<BrowserPanel url="https://example.com" onClose={vi.fn()} resizeEpoch={0} />);
     // URL input should show the initial URL
     const urlInput = screen.getByDisplayValue("https://example.com");
     expect(urlInput).toBeInTheDocument();
@@ -32,26 +32,26 @@ describe("BrowserPanel", () => {
   });
 
   it("shows loading state while creating webview", () => {
-    render(<BrowserPanel url="https://example.com" onClose={vi.fn()} />);
+    render(<BrowserPanel url="https://example.com" onClose={vi.fn()} resizeEpoch={0} />);
     expect(screen.getByText("Loading...")).toBeInTheDocument();
   });
 
   it("calls onClose when close button is clicked", () => {
     const onClose = vi.fn();
-    render(<BrowserPanel url="https://example.com" onClose={onClose} />);
+    render(<BrowserPanel url="https://example.com" onClose={onClose} resizeEpoch={0} />);
     fireEvent.click(screen.getByTitle("Close browser"));
     expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("updates input value on typing", () => {
-    render(<BrowserPanel url="https://example.com" onClose={vi.fn()} />);
+    render(<BrowserPanel url="https://example.com" onClose={vi.fn()} resizeEpoch={0} />);
     const input = screen.getByDisplayValue("https://example.com") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "https://github.com" } });
     expect(input.value).toBe("https://github.com");
   });
 
   it("tries Rust command on mount and falls back to JS", async () => {
-    render(<BrowserPanel url="https://example.com" onClose={vi.fn()} />);
+    render(<BrowserPanel url="https://example.com" onClose={vi.fn()} resizeEpoch={0} />);
 
     await waitFor(() => {
       // The Rust create_browser_webview should have been called
@@ -60,7 +60,7 @@ describe("BrowserPanel", () => {
   });
 
   it("renders without crashing for empty URL", () => {
-    render(<BrowserPanel url="" onClose={vi.fn()} />);
+    render(<BrowserPanel url="" onClose={vi.fn()} resizeEpoch={0} />);
     const input = screen.getByDisplayValue("") as HTMLInputElement;
     expect(input).toBeInTheDocument();
   });

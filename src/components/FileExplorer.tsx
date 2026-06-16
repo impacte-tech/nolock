@@ -19,6 +19,7 @@ interface Props {
   setRootPath: (p: string) => void;
   visible: boolean;
   refreshKey?: number;
+  style?: React.CSSProperties;
 }
 
 function getFileColor(name: string): string {
@@ -37,7 +38,7 @@ function getFileColor(name: string): string {
   return colorMap[ext] || "#6c7086";
 }
 
-export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey }: Props) {
+export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey, style }: Props) {
   const [entries, setEntries] = useState<TreeDirEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -141,7 +142,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   if (!visible) return null;
 
   return (
-    <div className="file-explorer">
+    <div className="file-explorer" style={style}>
       <div className="explorer-header">
         <span>Explorer</span>
         <button onClick={() => loadDir(rootPath)} title="Refresh">&#x21bb;</button>

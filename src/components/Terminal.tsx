@@ -111,13 +111,14 @@ interface PanelProps {
   rootPath: string;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
+  style?: React.CSSProperties;
 }
 
-export function TerminalPanel({ instances, activeId, rootPath, onSelect, onClose }: PanelProps) {
+export function TerminalPanel({ instances, activeId, rootPath, onSelect, onClose, style }: PanelProps) {
   if (instances.length === 0) return null;
 
   return (
-    <div className="terminal-container">
+    <div className="terminal-container" style={style}>
       <div className="terminal-header">
         <div className="terminal-tabs">
           {instances.map((inst) => (

@@ -141,6 +141,82 @@ html, body, #root {
   opacity: 0.7;
 }
 
+/* ===== Resize Handles ===== */
+
+/* Base handle: invisible but hit-tested narrow strip.
+   On hover and during drag, it reveals a visible bar. */
+.resize-handle {
+  position: relative;
+  flex-shrink: 0;
+  z-index: 10;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+/* Horizontal handle = vertical divider bar (dragged left/right) */
+.resize-handle--horizontal {
+  width: 5px;
+  cursor: col-resize;
+}
+
+.resize-handle--horizontal::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 1px;
+  background: var(--border);
+  transition: background 0.15s ease, width 0.15s ease, left 0.15s ease;
+}
+
+.resize-handle--horizontal:hover::after,
+.resize-handle--horizontal:active::after {
+  background: var(--accent);
+  width: 3px;
+  left: 1px;
+}
+
+.resize-handle--horizontal:hover,
+.resize-handle--horizontal:active {
+  background: rgba(137, 180, 250, 0.08);
+}
+
+/* Vertical handle = horizontal divider bar (dragged up/down) */
+.resize-handle--vertical {
+  height: 5px;
+  cursor: row-resize;
+}
+
+.resize-handle--vertical::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 2px;
+  height: 1px;
+  background: var(--border);
+  transition: background 0.15s ease, height 0.15s ease, top 0.15s ease;
+}
+
+.resize-handle--vertical:hover::after,
+.resize-handle--vertical:active::after {
+  background: var(--accent);
+  height: 3px;
+  top: 1px;
+}
+
+.resize-handle--vertical:hover,
+.resize-handle--vertical:active {
+  background: rgba(137, 180, 250, 0.08);
+}
+
+/* When actively dragging, the body cursor is already set by JS.
+   But we give extra feedback via the handle. */
+.resize-handle:active {
+  background: rgba(137, 180, 250, 0.15);
+}
+
 /* ===== Main area ===== */
 .main-area {
   display: flex;
@@ -151,9 +227,8 @@ html, body, #root {
 /* ===== File Explorer ===== */
 .file-explorer {
   width: 220px;
-  min-width: 180px;
+  min-width: 120px;
   background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -246,6 +321,7 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 /* Outer wrapper for editor + browser row (terminal sits below) */
@@ -273,7 +349,6 @@ html, body, #root {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border);
 }
 
 .editor-tabs {
@@ -418,9 +493,8 @@ html, body, #root {
 /* ===== Terminal ===== */
 .terminal-container {
   height: 220px;
-  min-height: 100px;
+  min-height: 80px;
   background: var(--terminal-bg);
-  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
 }
@@ -488,9 +562,8 @@ html, body, #root {
 /* ===== Chat panel ===== */
 .chat-panel {
   width: 360px;
-  min-width: 280px;
+  min-width: 200px;
   background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
 }

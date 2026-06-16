@@ -23,6 +23,7 @@ interface Message {
 interface Props {
   onClose: () => void;
   onOpenUrl: (url: string) => void;
+  style?: React.CSSProperties;
 }
 
 // Mutable ref set by ChatPanel so MarkdownContent can call it without props drilling
@@ -69,7 +70,7 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
   );
 }
 
-export default function ChatPanel({ onClose, onOpenUrl }: Props) {
+export default function ChatPanel({ onClose, onOpenUrl, style }: Props) {
   // Wire up global ref so MarkdownContent can open URLs
   useEffect(() => {
     globalOpenUrl = onOpenUrl;
@@ -162,7 +163,7 @@ export default function ChatPanel({ onClose, onOpenUrl }: Props) {
   }, [input, loading, messages]);
 
   return (
-    <div className="chat-panel">
+    <div className="chat-panel" style={style}>
       <div className="chat-header">
         <span>Agent Chat</span>
         <button onClick={onClose}>&times;</button>

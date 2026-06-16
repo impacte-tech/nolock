@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileExplorer from "./components/FileExplorer";
@@ -9,6 +9,29 @@ import BrowserPanel from "./components/BrowserPanel";
 import MenuBar from "./components/MenuBar";
 import AISettings from "./components/AISettings";
 import StatusBar from "./components/StatusBar";
+import ResizableHandle from "./components/ResizableHandle";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a CSS `flex` shorthand using flex-grow ratio and flex-basis: 0.
+ *
+ * Strategy for robust proportional resizing WITHOUT calc() headaches:
+ *
+ *   - Resizable panels use `flex: <grow> 1 0` (flex-basis: 0).
+ *   - Resize handles use `flex: 0 0 5px` (fixed 5px, no grow/shrink).
+ *   - The flex container distributes **available** space (total minus handles)
+ *     among items according to their flex-grow ratios.
+ *
+ * This naturally accounts for any number of handles — no calc() or
+ * percentage math needed.  The total always adds up to 100% of the
+ * space that's actually available for panels.
+ */
+function ratioFlex(grow: number): string {
+  return `${grow} 1 0`;
+}
 
 interface OpenFile {
   path: string;
@@ -31,6 +54,67 @@ export default function App() {
 
   // --- Browser panel ---
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+
+  // --- Resize epoch: incremented after every drag-end to trigger a final
+  //     position sync on the browser webview (like a "page reload" for
+  //     just the webview, not the whole app). --------------------------
+  const [resizeEpoch, setResizeEpoch] = useState(0);
+
+  // --- Resizable panel proportions (flex-grow values, sum = 100) ---
+  // Using integer "points" that sum to 100 for the outer row layout.
+  const [explorerPts, setExplorerPts] = useState(18);
+  const [chatPts, setChatPts] = useState(25);
+
+  // Inner layouts use separate ratio spaces:
+  const [terminalPts, setTerminalPts] = useState(25);  // vertical: editor vs terminal
+  const [browserPts, setBrowserPts] = useState(50);    // horizontal: editor vs browser
+
+  // Refs for measuring parent containers during drag
+  const mainAreaRef = useRef<HTMLDivElement>(null);
+  const editorAreaRef = useRef<HTMLDivElement>(null);
+  const editorMainRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Creates a resize handler for dragging a handle.
+   *
+   * Converts the pixel delta into a proportion delta using the parent
+   * container's size (minus the handle so the ratio stays accurate).
+   * The total proportion space is `totalPts` (default 100).
+   */
+  const makeResizeHandler = (
+    setter: React.Dispatch<React.SetStateAction<number>>,
+    minPts: number,
+    maxPts: number,
+    containerRef: React.RefObject<HTMLDivElement | null>,
+    axis: "width" | "height",
+    totalPts: number = 100,
+    invert: boolean = false,
+  ) => {
+    return (delta: number) => {
+      const parent = containerRef.current;
+      if (!parent) return;
+
+      const parentSize =
+        axis === "width"
+          ? parent.getBoundingClientRect().width
+          : parent.getBoundingClientRect().height;
+
+      // Subtract handle so the ratio maps to available panel space
+      const available = parentSize - 5;
+      if (available <= 0) return;
+
+      const ptsDelta = (delta / available) * totalPts;
+
+      // When `invert` is true, negate the delta so that dragging toward the
+      // controlled panel makes it shrink instead of grow.  This is needed
+      // when the controlled panel sits on the opposite side of the drag
+      // direction (e.g. the explorer handle: explorer is left of the divider,
+      // so dragging right should shrink explorer, not grow it).
+      const sign = invert ? -1 : 1;
+
+      setter((prev) => Math.max(minPts, Math.min(maxPts, prev + sign * ptsDelta)));
+    };
+  };
 
   // --- Folder ---
   const [rootPath, setRootPath] = useState<string>("");
@@ -268,6 +352,23 @@ export default function App() {
     },
   ];
 
+  // ---- Compute flex-grow values for the main-area row --------------------
+  //
+  // The outer row (main-area) has:
+  //   [explorer] [handle5] [editor-area | ...] [handle5] [chat]
+  //
+  // explorerPts + editorPts + chatPts = 100 (even when chat is hidden).
+  // The handles have fixed 5px each and are excluded from the ratio.
+  //
+  const hasExplorer = showExplorer;
+  const hasChat = showChat;
+  const hasBrowser = browserUrl !== null;
+  const hasTerminal = terminals.length > 0;
+
+  // Editor area gets whatever is left from the 100-point outer pool
+  const outerSidePanels = (hasExplorer ? explorerPts : 0) + (hasChat ? chatPts : 0);
+  const editorPts = Math.max(15, 100 - outerSidePanels);
+
   return (
     <div className="app">
       {chordPending && (
@@ -282,18 +383,35 @@ export default function App() {
 
       <MenuBar menus={menus} />
 
-      <div className="main-area">
-        <FileExplorer
-          onFileOpen={openFile}
-          rootPath={rootPath}
-          setRootPath={setRootPath}
-          visible={showExplorer}
-          refreshKey={refreshKey}
-        />
+      <div className="main-area" ref={mainAreaRef}>
+        {hasExplorer && (
+          <>
+            <FileExplorer
+              onFileOpen={openFile}
+              rootPath={rootPath}
+              setRootPath={setRootPath}
+              visible={true}
+              refreshKey={refreshKey}
+              style={{ flex: ratioFlex(explorerPts) }}
+            />
+            <ResizableHandle
+              direction="horizontal"
+              onDrag={makeResizeHandler(setExplorerPts, 8, 50, mainAreaRef, "width", 100, true)}
+              onDragEnd={() => setResizeEpoch((e) => e + 1)}
+            />
+          </>
+        )}
 
-        <div className="editor-area">
-          <div className={`editor-main ${browserUrl ? "split" : ""}`}>
-            <div className="editor-pane">
+        <div className="editor-area" ref={editorAreaRef} style={{ flex: ratioFlex(editorPts) }}>
+          <div className={`editor-main ${hasBrowser ? "split" : ""}`} ref={editorMainRef}
+            style={hasTerminal ? { flex: ratioFlex(100 - terminalPts) } : undefined}
+          >
+            <div
+              className="editor-pane"
+              style={{
+                flex: hasBrowser ? ratioFlex(100 - browserPts) : "1 1 0",
+              }}
+            >
               {openFiles.length > 0 && (
                 <div className="editor-tabs">
                   {openFiles.map((f) => (
@@ -338,23 +456,49 @@ export default function App() {
               </div>
             </div>
 
-            {browserUrl && (
-              <div className="browser-pane">
-                <BrowserPanel url={browserUrl} onClose={closeBrowser} />
-              </div>
+            {hasBrowser && (
+              <>
+                <ResizableHandle
+                  direction="horizontal"
+                  onDrag={makeResizeHandler(setBrowserPts, 20, 80, editorMainRef, "width", 100, true)}
+                  onDragEnd={() => setResizeEpoch((e) => e + 1)}
+                />
+                <div className="browser-pane" style={{ flex: ratioFlex(browserPts) }}>
+                  <BrowserPanel url={browserUrl!} onClose={closeBrowser} resizeEpoch={resizeEpoch} />
+                </div>
+              </>
             )}
           </div>
 
-          <TerminalPanel
-            instances={terminals}
-            activeId={activeTermId}
-            rootPath={rootPath}
-            onSelect={setActiveTermId}
-            onClose={closeTerminal}
-          />
+          {hasTerminal && (
+            <>
+              <ResizableHandle
+                direction="vertical"
+                onDrag={makeResizeHandler(setTerminalPts, 8, 65, editorAreaRef, "height", 100, true)}
+                onDragEnd={() => setResizeEpoch((e) => e + 1)}
+              />
+              <TerminalPanel
+                instances={terminals}
+                activeId={activeTermId}
+                rootPath={rootPath}
+                onSelect={setActiveTermId}
+                onClose={closeTerminal}
+                style={{ flex: ratioFlex(terminalPts) }}
+              />
+            </>
+          )}
         </div>
 
-        {showChat && <ChatPanel onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} />}
+        {hasChat && (
+          <>
+            <ResizableHandle
+              direction="horizontal"
+              onDrag={makeResizeHandler(setChatPts, 15, 55, mainAreaRef, "width", 100, true)}
+              onDragEnd={() => setResizeEpoch((e) => e + 1)}
+            />
+            <ChatPanel onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} style={{ flex: ratioFlex(chatPts) }} />
+          </>
+        )}
       </div>
 
       <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} />

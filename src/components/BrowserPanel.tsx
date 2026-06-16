@@ -8,6 +8,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 interface Props {
   url: string;
   onClose: () => void;
+  /** Incremented after every resize drag ends.  Triggers a "page reload"
+   *  of the native webview to ensure it snaps to the correct position. */
+  resizeEpoch: number;
 }
 
 /**
@@ -29,7 +32,7 @@ interface Props {
  *
  * The toolbar (URL bar, buttons) is rendered as React HTML above the webview area.
  */
-export default function BrowserPanel({ url, onClose }: Props) {
+export default function BrowserPanel({ url, onClose, resizeEpoch }: Props) {
   const [currentUrl, setCurrentUrl] = useState(url);
   const [inputUrl, setInputUrl] = useState(url);
   const [loading, setLoading] = useState(true);
@@ -146,6 +149,10 @@ export default function BrowserPanel({ url, onClose }: Props) {
         jsWebviewRef.current = null;
       }
 
+      // Small delay to let WebKit release HSTS database locks before
+      // creating a new webview (mitigates libsoup SQLite warnings).
+      await new Promise((r) => setTimeout(r, 50));
+
       // 2. Create new webview — try Rust first
       const rustOk = await createWebviewViaRust(targetUrl);
       if (rustOk) {
@@ -193,17 +200,42 @@ export default function BrowserPanel({ url, onClose }: Props) {
     createWebview(url);
   }, [url]);
 
-  // ---- ResizeObserver: sync webview bounds when container resizes ----------
+  // ---- Watch `resizeEpoch` — after every resize drag completes, "reload"
+  //      the native webview so it snaps to the correct viewport position.
+  //      The user observed that a manual page reload fixes positioning
+  //      completely — this is the automated equivalent for the webview only.
+  useEffect(() => {
+    if (resizeEpoch > 0) {
+      createWebview(currentUrl);
+    }
+  }, [resizeEpoch]);
+
+  // ---- Continuous position polling via requestAnimationFrame -------------
+  //
+  // IMPORTANT: We CANNOT rely on ResizeObserver alone.  ResizeObserver only
+  // fires when the element's **size** changes.  When adjacent panels are
+  // resized (explorer, chat, terminal), the browser-pane container's
+  // **position** (viewport x/y) changes while its size stays the same.
+  // The observer silently ignores this, the webview stays at stale
+  // viewport coordinates, and it visually overlaps whatever HTML content
+  // now occupies that area (e.g. the chat panel).
+  //
+  // Solution: Use a rAF polling loop every frame that checks BOTH position
+  // and size against the last sent values.  IPC is only dispatched when
+  // something actually changed (>1px difference).
+  //
+  // Performance: `getBoundingClientRect()` is virtually free — it reads
+  // cached layout data.  The loop is gated on `mountedRef` and auto-stops
+  // on unmount.  It runs at ~60fps during drags and is idle (no IPC)
+  // when nothing moves.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
-    const observer = new ResizeObserver(() => {
-      // Use getBoundingClientRect() — entry.contentRect.x/y are relative to
-      // the element's own border-box origin (~0), NOT viewport-relative.
-      // The Rust command expects viewport-absolute coordinates.
-      const rect = el.getBoundingClientRect();
+    let rafId: number | null = null;
+    let lastSent = { x: 0, y: 0, width: 0, height: 0 };
 
+    const sendPosition = (rect: { x: number; y: number; width: number; height: number }) => {
       if (usingRustRef.current) {
         invoke("update_browser_webview", {
           x: rect.x,
@@ -228,10 +260,42 @@ export default function BrowserPanel({ url, onClose }: Props) {
           });
         });
       }
-    });
+    };
 
-    observer.observe(el);
-    return () => observer.disconnect();
+    const poll = () => {
+      if (!mountedRef.current) return;
+      rafId = requestAnimationFrame(() => {
+        if (!mountedRef.current) return;
+
+        const r = el.getBoundingClientRect();
+        const current = { x: r.x, y: r.y, width: r.width, height: r.height };
+
+        // Skip if dimensions are zero — webview hasn't been laid out yet
+        if (current.width < 10 || current.height < 10) {
+          poll();
+          return;
+        }
+
+        // Only send IPC when something meaningfully changed (>1px diff)
+        const dx = Math.abs(current.x - lastSent.x);
+        const dy = Math.abs(current.y - lastSent.y);
+        const dw = Math.abs(current.width - lastSent.width);
+        const dh = Math.abs(current.height - lastSent.height);
+
+        if (dx > 1 || dy > 1 || dw > 1 || dh > 1) {
+          lastSent = current;
+          sendPosition(current);
+        }
+
+        poll(); // continue loop
+      });
+    };
+
+    poll();
+
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
   }, []);
 
   // ---- Navigation handler (user types URL in toolbar) --------------------
