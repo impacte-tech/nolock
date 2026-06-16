@@ -1,5 +1,5 @@
 [package]
-name = "zencode"
+name = "nolock"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,7 +7,7 @@ edition = "2021"
 tauri-build = { version = "=2.6.2", features = [] }
 
 [dependencies]
-tauri = { version = "=2.11.2", features = ["unstable"] }
+tauri = { version = "=2.11.2", features = ["unstable", "image-png"] }
 tauri-plugin-fs = "=2.5.1"
 tauri-plugin-shell = "=2.3.5"
 tauri-plugin-dialog = "=2.7.1"

@@ -1,7 +1,7 @@
 {
-  "productName": "Zencode",
+  "productName": "nolock",
   "version": "0.1.0",
-  "identifier": "dev.zencode.app",
+  "identifier": "com.nolock.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "Zencode",
+        "title": "nolock",
         "width": 1200,
         "height": 800,
         "decorations": true,

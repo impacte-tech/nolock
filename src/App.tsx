@@ -10,6 +10,29 @@ import MenuBar from "./components/MenuBar";
 import AISettings from "./components/AISettings";
 import StatusBar from "./components/StatusBar";
 import ResizableHandle from "./components/ResizableHandle";
+import nolockLogo from "./assets/nolocklogo-white.svg";
+
+// ---------------------------------------------------------------------------
+// localStorage migration — copy old zencode.* keys to nolock.*
+// ---------------------------------------------------------------------------
+(function migrateOldKeys() {
+  const keyMap: Record<string, string> = {
+    "zencode.backend": "nolock.backend",
+    "zencode.url": "nolock.url",
+    "zencode.chatModel": "nolock.chatModel",
+    "zencode.completionModel": "nolock.completionModel",
+    "zencode.apiKey": "nolock.apiKey",
+    "zencode.toolsEnabled": "nolock.toolsEnabled",
+    "zencode.model": "nolock.model",
+  };
+  for (const [oldKey, newKey] of Object.entries(keyMap)) {
+    const oldVal = localStorage.getItem(oldKey);
+    if (oldVal !== null && localStorage.getItem(newKey) === null) {
+      localStorage.setItem(newKey, oldVal);
+      localStorage.removeItem(oldKey);
+    }
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -378,7 +401,7 @@ export default function App() {
       )}
 
       <div className="titlebar" data-tauri-drag-region>
-        <span className="titlebar-title">Zencode</span>
+        <img src={nolockLogo} alt="nolock" className="titlebar-logo" />
       </div>
 
       <MenuBar menus={menus} />
@@ -446,8 +469,8 @@ export default function App() {
                   />
                 ) : (
                   <div className="empty-state">
-                    <span className="big-icon">Z</span>
-                    <span>Zencode</span>
+                    <img src={nolockLogo} alt="nolock" className="empty-state-logo" />
+                    <span>nolock</span>
                     <span style={{ fontSize: 12, marginTop: 4 }}>
                       {rootPath ? "Open a file to start editing" : "File \u2192 Open Folder to get started"}
                     </span>

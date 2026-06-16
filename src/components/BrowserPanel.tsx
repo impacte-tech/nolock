@@ -62,7 +62,7 @@ export default function BrowserPanel({ url, onClose, resizeEpoch }: Props) {
         });
         return true;
       } catch (e) {
-        console.warn("[zencode] Rust browser command failed, will try JS API:", e);
+        console.warn("[nolock] Rust browser command failed, will try JS API:", e);
         return false;
       }
     },
@@ -110,7 +110,7 @@ export default function BrowserPanel({ url, onClose, resizeEpoch }: Props) {
 
         return wv;
       } catch (e) {
-        console.error("[zencode] Failed to create JS webview:", e);
+        console.error("[nolock] Failed to create JS webview:", e);
         return null;
       }
     },

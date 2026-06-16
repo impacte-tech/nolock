@@ -18,10 +18,10 @@ export default function StatusBar({ showChat, onToggleChat }: Props) {
 
   useEffect(() => {
     const check = async () => {
-      const b = localStorage.getItem("zencode.backend") || "ollama";
-      const url = localStorage.getItem("zencode.url") || "http://localhost:11434";
-      const completionModel = localStorage.getItem("zencode.completionModel") || "";
-      const chatModel = localStorage.getItem("zencode.chatModel") || "";
+      const b = localStorage.getItem("nolock.backend") || "ollama";
+      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const completionModel = localStorage.getItem("nolock.completionModel") || "";
+      const chatModel = localStorage.getItem("nolock.chatModel") || "";
 
       try {
         let ok = false;

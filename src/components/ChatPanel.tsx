@@ -91,10 +91,10 @@ export default function ChatPanel({ onClose, onOpenUrl, style }: Props) {
   useEffect(() => {
     const handleClick = (e: Event) => {
       const target = e.target as HTMLElement;
-      console.log("[zencode] click on:", target.tagName, target.textContent?.substring(0, 50));
+      console.log("[nolock] click on:", target.tagName, target.textContent?.substring(0, 50));
       const anchor = target.closest("a") as HTMLAnchorElement | null;
       if (anchor?.href && !anchor.href.startsWith("javascript:")) {
-        console.log("[zencode] link found, opening:", anchor.href);
+        console.log("[nolock] link found, opening:", anchor.href);
         e.preventDefault();
         e.stopPropagation();
         globalOpenUrl?.(anchor.href);
@@ -116,10 +116,10 @@ export default function ChatPanel({ onClose, onOpenUrl, style }: Props) {
     setLoading(true);
 
     try {
-      const backend = localStorage.getItem("zencode.backend") || "ollama";
-      const url = localStorage.getItem("zencode.url") || "http://localhost:11434";
-      const chatModel = localStorage.getItem("zencode.chatModel") || "";
-      const apiKey = localStorage.getItem("zencode.apiKey") || "";
+      const backend = localStorage.getItem("nolock.backend") || "ollama";
+      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const chatModel = localStorage.getItem("nolock.chatModel") || "";
+      const apiKey = localStorage.getItem("nolock.apiKey") || "";
 
       if (!chatModel) {
         setMessages((prev) => [
@@ -131,7 +131,7 @@ export default function ChatPanel({ onClose, onOpenUrl, style }: Props) {
       }
 
       // Read enabled tools from localStorage
-      const toolsRaw = localStorage.getItem("zencode.toolsEnabled") || "[]";
+      const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
 
       const result: { content: string; tool_calls: ToolCallLog[] } = await invoke("ai_chat", {

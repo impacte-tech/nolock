@@ -128,10 +128,10 @@ class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsPr
     const requestId = ++this._requestCounter;
 
     try {
-      const backend = localStorage.getItem("zencode.backend") || "ollama";
-      const url = localStorage.getItem("zencode.url") || "http://localhost:11434";
-      const completionModel = localStorage.getItem("zencode.completionModel") || "";
-      const apiKey = localStorage.getItem("zencode.apiKey") || "";
+      const backend = localStorage.getItem("nolock.backend") || "ollama";
+      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const completionModel = localStorage.getItem("nolock.completionModel") || "";
+      const apiKey = localStorage.getItem("nolock.apiKey") || "";
 
       if (!completionModel) {
         return { items: [] };

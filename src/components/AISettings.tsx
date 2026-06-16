@@ -39,27 +39,27 @@ export default function AISettings({ visible, onClose }: Props) {
 
   useEffect(() => {
     if (visible) {
-      const oldModel = localStorage.getItem("zencode.model");
-      const toolsRaw = localStorage.getItem("zencode.toolsEnabled");
+      const oldModel = localStorage.getItem("nolock.model");
+      const toolsRaw = localStorage.getItem("nolock.toolsEnabled");
       setConfig({
-        backend: localStorage.getItem("zencode.backend") || "ollama",
-        url: localStorage.getItem("zencode.url") || "http://localhost:11434",
-        completionModel: localStorage.getItem("zencode.completionModel") || oldModel || "",
-        chatModel: localStorage.getItem("zencode.chatModel") || oldModel || "",
-        apiKey: localStorage.getItem("zencode.apiKey") || "",
+        backend: localStorage.getItem("nolock.backend") || "ollama",
+        url: localStorage.getItem("nolock.url") || "http://localhost:11434",
+        completionModel: localStorage.getItem("nolock.completionModel") || oldModel || "",
+        chatModel: localStorage.getItem("nolock.chatModel") || oldModel || "",
+        apiKey: localStorage.getItem("nolock.apiKey") || "",
         toolsEnabled: toolsRaw ? JSON.parse(toolsRaw) : [],
       });
     }
   }, [visible]);
 
   const save = () => {
-    localStorage.setItem("zencode.backend", config.backend);
-    localStorage.setItem("zencode.url", config.url);
-    localStorage.setItem("zencode.completionModel", config.completionModel);
-    localStorage.setItem("zencode.chatModel", config.chatModel);
-    localStorage.setItem("zencode.apiKey", config.apiKey);
-    localStorage.setItem("zencode.toolsEnabled", JSON.stringify(config.toolsEnabled));
-    localStorage.setItem("zencode.model", config.completionModel);
+    localStorage.setItem("nolock.backend", config.backend);
+    localStorage.setItem("nolock.url", config.url);
+    localStorage.setItem("nolock.completionModel", config.completionModel);
+    localStorage.setItem("nolock.chatModel", config.chatModel);
+    localStorage.setItem("nolock.apiKey", config.apiKey);
+    localStorage.setItem("nolock.toolsEnabled", JSON.stringify(config.toolsEnabled));
+    localStorage.setItem("nolock.model", config.completionModel);
     onClose();
   };
 

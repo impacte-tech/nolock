@@ -29,10 +29,10 @@ describe("AISettings", () => {
   });
 
   it("loads settings from localStorage on visibility", () => {
-    localStorage.setItem("zencode.backend", "llamacpp");
-    localStorage.setItem("zencode.url", "http://localhost:8080");
-    localStorage.setItem("zencode.completionModel", "codellama");
-    localStorage.setItem("zencode.chatModel", "llama3");
+    localStorage.setItem("nolock.backend", "llamacpp");
+    localStorage.setItem("nolock.url", "http://localhost:8080");
+    localStorage.setItem("nolock.completionModel", "codellama");
+    localStorage.setItem("nolock.chatModel", "llama3");
 
     render(<AISettings visible={true} onClose={vi.fn()} />);
     // llanacpp should be selected
@@ -115,7 +115,7 @@ describe("AISettings", () => {
     // Click Save
     fireEvent.click(screen.getByText("Save"));
 
-    expect(localStorage.getItem("zencode.url")).toBe("http://my-server:8080");
+    expect(localStorage.getItem("nolock.url")).toBe("http://my-server:8080");
     expect(onClose).toHaveBeenCalledOnce();
   });
 

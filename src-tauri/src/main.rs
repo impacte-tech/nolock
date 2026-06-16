@@ -347,11 +347,11 @@ async fn execute_tool(
             let url = args["url"]
                 .as_str()
                 .ok_or("Missing required parameter: url")?;
-            eprintln!("[zencode] tool web_fetch url={}", url);
+            eprintln!("[nolock] tool web_fetch url={}", url);
             let resp = client
                 .get(url)
                 .timeout(std::time::Duration::from_secs(15))
-                .header("User-Agent", "Zencode/0.1")
+                .header("User-Agent", "nolock/0.1")
                 .send()
                 .await
                 .map_err(|e| format!("Failed to fetch URL: {}", e))?;
@@ -375,7 +375,7 @@ async fn execute_tool(
             let path = args["path"]
                 .as_str()
                 .ok_or("Missing required parameter: path")?;
-            eprintln!("[zencode] tool read_file path={}", path);
+            eprintln!("[nolock] tool read_file path={}", path);
             std::fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", path, e))
         }
@@ -383,7 +383,7 @@ async fn execute_tool(
             let path = args["path"]
                 .as_str()
                 .ok_or("Missing required parameter: path")?;
-            eprintln!("[zencode] tool list_directory path={}", path);
+            eprintln!("[nolock] tool list_directory path={}", path);
             let mut entries = Vec::new();
             let read_dir = std::fs::read_dir(path)
                 .map_err(|e| format!("Failed to read dir {}: {}", path, e))?;
@@ -456,7 +456,7 @@ async fn ollama_chat_with_tools(
         }
 
         eprintln!(
-            "[zencode] ollama tool loop iteration={}, POST {}/api/chat",
+            "[nolock] ollama tool loop iteration={}, POST {}/api/chat",
             iteration, url
         );
         let resp = client
@@ -466,13 +466,13 @@ async fn ollama_chat_with_tools(
             .send()
             .await
             .map_err(|e| {
-                eprintln!("[zencode] ollama tool loop error: {}", e);
+                eprintln!("[nolock] ollama tool loop error: {}", e);
                 e.to_string()
             })?;
         let status = resp.status();
         let text = resp.text().await.map_err(|e| e.to_string())?;
         eprintln!(
-            "[zencode] ollama tool loop status={} body={}",
+            "[nolock] ollama tool loop status={} body={}",
             status,
             &text[..text.len().min(300)]
         );
@@ -549,7 +549,7 @@ async fn ollama_chat_with_tools(
 #[tauri::command]
 async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     eprintln!(
-        "[zencode] ai_complete backend={} url={} model={} prompt_len={} suffix={}",
+        "[nolock] ai_complete backend={} url={} model={} prompt_len={} suffix={}",
         req.backend,
         req.url,
         req.model,
@@ -581,7 +581,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 b
             };
 
-            eprintln!("[zencode] ollama POST {}/api/generate (FITM={})", req.url, use_suffix);
+            eprintln!("[nolock] ollama POST {}/api/generate (FITM={})", req.url, use_suffix);
             let resp = client
                 .post(format!("{}/api/generate", req.url))
                 .json(&body(use_suffix))
@@ -589,16 +589,16 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 .send()
                 .await
                 .map_err(|e| {
-                    eprintln!("[zencode] ollama error: {}", e);
+                    eprintln!("[nolock] ollama error: {}", e);
                     e.to_string()
                 })?;
             let status = resp.status();
             let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[zencode] ollama status={} body={}", status, &text[..text.len().min(300)]);
+            eprintln!("[nolock] ollama status={} body={}", status, &text[..text.len().min(300)]);
 
             // If FITM failed with 400 (model doesn't support insert), retry without suffix
             if status.as_u16() == 400 && use_suffix {
-                eprintln!("[zencode] ollama FITM not supported, retrying without suffix");
+                eprintln!("[nolock] ollama FITM not supported, retrying without suffix");
                 let resp2 = client
                     .post(format!("{}/api/generate", req.url))
                     .json(&body(false))
@@ -608,7 +608,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                     .map_err(|e| e.to_string())?;
                 let status2 = resp2.status();
                 let text2 = resp2.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[zencode] ollama retry status={} body={}", status2, &text2[..text2.len().min(200)]);
+                eprintln!("[nolock] ollama retry status={} body={}", status2, &text2[..text2.len().min(200)]);
                 let data: serde_json::Value =
                     serde_json::from_str(&text2).map_err(|e| format!("JSON parse error: {}", e))?;
                 return Ok(data["response"].as_str().unwrap_or("").to_string());
@@ -632,7 +632,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                     body["suffix"] = serde_json::json!(suffix);
                 }
             }
-            eprintln!("[zencode] llamacpp POST {}/completion (FITM={})", req.url, req.suffix.is_some());
+            eprintln!("[nolock] llamacpp POST {}/completion (FITM={})", req.url, req.suffix.is_some());
             let resp = client
                 .post(format!("{}/completion", req.url))
                 .json(&body)
@@ -640,12 +640,12 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 .send()
                 .await
                 .map_err(|e| {
-                    eprintln!("[zencode] llamacpp error: {}", e);
+                    eprintln!("[nolock] llamacpp error: {}", e);
                     e.to_string()
                 })?;
             let status = resp.status();
             let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[zencode] llamacpp status={} body={}", status, &text[..text.len().min(200)]);
+            eprintln!("[nolock] llamacpp status={} body={}", status, &text[..text.len().min(200)]);
             let data: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
             Ok(data["content"].as_str().unwrap_or("").to_string())
@@ -660,22 +660,22 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 "max_tokens": 64,
                 "temperature": 0.2
             });
-            eprintln!("[zencode] openrouter POST https://openrouter.ai/api/v1/chat/completions model={}", req.model);
+            eprintln!("[nolock] openrouter POST https://openrouter.ai/api/v1/chat/completions model={}", req.model);
             let resp = client
                 .post("https://openrouter.ai/api/v1/chat/completions")
                 .header("Authorization", format!("Bearer {}", api_key))
-                .header("HTTP-Referer", "https://zencode.dev")
+                .header("HTTP-Referer", "https://nolock.dev")
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await
                 .map_err(|e| {
-                    eprintln!("[zencode] openrouter error: {}", e);
+                    eprintln!("[nolock] openrouter error: {}", e);
                     e.to_string()
                 })?;
             let status = resp.status();
             let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[zencode] openrouter status={} body={}", status, &text[..text.len().min(200)]);
+            eprintln!("[nolock] openrouter status={} body={}", status, &text[..text.len().min(200)]);
             let data: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
             Ok(data["choices"][0]["message"]["content"]
@@ -690,7 +690,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 "stream": false,
                 "options": { "num_predict": 64, "temperature": 0.2 }
             });
-            eprintln!("[zencode] opencode POST {}/api/generate", req.url);
+            eprintln!("[nolock] opencode POST {}/api/generate", req.url);
             let resp = client
                 .post(format!("{}/api/generate", req.url))
                 .json(&body)
@@ -698,12 +698,12 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 .send()
                 .await
                 .map_err(|e| {
-                    eprintln!("[zencode] opencode error: {}", e);
+                    eprintln!("[nolock] opencode error: {}", e);
                     e.to_string()
                 })?;
             let status = resp.status();
             let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[zencode] opencode status={} body={}", status, &text[..text.len().min(200)]);
+            eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
             let data: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
             Ok(data["response"].as_str().unwrap_or("").to_string())
@@ -715,7 +715,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
 #[tauri::command]
 async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
     eprintln!(
-        "[zencode] ai_chat backend={} url={} model={} messages={} tools={:?}",
+        "[nolock] ai_chat backend={} url={} model={} messages={} tools={:?}",
         req.backend,
         req.url,
         req.model,
@@ -747,7 +747,7 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                     "stream": false,
                     "options": { "num_predict": 2048, "temperature": 0.7 }
                 });
-                eprintln!("[zencode] ollama POST {}/api/chat (no tools)", req.url);
+                eprintln!("[nolock] ollama POST {}/api/chat (no tools)", req.url);
                 let resp = client
                     .post(format!("{}/api/chat", req.url))
                     .json(&body)
@@ -755,12 +755,12 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                     .send()
                     .await
                     .map_err(|e| {
-                        eprintln!("[zencode] ollama chat error: {}", e);
+                        eprintln!("[nolock] ollama chat error: {}", e);
                         e.to_string()
                     })?;
                 let status = resp.status();
                 let text = resp.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[zencode] ollama chat status={} body={}", status, &text[..text.len().min(200)]);
+                eprintln!("[nolock] ollama chat status={} body={}", status, &text[..text.len().min(200)]);
                 let data: serde_json::Value =
                     serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
                 Ok(ChatResult {
@@ -787,7 +787,7 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 "temperature": 0.7,
                 "stream": false
             });
-            eprintln!("[zencode] llamacpp POST {}/completion", req.url);
+            eprintln!("[nolock] llamacpp POST {}/completion", req.url);
             let resp = client
                 .post(format!("{}/completion", req.url))
                 .json(&body)
@@ -797,7 +797,7 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 .map_err(|e| e.to_string())?;
             let status = resp.status();
             let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[zencode] llamacpp chat status={} body={}", status, &text[..text.len().min(200)]);
+            eprintln!("[nolock] llamacpp chat status={} body={}", status, &text[..text.len().min(200)]);
             let data: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
             Ok(ChatResult {
@@ -841,11 +841,11 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 body["tools"] = serde_json::json!(tools);
             }
 
-            eprintln!("[zencode] openrouter POST chat completions");
+            eprintln!("[nolock] openrouter POST chat completions");
             let resp = client
                 .post("https://openrouter.ai/api/v1/chat/completions")
                 .header("Authorization", format!("Bearer {}", api_key))
-                .header("HTTP-Referer", "https://zencode.dev")
+                .header("HTTP-Referer", "https://nolock.dev")
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(60))
                 .send()
@@ -853,7 +853,7 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 .map_err(|e| e.to_string())?;
             let status = resp.status();
             let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[zencode] openrouter chat status={} body={}", status, &text[..text.len().min(200)]);
+            eprintln!("[nolock] openrouter chat status={} body={}", status, &text[..text.len().min(200)]);
             let data: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
             Ok(ChatResult {
@@ -910,6 +910,16 @@ pub fn run() {
             instances: Mutex::new(HashMap::new()),
         })
         .manage(browser::BrowserState::new())
+        .setup(|app| {
+            // Set the window icon so the taskbar/dock shows the nolock logo
+            // instead of a generic gear icon (Linux) or default icon.
+            let icon_bytes = include_bytes!("../icons/32x32.png");
+            let icon = tauri::image::Image::from_bytes(icon_bytes)?;
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_icon(icon)?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             read_file,
             write_file,
@@ -925,7 +935,7 @@ pub fn run() {
             browser::update_browser_webview,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running zencode");
+        .expect("error while running nolock");
 }
 
 fn main() {
@@ -1065,7 +1075,7 @@ mod tests {
     // ---- read_file / write_file with temp dirs ---------------------------
     #[test]
     fn test_write_and_read_file() {
-        let dir = std::env::temp_dir().join("zencode_test_write_read");
+        let dir = std::env::temp_dir().join("nolock_test_write_read");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("test_file.txt");
         let path_str = path.to_string_lossy().to_string();
@@ -1086,7 +1096,7 @@ mod tests {
 
     #[test]
     fn test_read_file_nonexistent() {
-        let result = read_file("/tmp/definitely_not_a_real_file_zencode.test".into());
+        let result = read_file("/tmp/definitely_not_a_real_file_nolock.test".into());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read"));
     }
@@ -1094,7 +1104,7 @@ mod tests {
     // ---- list_directory with temp dir ------------------------------------
     #[test]
     fn test_list_directory_temp() {
-        let dir = std::env::temp_dir().join("zencode_test_list_dir");
+        let dir = std::env::temp_dir().join("nolock_test_list_dir");
         let _ = std::fs::create_dir_all(&dir);
 
         // Create test files

@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for Zencode",
+  "description": "Default capabilities for nolock",
   "windows": ["main"],
   "permissions": [
     "core:default",

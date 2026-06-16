@@ -27,8 +27,8 @@ describe("App", () => {
 
   it("renders the titlebar and empty state", () => {
     render(<App />);
-    // "Zencode" appears in both the titlebar and the empty state
-    expect(screen.getAllByText("Zencode").length).toBeGreaterThanOrEqual(1);
+    // "nolock" appears in both the titlebar and the empty state
+    expect(screen.getAllByText("nolock").length).toBeGreaterThanOrEqual(1);
     // Empty state
     expect(screen.getByText("File → Open Folder to get started")).toBeInTheDocument();
   });

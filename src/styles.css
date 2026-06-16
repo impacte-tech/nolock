@@ -1,13 +1,13 @@
 :root {
-  --bg-primary: #1e1e2e;
-  --bg-secondary: #181825;
-  --bg-surface: #11111b;
-  --text-primary: #cdd6f4;
-  --text-secondary: #a6adc8;
-  --text-muted: #6c7086;
-  --accent: #89b4fa;
-  --border: #313244;
-  --hover: #45475a;
+  --bg-primary: #000000;
+  --bg-secondary: #0a0a0a;
+  --bg-surface: #141414;
+  --text-primary: #ffffff;
+  --text-secondary: #cccccc;
+  --text-muted: #888888;
+  --accent: #ffffff;
+  --border: #333333;
+  --hover: #222222;
   --terminal-bg: #000000;
 }
 
@@ -36,7 +36,7 @@ html, body, #root {
 /* ===== Titlebar ===== */
 .chord-hint {
   position: fixed;
-  top: 54px;
+  top: 74px;
   left: 50%;
   transform: translateX(-50%);
   background: var(--accent);
@@ -56,7 +56,7 @@ html, body, #root {
 }
 
 .titlebar {
-  height: 32px;
+  height: 48px;
   background: var(--bg-surface);
   display: flex;
   align-items: center;
@@ -66,6 +66,11 @@ html, body, #root {
   -webkit-app-region: drag;
   border-bottom: 1px solid var(--border);
   user-select: none;
+}
+
+.titlebar-logo {
+  height: 48px;
+  width: auto;
 }
 
 .titlebar-title {
@@ -179,7 +184,7 @@ html, body, #root {
 
 .resize-handle--horizontal:hover,
 .resize-handle--horizontal:active {
-  background: rgba(137, 180, 250, 0.08);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 /* Vertical handle = horizontal divider bar (dragged up/down) */
@@ -208,13 +213,13 @@ html, body, #root {
 
 .resize-handle--vertical:hover,
 .resize-handle--vertical:active {
-  background: rgba(137, 180, 250, 0.08);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 /* When actively dragging, the body cursor is already set by JS.
    But we give extra feedback via the handle. */
 .resize-handle:active {
-  background: rgba(137, 180, 250, 0.15);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 /* ===== Main area ===== */
@@ -292,7 +297,7 @@ html, body, #root {
 }
 
 .tree-item.active {
-  background: rgba(137, 180, 250, 0.15);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .chevron {
@@ -700,19 +705,19 @@ html, body, #root {
   padding: 4px 10px;
   margin: 6px 0;
   color: var(--text-secondary);
-  background: rgba(137, 180, 250, 0.05);
+  background: rgba(255, 255, 255, 0.03);
   border-radius: 0 4px 4px 0;
 }
 
 /* Inline code */
 .chat-markdown code {
-  background: rgba(137, 180, 250, 0.1);
+  background: rgba(255, 255, 255, 0.08);
   border: 1px solid var(--border);
   border-radius: 3px;
   padding: 1px 5px;
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 12px;
-  color: #f38ba8;
+  color: var(--text-primary);
 }
 
 /* Code blocks */
@@ -802,7 +807,7 @@ html, body, #root {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  background: rgba(137, 180, 250, 0.08);
+  background: rgba(255, 255, 255, 0.06);
   border: 1px solid var(--border);
   border-radius: 4px;
   cursor: pointer;
@@ -810,7 +815,7 @@ html, body, #root {
 }
 
 .tool-calls-header:hover {
-  background: rgba(137, 180, 250, 0.14);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .tool-calls-chevron {
@@ -861,7 +866,7 @@ html, body, #root {
 
 .tool-call-args code {
   font-size: 10px;
-  background: rgba(137, 180, 250, 0.08);
+  background: rgba(255, 255, 255, 0.06);
   padding: 1px 4px;
   border-radius: 2px;
   word-break: break-all;
@@ -936,6 +941,13 @@ html, body, #root {
   color: var(--accent);
 }
 
+.empty-state-logo {
+  width: 64px;
+  height: 64px;
+  opacity: 0.2;
+  margin-bottom: 4px;
+}
+
 /* ===== Status bar ===== */
 .statusbar {
   height: 22px;
@@ -963,11 +975,11 @@ html, body, #root {
 }
 
 .status-ok {
-  color: #a6e3a1;
+  color: var(--text-primary);
 }
 
 .status-warn {
-  color: #f9e2af;
+  color: var(--text-secondary);
 }
 
 /* ===== Modal ===== */
@@ -1068,7 +1080,7 @@ html, body, #root {
 
 .backend-card.active {
   border-color: var(--accent);
-  background: rgba(137, 180, 250, 0.1);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .backend-name {

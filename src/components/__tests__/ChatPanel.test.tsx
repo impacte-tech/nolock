@@ -11,9 +11,9 @@ describe("ChatPanel", () => {
   beforeEach(() => {
     resetTauriMocks();
     localStorage.clear();
-    localStorage.setItem("zencode.backend", "ollama");
-    localStorage.setItem("zencode.url", "http://localhost:11434");
-    localStorage.setItem("zencode.chatModel", "qwen3:8b");
+    localStorage.setItem("nolock.backend", "ollama");
+    localStorage.setItem("nolock.url", "http://localhost:11434");
+    localStorage.setItem("nolock.chatModel", "qwen3:8b");
     // Make invoke succeed with a default response
     mockInvoke.mockResolvedValue({ content: "Test response", tool_calls: [] });
   });
@@ -50,7 +50,7 @@ describe("ChatPanel", () => {
   });
 
   it("shows warning when no chat model is configured", async () => {
-    localStorage.removeItem("zencode.chatModel");
+    localStorage.removeItem("nolock.chatModel");
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
 
     const input = screen.getByPlaceholderText("Ask the AI...");

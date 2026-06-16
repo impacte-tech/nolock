@@ -21,8 +21,8 @@ describe("StatusBar", () => {
   });
 
   it("renders backend status with dot indicator", async () => {
-    localStorage.setItem("zencode.backend", "ollama");
-    localStorage.setItem("zencode.url", "http://localhost:11434");
+    localStorage.setItem("nolock.backend", "ollama");
+    localStorage.setItem("nolock.url", "http://localhost:11434");
     render(<StatusBar showChat={false} onToggleChat={vi.fn()} />);
 
     // Should eventually show "ollama" in the status bar
@@ -33,7 +33,7 @@ describe("StatusBar", () => {
   it("shows warning indicator when backend is unreachable", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Network error")));
 
-    localStorage.setItem("zencode.backend", "ollama");
+    localStorage.setItem("nolock.backend", "ollama");
     render(<StatusBar showChat={false} onToggleChat={vi.fn()} />);
 
     // The indicator should be hollow (offline) when fetch fails
@@ -42,9 +42,9 @@ describe("StatusBar", () => {
   });
 
   it("displays completion and chat models when configured", async () => {
-    localStorage.setItem("zencode.backend", "ollama");
-    localStorage.setItem("zencode.completionModel", "qwen2.5-coder:1.5b");
-    localStorage.setItem("zencode.chatModel", "qwen3:8b");
+    localStorage.setItem("nolock.backend", "ollama");
+    localStorage.setItem("nolock.completionModel", "qwen2.5-coder:1.5b");
+    localStorage.setItem("nolock.chatModel", "qwen3:8b");
 
     render(<StatusBar showChat={false} onToggleChat={vi.fn()} />);
 
@@ -67,7 +67,7 @@ describe("StatusBar", () => {
   });
 
   it("renders correctly when no models are configured", async () => {
-    localStorage.setItem("zencode.backend", "ollama");
+    localStorage.setItem("nolock.backend", "ollama");
     render(<StatusBar showChat={false} onToggleChat={vi.fn()} />);
 
     // Should show backend status but no model names
