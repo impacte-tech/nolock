@@ -8,7 +8,7 @@ import { Marked } from "marked";
 // ---------------------------------------------------------------------------
 const marked = new Marked({ gfm: true, breaks: true });
 
-interface ToolCallLog {
+export interface ToolCallLog {
   name: string;
   arguments: string;
   result_snippet: string;
@@ -28,7 +28,7 @@ interface Props {
 // Mutable ref set by ChatPanel so MarkdownContent can call it without props drilling
 let globalOpenUrl: ((url: string) => void) | null = null;
 
-function MarkdownContent({ text }: { text: string }) {
+export function MarkdownContent({ text }: { text: string }) {
   const html = marked.parse(text) as string;
   return (
     <div
@@ -38,7 +38,7 @@ function MarkdownContent({ text }: { text: string }) {
   );
 }
 
-function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
+export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
   const [expanded, setExpanded] = useState(false);
 
   return (

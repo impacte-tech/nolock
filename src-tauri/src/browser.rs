@@ -327,6 +327,43 @@ mod imp {
     }
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_browser_state_new() {
+        // BrowserState::new() is infallible on all platforms.
+        let state = BrowserState::new();
+        drop(state);
+    }
+
+    /// Compile‑time assertion: BrowserState must be Send + Sync for Tauri
+    /// `.manage()` to accept it.
+    #[test]
+    fn test_browser_state_is_send_sync() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<BrowserState>();
+        assert_sync::<BrowserState>();
+    }
+
+    /// Compile‑time check: command functions exist with the right names.
+    /// We assert this by simply calling `dbg!` on their addresses (the
+    /// compiler must resolve them).  If a function is renamed or removed
+    /// this will fail to compile.
+    #[test]
+    fn test_command_functions_exist() {
+        // Referencing each function by value proves it exists at compile time.
+        // The `let _ =` suppresses unused-variable warnings.
+        let _ = create_browser_webview;
+        let _ = close_browser_webview;
+        let _ = update_browser_webview;
+    }
+}
+
 // ── Public re‑exports ─────────────────────────────────────────────────────
 
 pub use imp::*;

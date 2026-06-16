@@ -931,3 +931,204 @@ pub fn run() {
 fn main() {
     run();
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- DirEntry sorting / filtering ------------------------------------
+    #[test]
+    fn test_directory_sorting() {
+        let mut entries = vec![
+            DirEntry { name: "z_file.rs".into(), path: "/z_file.rs".into(), is_dir: false },
+            DirEntry { name: "a_dir".into(), path: "/a_dir".into(), is_dir: true },
+            DirEntry { name: "b_file.txt".into(), path: "/b_file.txt".into(), is_dir: false },
+            DirEntry { name: "B_file.txt".into(), path: "/B_file.txt".into(), is_dir: false },
+        ];
+        // Simulate sorting as done in list_directory
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+
+        assert_eq!(entries[0].name, "a_dir");   // dirs first
+        assert_eq!(entries[1].name, "b_file.txt"); // alphabetical (case-insensitive)
+        assert_eq!(entries[2].name, "B_file.txt");
+        assert_eq!(entries[3].name, "z_file.rs");
+    }
+
+    #[test]
+    fn test_directory_hidden_files_filtered() {
+        // list_directory skips entries whose name starts with '.'
+        let entries: Vec<DirEntry> = vec![
+            DirEntry { name: ".hidden".into(), path: "/.hidden".into(), is_dir: false },
+            DirEntry { name: "visible".into(), path: "/visible".into(), is_dir: false },
+            DirEntry { name: ".git".into(), path: "/.git".into(), is_dir: true },
+        ];
+        let filtered: Vec<_> = entries
+            .into_iter()
+            .filter(|e| !e.name.starts_with('.'))
+            .collect();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "visible");
+    }
+
+    // ---- build_tool_schemas ----------------------------------------------
+    #[test]
+    fn test_build_tool_schemas_empty() {
+        let schemas = build_tool_schemas(&[]);
+        assert!(schemas.is_empty());
+    }
+
+    #[test]
+    fn test_build_tool_schemas_single() {
+        let schemas = build_tool_schemas(&["web_fetch".into()]);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "web_fetch");
+        assert!(schemas[0]["function"]["parameters"]["properties"]["url"].is_object());
+    }
+
+    #[test]
+    fn test_build_tool_schemas_multiple() {
+        let schemas = build_tool_schemas(&[
+            "web_fetch".into(),
+            "read_file".into(),
+            "list_directory".into(),
+        ]);
+        assert_eq!(schemas.len(), 3);
+
+        let names: Vec<&str> = schemas
+            .iter()
+            .filter_map(|s| s["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"web_fetch"));
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"list_directory"));
+    }
+
+    #[test]
+    fn test_build_tool_schemas_unknown_tool_ignored() {
+        let schemas = build_tool_schemas(&["nonexistent_tool".into()]);
+        assert!(schemas.is_empty());
+    }
+
+    #[test]
+    fn test_tool_schema_has_required_url() {
+        let schemas = build_tool_schemas(&["web_fetch".into()]);
+        let required = schemas[0]["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|v| v == "url"));
+    }
+
+    // ---- execute_tool error paths (without network / fs) -----------------
+    #[tokio::test]
+    async fn test_execute_tool_unknown_name() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({});
+        let result = execute_tool("unknown_tool", &args, &client).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_web_fetch_missing_url() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({});
+        let result = execute_tool("web_fetch", &args, &client).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_read_file_nonexistent() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "path": "/tmp/nonexistent_file_xyzzy_123.test" });
+        let result = execute_tool("read_file", &args, &client).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to read"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_list_directory_nonexistent() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "path": "/tmp/nonexistent_dir_xyzzy_123" });
+        let result = execute_tool("list_directory", &args, &client).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to read dir"));
+    }
+
+    // ---- read_file / write_file with temp dirs ---------------------------
+    #[test]
+    fn test_write_and_read_file() {
+        let dir = std::env::temp_dir().join("zencode_test_write_read");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_file.txt");
+        let path_str = path.to_string_lossy().to_string();
+
+        // Write
+        let write_result = write_file(path_str.clone(), "Hello, test!".into());
+        assert!(write_result.is_ok());
+
+        // Read
+        let read_result = read_file(path_str.clone());
+        assert!(read_result.is_ok());
+        assert_eq!(read_result.unwrap(), "Hello, test!");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_read_file_nonexistent() {
+        let result = read_file("/tmp/definitely_not_a_real_file_zencode.test".into());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to read"));
+    }
+
+    // ---- list_directory with temp dir ------------------------------------
+    #[test]
+    fn test_list_directory_temp() {
+        let dir = std::env::temp_dir().join("zencode_test_list_dir");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Create test files
+        std::fs::write(dir.join("b_file.rs"), "// b").unwrap();
+        std::fs::write(dir.join("a_file.rs"), "// a").unwrap();
+        std::fs::write(dir.join(".hidden"), "secret").unwrap();
+        std::fs::create_dir(dir.join("z_dir")).unwrap();
+
+        let result = list_directory(dir.to_string_lossy().to_string());
+        assert!(result.is_ok());
+        let entries = result.unwrap();
+
+        // .hidden should be filtered out
+        assert_eq!(entries.len(), 3);
+
+        // z_dir should be first (dirs before files)
+        assert_eq!(entries[0].name, "z_dir");
+        assert!(entries[0].is_dir);
+
+        // Files sorted alphabetically, case-insensitive
+        assert_eq!(entries[1].name, "a_file.rs");
+        assert!(!entries[1].is_dir);
+        assert_eq!(entries[2].name, "b_file.rs");
+        assert!(!entries[2].is_dir);
+
+        // Cleanup
+        for entry in &entries {
+            let p = dir.join(&entry.name);
+            if entry.is_dir {
+                let _ = std::fs::remove_dir(p);
+            } else {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+}

@@ -141,8 +141,9 @@ export default function AISettings({ visible, onClose }: Props) {
 
           {config.backend === "openrouter" && (
             <>
-              <label className="field-label">API Key</label>
+              <label className="field-label" htmlFor="ai-api-key">API Key</label>
               <input
+                id="ai-api-key"
                 className="field-input"
                 type="password"
                 value={config.apiKey}
