@@ -11,6 +11,7 @@ import AISettings from "./components/AISettings";
 import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import StatusBar from "./components/StatusBar";
 import ResizableHandle from "./components/ResizableHandle";
+import ShortcutsScreen from "./components/ShortcutsScreen";
 import nolockLogo from "./assets/nolocklogo-white.svg";
 
 // ---------------------------------------------------------------------------
@@ -534,13 +535,7 @@ export default function App() {
                     onSave={() => saveFile(currentFile.path)}
                   />
                 ) : (
-                  <div className="empty-state">
-                    <img src={nolockLogo} alt="nolock" className="empty-state-logo" />
-                    <span>nolock</span>
-                    <span style={{ fontSize: 12, marginTop: 4 }}>
-                      {rootPath ? "Open a file to start editing" : "File \u2192 Open Folder to get started"}
-                    </span>
-                  </div>
+                  <ShortcutsScreen />
                 )}
               </div>
             </div>

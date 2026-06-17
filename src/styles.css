@@ -1523,3 +1523,100 @@ html, body, #root {
   gap: 8px;
   justify-content: flex-end;
 }
+
+/* ===== Shortcuts screen (landing page) ===== */
+.shortcuts-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 48px 32px;
+  overflow-y: auto;
+  gap: 36px;
+}
+
+.shortcuts-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.shortcuts-logo {
+  width: 80px;
+  height: auto;
+  opacity: 0.25;
+  margin-bottom: 4px;
+}
+
+.shortcuts-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--text-primary);
+}
+
+.shortcuts-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 20px;
+  max-width: 720px;
+  width: 100%;
+}
+
+.shortcuts-group {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.shortcuts-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.shortcuts-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shortcuts-keys {
+  display: inline-block;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: nowrap;
+  letter-spacing: 0.3px;
+}
+
+.shortcuts-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+}
