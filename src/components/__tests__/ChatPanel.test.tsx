@@ -15,7 +15,12 @@ describe("ChatPanel", () => {
     localStorage.setItem("nolock.url", "http://localhost:11434");
     localStorage.setItem("nolock.chatModel", "qwen3:8b");
     // Make invoke succeed with a default response
-    mockInvoke.mockResolvedValue({ content: "Test response", tool_calls: [] });
+    mockInvoke.mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "get_model_info") {
+        return Promise.resolve({ context_length: 8192 });
+      }
+      return Promise.resolve({ content: "Test response", tool_calls: [] });
+    });
   });
 
   afterEach(() => {
@@ -25,7 +30,7 @@ describe("ChatPanel", () => {
   it("renders empty chat state", () => {
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
     expect(screen.getByText("Ask anything about your code...")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Ask the AI...")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Ask the AI/)).toBeInTheDocument();
     expect(screen.getByText("Send")).toBeInTheDocument();
   });
 
@@ -44,7 +49,7 @@ describe("ChatPanel", () => {
 
   it("allows typing in the input area", () => {
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
-    const input = screen.getByPlaceholderText("Ask the AI...") as HTMLTextAreaElement;
+    const input = screen.getByPlaceholderText(/Ask the AI/) as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "Hello AI" } });
     expect(input.value).toBe("Hello AI");
   });
@@ -53,7 +58,7 @@ describe("ChatPanel", () => {
     localStorage.removeItem("nolock.chatModel");
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText("Ask the AI...");
+    const input = screen.getByPlaceholderText(/Ask the AI/);
     fireEvent.change(input, { target: { value: "test" } });
     fireEvent.click(screen.getByText("Send"));
 
@@ -69,7 +74,7 @@ describe("ChatPanel", () => {
 
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText("Ask the AI...");
+    const input = screen.getByPlaceholderText(/Ask the AI/);
     fireEvent.change(input, { target: { value: "Hi there" } });
     fireEvent.click(screen.getByText("Send"));
 
@@ -87,7 +92,7 @@ describe("ChatPanel", () => {
 
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText("Ask the AI...");
+    const input = screen.getByPlaceholderText(/Ask the AI/);
     fireEvent.change(input, { target: { value: "test" } });
     fireEvent.click(screen.getByText("Send"));
 
@@ -122,7 +127,7 @@ describe("ChatPanel", () => {
 
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText("Ask the AI...");
+    const input = screen.getByPlaceholderText(/Ask the AI/);
     fireEvent.change(input, { target: { value: "test" } });
     fireEvent.click(screen.getByText("Send"));
 
@@ -134,7 +139,7 @@ describe("ChatPanel", () => {
 
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText("Ask the AI...");
+    const input = screen.getByPlaceholderText(/Ask the AI/);
     fireEvent.change(input, { target: { value: "test" } });
     fireEvent.click(screen.getByText("Send"));
 
@@ -146,7 +151,7 @@ describe("ChatPanel", () => {
 
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText("Ask the AI...");
+    const input = screen.getByPlaceholderText(/Ask the AI/);
     fireEvent.change(input, { target: { value: "Hello" } });
     fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
 
@@ -156,7 +161,7 @@ describe("ChatPanel", () => {
   it("does not send empty messages", () => {
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
 
-    const input = screen.getByPlaceholderText("Ask the AI...");
+    const input = screen.getByPlaceholderText(/Ask the AI/);
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.click(screen.getByText("Send"));
 

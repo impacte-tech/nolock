@@ -253,6 +253,17 @@ export default function App() {
   // --- Global keyboard shortcuts ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // ---- Defensive: always prevent Ctrl+S / Cmd+S from reaching ----
+      // the webview's native "Save Page" handler, which can cause the
+      // app to close in some Tauri v2 environments (notably Linux/GTK).
+      // Monaco's own keybinding handler (in Editor.tsx) is responsible
+      // for the actual save operation; this is a safety net to prevent
+      // the window from closing even if that listener doesn't fire.
+      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        return;
+      }
+
       const tag = (e.target as HTMLElement).tagName;
       const isInput = tag === "INPUT" || tag === "TEXTAREA";
 
@@ -519,7 +530,7 @@ export default function App() {
               onDrag={makeResizeHandler(setChatPts, 15, 55, mainAreaRef, "width", 100, true)}
               onDragEnd={() => setResizeEpoch((e) => e + 1)}
             />
-            <ChatPanel onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} style={{ flex: ratioFlex(chatPts) }} />
+            <ChatPanel onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} rootPath={rootPath} style={{ flex: ratioFlex(chatPts) }} />
           </>
         )}
       </div>

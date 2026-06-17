@@ -38,7 +38,28 @@
 
 ---
 
-## Recently Completed (last 3 commits)
+## Recently Completed
+
+- `(current)` — feat: @mention file references + context tracker in agent chat
+  - Created `FileAutocomplete.tsx` component with keyboard-navigable file dropdown
+  - Integrated auto-detection of `@` mentions in ChatPanel textarea
+  - File refs appear as chips above the input area with remove button
+  - File contents read at send-time and injected as context before user message
+  - **Display separation**: Chat shows `[ref: filename]` annotations; full context sent only to AI backend
+  - **Context tracker**: SVG circular progress indicator showing context usage % (tokens)
+  - **Clear all** button (`x`) in chips area to wipe all file refs
+  - **Slash commands**: `/clear` or `/clean` in the input clears all context
+  - Context indicator color: white (safe) → yellow (>70%) → red (>90%)
+  - Pass `rootPath` from App.tsx to ChatPanel
+  - CSS styles for autocomplete dropdown, items, chips, input wrapper, context indicator, and clear button
+  - Removed emoji usage from FileAutocomplete and display text
+  - Switched from character counting to token counting via `js-tiktoken` (cl100k_base)
+  - Created `src/lib/tokenizer.ts` utility module
+  - **Dynamic max tokens**: Added Rust `get_model_info` command that calls Ollama `/api/show` to fetch model context length (falls back to `model_info.<arch>.context_length`, then `num_ctx` from parameters, then 8192)
+  - ChatPanel fetches context length on mount; stored in `nolock.maxContextTokens` localStorage
+  - All 117 frontend tests + 17 Rust tests passing
+
+- `bdb81e5` — feat: resizing panels around Editor
 
 - `bdb81e5` — feat: resizing panels around Editor
   - Added `ResizableHandle` component

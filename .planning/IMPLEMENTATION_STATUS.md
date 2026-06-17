@@ -18,6 +18,9 @@
 | Native Browser Overlay | ✅ Complete | GtkOverlay+Fixed on Linux, JS fallback |
 | AI Fill-In-The-Middle | ✅ Complete | FITM inline completions with gate-based debounce |
 | AI Agent Chat | ✅ Complete | Multi-turn chat with tool-calling loop |
+| Chat: @mention File References | ✅ Complete | FileAutocomplete dropdown, file chips, auto-context injection |
+| Chat: Context Tracker & Cleanup | ✅ Complete | SVG circular progress indicator, token counting via `js-tiktoken`, clear-all button, `/clear` slash command |
+| Chat: Dynamic Max Tokens | ✅ Complete | Rust `get_model_info` command fetches context length from Ollama `/api/show`; falls back to model info, num_ctx, or default |
 | Tool System | ✅ Complete | web_fetch, read_file, list_directory |
 | Multi-Panel Layout | ✅ Complete | Flexbox proportional resizing |
 | Keyboard Shortcuts | ✅ Complete | Full chord system (Ctrl+A, C / I) |
@@ -30,8 +33,9 @@
 
 ## Key Metrics
 
-- **Total source files**: 12 TypeScript/TSX + 2 Rust + 1 CSS
+- **Total source files**: 13 TypeScript/TSX + 2 Rust + 1 CSS
 - **Frontend test files**: 10
 - **Frontend tests**: 117 (all passing)
 - **Rust test modules**: `main.rs` (unit tests) + `browser.rs` (unit tests)
-- **Latest build**: `bdb81e5` — "feat: resizing panels around Editor"
+- **Rust backend commands**: 11 (read_file, write_file, list_directory, get_model_info, ai_complete, ai_chat, pty_spawn, pty_write, pty_resize, pty_kill, browser)
+- **Latest build**: `(current)` — feat: dynamic max tokens from Ollama `/api/show`

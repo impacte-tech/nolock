@@ -220,10 +220,35 @@ export default function Editor({ filePath, content, onChange, onSave }: Props) {
       onChange(model.getValue());
     });
 
-    // Ctrl+S to save — read from ref to avoid stale closure
+    // Ctrl+S to save — read from ref to avoid stale closure.
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      onSaveRef.current();
+      try {
+        onSaveRef.current();
+      } catch (err) {
+        console.error("[Editor] Save handler threw synchronously:", err);
+      }
     });
+
+    // ---- Defensive: prevent native Ctrl+S in the webview -----------------
+    //
+    // PROBLEM: In some Tauri v2 environments (in particular Linux/GTK), the
+    // webview's native "Save Page" Ctrl+S handler can cause the app window
+    // to close when it intercepts the keystroke.  Monaco *should* call
+    // preventDefault() when it matches a keybinding, but this doesn't always
+    // work reliably in every webview configuration.
+    //
+    // SOLUTION: Register a capture‑phase keydown listener on the document
+    // that calls preventDefault() for Ctrl+S / Cmd+S before the event ever
+    // reaches the browser's default handling.  We do NOT stop propagation,
+    // so Monaco's own handler still fires normally.
+    //
+    const preventNativeSave = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+        // Intercept before any browser/webview native save handling
+        e.preventDefault();
+      }
+    };
+    document.addEventListener("keydown", preventNativeSave, true);
 
     editor.focus();
 
@@ -231,6 +256,7 @@ export default function Editor({ filePath, content, onChange, onSave }: Props) {
       provider.dispose();
       editor.dispose();
       model.dispose();
+      document.removeEventListener("keydown", preventNativeSave, true);
     };
   }, [filePath]);
 

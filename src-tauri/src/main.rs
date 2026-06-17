@@ -224,6 +224,98 @@ fn pty_kill(app: tauri::AppHandle, id: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Model info command — fetch context length from the backend
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelInfoRequest {
+    backend: String,
+    url: String,
+    model: String,
+}
+
+#[derive(serde::Serialize)]
+struct ModelInfoResult {
+    context_length: u32,
+}
+
+#[tauri::command]
+async fn get_model_info(req: ModelInfoRequest) -> Result<ModelInfoResult, String> {
+    match req.backend.as_str() {
+        "ollama" => {
+            let client = reqwest::Client::new();
+            let body = serde_json::json!({ "model": req.model });
+
+            eprintln!(
+                "[nolock] get_model_info POST {}/api/show model={}",
+                req.url, req.model
+            );
+            let resp = client
+                .post(format!("{}/api/show", req.url))
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(|e| format!("Failed to connect to Ollama: {}", e))?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(format!("Ollama /api/show returned status {}", status));
+            }
+
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            let data: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+
+            // 1. Try "parameters" string (user‑set num_ctx override)
+            if let Some(params) = data["parameters"].as_str() {
+                for line in params.lines() {
+                    let trimmed = line.trim();
+                    if let Some(num_str) = trimmed.strip_prefix("num_ctx ") {
+                        if let Ok(ctx) = num_str.trim().parse::<u32>() {
+                            eprintln!("[nolock] get_model_info: num_ctx={} (from parameters)", ctx);
+                            return Ok(ModelInfoResult { context_length: ctx });
+                        }
+                    }
+                }
+            }
+
+            // 2. Try model_info.<architecture>.context_length (native)
+            if let Some(model_info) = data["model_info"].as_object() {
+                if let Some(arch) = model_info
+                    .get("general.architecture")
+                    .and_then(|v| v.as_str())
+                {
+                    let key = format!("{}.context_length", arch);
+                    if let Some(ctx) = model_info.get(&key).and_then(|v| v.as_u64()) {
+                        eprintln!(
+                            "[nolock] get_model_info: native context_length={} (from {})",
+                            ctx, key
+                        );
+                        return Ok(ModelInfoResult {
+                            context_length: ctx as u32,
+                        });
+                    }
+                }
+            }
+
+            // 3. Fallback — common default for Ollama models
+            eprintln!(
+                "[nolock] get_model_info: could not determine context length, using default 8192"
+            );
+            Ok(ModelInfoResult { context_length: 8192 })
+        }
+        _ => {
+            // Non‑Ollama backends default to 128k (covers GPT‑4o, Claude 3.5, etc.)
+            Ok(ModelInfoResult {
+                context_length: 128_000,
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AI backend commands
 // ---------------------------------------------------------------------------
 
@@ -924,6 +1016,7 @@ pub fn run() {
             read_file,
             write_file,
             list_directory,
+            get_model_info,
             ai_complete,
             ai_chat,
             pty_spawn,
