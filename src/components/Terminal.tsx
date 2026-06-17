@@ -14,11 +14,13 @@ export interface TerminalInstance {
 interface TerminalViewProps {
   instance: TerminalInstance;
   rootPath: string;
+  lastCommandRef?: React.MutableRefObject<string>;
 }
 
-export default function TerminalView({ instance, rootPath }: TerminalViewProps) {
+export default function TerminalView({ instance, rootPath, lastCommandRef }: TerminalViewProps) {
   const termRef = useRef<HTMLDivElement>(null);
   const fitAddon = useRef<FitAddon | null>(null);
+  const lineBuffer = useRef<string>("");
 
   useEffect(() => {
     if (!termRef.current) return;
@@ -74,7 +76,43 @@ export default function TerminalView({ instance, rootPath }: TerminalViewProps) 
 
     // Terminal input -> PTY
     const dataDisposable = term.onData((data: string) => {
+      // Always forward keystroke to PTY first (fire-and-forget)
       invoke("pty_write", { id: instance.id, data }).catch(() => {});
+
+      // ---- Track commands for Terminal Memory feature -------------------
+      // Wrap in try-catch to prevent any tracking error from breaking
+      // xterm.js's internal onData pipeline and losing keystrokes.
+      try {
+        if (data === "\r") {
+          // Enter pressed — submit the buffered line as a command
+          const cmd = lineBuffer.current.trim();
+          if (cmd.length > 0) {
+            invoke("record_command", { command: cmd }).catch(() => {});
+            if (lastCommandRef) {
+              lastCommandRef.current = cmd;
+            }
+          }
+          lineBuffer.current = "";
+        } else if (data === "\x7f") {
+          // Backspace
+          lineBuffer.current = lineBuffer.current.slice(0, -1);
+        } else if (data === "\x15") {
+          // Ctrl+U — clear line
+          lineBuffer.current = "";
+        } else if (data === "\x03") {
+          // Ctrl+C — clear line (interrupt)
+          lineBuffer.current = "";
+        } else if (data === "\x04") {
+          // Ctrl+D — no effect on buffer, but don't add to it
+        } else if (data.length === 1 && data >= " ") {
+          // Printable character
+          lineBuffer.current += data;
+        }
+        // All other sequences (arrow keys, home, end, etc.) are ignored
+        // since they navigate history but don't change the current line
+      } catch (e) {
+        console.error("[Terminal Memory] tracking error:", e);
+      }
     });
 
     // Resize handler
@@ -112,9 +150,10 @@ interface PanelProps {
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   style?: React.CSSProperties;
+  lastCommandRef?: React.MutableRefObject<string>;
 }
 
-export function TerminalPanel({ instances, activeId, rootPath, onSelect, onClose, style }: PanelProps) {
+export function TerminalPanel({ instances, activeId, rootPath, onSelect, onClose, style, lastCommandRef }: PanelProps) {
   if (instances.length === 0) return null;
 
   return (
@@ -148,7 +187,7 @@ export function TerminalPanel({ instances, activeId, rootPath, onSelect, onClose
             key={inst.id}
             style={{ display: inst.id === activeId ? "block" : "none", width: "100%", height: "100%" }}
           >
-            <TerminalView instance={inst} rootPath={rootPath} />
+            <TerminalView instance={inst} rootPath={rootPath} lastCommandRef={lastCommandRef} />
           </div>
         ))}
       </div>

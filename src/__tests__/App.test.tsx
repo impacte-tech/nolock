@@ -66,16 +66,22 @@ describe("App", () => {
     expect(screen.queryByText("Agent Chat")).not.toBeInTheDocument();
   });
 
-  it("creates a terminal on Ctrl+T", () => {
+  it("creates a terminal on Ctrl+T, T chord", () => {
     render(<App />);
     // No terminal initially
     expect(screen.queryByText("Terminal 1")).not.toBeInTheDocument();
 
+    // Ctrl+T sets chord prefix
     fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+    expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
+
+    // Press T again to create terminal
+    fireEvent.keyDown(window, { key: "T", ctrlKey: false });
     expect(screen.getByText("Terminal 1")).toBeInTheDocument();
 
-    // Second Ctrl+T creates Terminal 2
+    // Ctrl+T, T again creates Terminal 2
     fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+    fireEvent.keyDown(window, { key: "T", ctrlKey: false });
     expect(screen.getByText("Terminal 2")).toBeInTheDocument();
   });
 
@@ -145,4 +151,33 @@ describe("App", () => {
     // AI Settings should not close on Escape
     // (Escape only closes AISettings when showAISettings is true)
   });
+
+  // ---- Terminal Memory tests --------------------------------------------
+
+  it("opens Terminal Memory overlay on Ctrl+T, M chord", () => {
+    render(<App />);
+    expect(screen.queryByText("Terminal Memory")).not.toBeInTheDocument();
+
+    // Ctrl+T sets chord prefix
+    fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+    expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
+
+    // Press M to open Terminal Memory
+    fireEvent.keyDown(window, { key: "M", ctrlKey: false });
+    expect(screen.getByText("Terminal Memory")).toBeInTheDocument();
+  });
+
+  it("closes Terminal Memory overlay on Escape", () => {
+    render(<App />);
+
+    // Open with Ctrl+T, M
+    fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+    fireEvent.keyDown(window, { key: "M", ctrlKey: false });
+    expect(screen.getByText("Terminal Memory")).toBeInTheDocument();
+
+    // Escape closes it
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByText("Terminal Memory")).not.toBeInTheDocument();
+  });
+
 });
