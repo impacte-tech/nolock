@@ -3,8 +3,6 @@
 // keyboard shortcuts grouped by category.
 // ---------------------------------------------------------------------------
 
-import nolockLogo from "../assets/nolocklogo-white.svg";
-
 interface ShortcutEntry {
   keys: string;
   description: string;
@@ -57,19 +55,6 @@ const GROUPS: ShortcutGroup[] = [
 export default function ShortcutsScreen() {
   return (
     <div className="shortcuts-screen">
-      <div className="shortcuts-header">
-        <img
-          src={nolockLogo}
-          alt="nolock"
-          className="shortcuts-logo"
-          draggable={false}
-        />
-        <h1 className="shortcuts-title">nolock</h1>
-        <p className="shortcuts-subtitle">
-          Open a file or folder to start&nbsp;working
-        </p>
-      </div>
-
       <div className="shortcuts-grid">
         {GROUPS.map((group) => (
           <div key={group.title} className="shortcuts-group">

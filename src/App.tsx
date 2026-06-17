@@ -467,11 +467,10 @@ export default function App() {
         </div>
       )}
 
-      <div className="titlebar" data-tauri-drag-region>
-        <img src={nolockLogo} alt="nolock" className="titlebar-logo" />
-      </div>
-
-      <MenuBar menus={menus} />
+      <MenuBar
+        menus={menus}
+        logo={<img src={nolockLogo} alt="nolock" className="menubar-logo-img" />}
+      />
 
       <div className="main-area" ref={mainAreaRef}>
         {hasExplorer && (

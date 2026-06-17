@@ -33,10 +33,10 @@ html, body, #root {
   height: 100vh;
 }
 
-/* ===== Titlebar ===== */
+/* ===== Titlebar / Menu Bar (merged) ===== */
 .chord-hint {
   position: fixed;
-  top: 74px;
+  top: 56px;
   left: 50%;
   transform: translateX(-50%);
   background: var(--accent);
@@ -55,42 +55,33 @@ html, body, #root {
   100% { opacity: 0; }
 }
 
-.titlebar {
-  height: 48px;
-  background: var(--bg-surface);
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  -webkit-app-region: drag;
-  border-bottom: 1px solid var(--border);
-  user-select: none;
-}
-
-.titlebar-logo {
-  height: 48px;
-  width: auto;
-}
-
-.titlebar-title {
-  font-weight: 600;
-  letter-spacing: 0.5px;
-}
-
-/* ===== Menu Bar ===== */
 .menubar {
   display: flex;
-  height: 26px;
+  align-items: center;
+  height: 48px;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border);
   user-select: none;
   font-size: 12px;
-  -webkit-app-region: no-drag;
+  -webkit-app-region: drag;
+}
+
+.menubar-logo {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 12px;
+  -webkit-app-region: drag;
+}
+
+.menubar-logo-img {
+  height: 40px;
+  width: auto;
 }
 
 .menu-item-wrapper {
   position: relative;
+  -webkit-app-region: no-drag;
 }
 
 .menu-label {
@@ -1531,35 +1522,8 @@ html, body, #root {
   align-items: center;
   justify-content: center;
   height: 100%;
-  padding: 48px 32px;
+  padding: 32px;
   overflow-y: auto;
-  gap: 36px;
-}
-
-.shortcuts-header {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.shortcuts-logo {
-  width: 80px;
-  height: auto;
-  opacity: 0.25;
-  margin-bottom: 4px;
-}
-
-.shortcuts-title {
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  color: var(--text-primary);
-}
-
-.shortcuts-subtitle {
-  font-size: 13px;
-  color: var(--text-muted);
 }
 
 .shortcuts-grid {

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
 
 interface MenuItem {
   label: string;
@@ -13,9 +13,11 @@ interface MenuGroup {
 
 interface Props {
   menus: MenuGroup[];
+  /** Optional element rendered on the left side of the menu bar (e.g. logo). */
+  logo?: ReactNode;
 }
 
-export default function MenuBar({ menus }: Props) {
+export default function MenuBar({ menus, logo }: Props) {
   const [openMenu, setOpenMenu] = useState<number | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
 
@@ -31,6 +33,7 @@ export default function MenuBar({ menus }: Props) {
 
   return (
     <div className="menubar" ref={barRef}>
+      {logo && <div className="menubar-logo">{logo}</div>}
       {menus.map((menu, i) => (
         <div key={menu.label} className="menu-item-wrapper">
           <div
