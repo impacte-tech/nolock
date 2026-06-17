@@ -5,6 +5,7 @@ use tauri::Manager;
 use tauri::Emitter;
 
 mod browser;
+mod terminal_memory;
 
 // ---------------------------------------------------------------------------
 // File system commands
@@ -1002,6 +1003,7 @@ pub fn run() {
             instances: Mutex::new(HashMap::new()),
         })
         .manage(browser::BrowserState::new())
+        .manage(terminal_memory::TermMemory::new())
         .setup(|app| {
             // Set the window icon so the taskbar/dock shows the nolock logo
             // instead of a generic gear icon (Linux) or default icon.
@@ -1026,6 +1028,10 @@ pub fn run() {
             browser::create_browser_webview,
             browser::close_browser_webview,
             browser::update_browser_webview,
+            terminal_memory::record_command,
+            terminal_memory::get_top_commands,
+            terminal_memory::get_command_categories,
+            terminal_memory::save_command_category,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nolock");

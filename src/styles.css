@@ -1313,3 +1313,213 @@ html, body, #root {
 .monaco-editor {
   --vscode-editorGhostText-foreground: #d4d4d4;
 }
+
+/* ===== Terminal Memory Overlay ===== */
+.term-memory-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 5000;
+}
+
+.term-memory-panel {
+  width: 520px;
+  max-height: 70vh;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.term-memory-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 8px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.term-memory-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.3px;
+}
+
+.term-memory-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.term-memory-section {
+  padding: 10px 18px;
+}
+
+.term-memory-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.term-memory-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+.term-memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.term-memory-cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  background: var(--bg-surface);
+}
+
+.term-memory-cmd-rank {
+  width: 18px;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.term-memory-cmd-text {
+  flex: 1;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-memory-cmd-count {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  flex-shrink: 0;
+}
+
+.term-memory-cmd-cat {
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-memory-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.term-memory-cat-tag {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  font-family: inherit;
+}
+
+.term-memory-cat-tag:hover {
+  background: var(--hover);
+  color: var(--text-primary);
+}
+
+.term-memory-cat-tag.selected {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border-color: var(--accent);
+}
+
+.term-memory-save-area {
+  padding: 10px 18px 14px 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.term-memory-save-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-memory-input {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 14px;
+  padding: 8px 10px;
+  outline: none;
+  font-family: inherit;
+}
+
+.term-memory-input:focus {
+  border-color: var(--accent);
+}
+
+.term-memory-autocomplete {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.term-memory-autocomplete-item {
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.term-memory-autocomplete-item:hover {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+.term-memory-error {
+  font-size: 11px;
+  color: #e06c75;
+}
+
+.term-memory-save-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

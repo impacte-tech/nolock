@@ -8,6 +8,7 @@ import ChatPanel from "./components/ChatPanel";
 import BrowserPanel from "./components/BrowserPanel";
 import MenuBar from "./components/MenuBar";
 import AISettings from "./components/AISettings";
+import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import StatusBar from "./components/StatusBar";
 import ResizableHandle from "./components/ResizableHandle";
 import nolockLogo from "./assets/nolocklogo-white.svg";
@@ -147,8 +148,14 @@ export default function App() {
   const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
-  // --- Chord state for Ctrl+Shift+A, I ---
-  const [chordPending, setChordPending] = useState(false);
+  // --- Chord state: null | 'A' | 'T'
+  // 'A' = waiting for second key after Ctrl+A (AI shortcuts)
+  // 'T' = waiting for second key after Ctrl+T (Terminal shortcuts)
+  const [chordPrefix, setChordPrefix] = useState<string | null>(null);
+
+  // --- Terminal Memory ---
+  const [showTermMemory, setShowTermMemory] = useState(false);
+  const lastCommandRef = useRef<string>("");
 
   // --- Open URL in browser panel (called from ChatPanel) ---
   const openInBrowser = useCallback((url: string) => {
@@ -253,12 +260,55 @@ export default function App() {
   // --- Global keyboard shortcuts ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // ---- Chord dispatch -------------------------------------------------
+      // If we're waiting for a second chord key, handle it first (regardless
+      // of modifier keys on the second press — that matches the existing
+      // Ctrl+A, C pattern where C is pressed without modifiers).
+      if (chordPrefix !== null) {
+        // Any keypress that isn't a valid second key cancels the chord
+        if (chordPrefix === "A") {
+          if (e.key === "c") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowChat((v) => !v);
+            return;
+          }
+          if (e.key === "i") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowAISettings(true);
+            return;
+          }
+        }
+
+        if (chordPrefix === "T") {
+          if (e.key === "t" || e.key === "T") {
+            e.preventDefault();
+            setChordPrefix(null);
+            createTerminal();
+            return;
+          }
+          if (e.key === "m" || e.key === "M") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowTermMemory(true);
+            return;
+          }
+        }
+
+        // Unrecognised second key — cancel the chord and let the event
+        // propagate normally (no preventDefault/stopPropagation).
+        setChordPrefix(null);
+        // Don't return; fall through so the key can still be handled by
+        // the regular shortcuts below (e.g. a stray 'o' after a cancelled
+        // chord should still trigger Ctrl+O).
+      }
+
+      // ---- Direct shortcuts (with Ctrl held) ------------------------------
+
       // ---- Defensive: always prevent Ctrl+S / Cmd+S from reaching ----
       // the webview's native "Save Page" handler, which can cause the
       // app to close in some Tauri v2 environments (notably Linux/GTK).
-      // Monaco's own keybinding handler (in Editor.tsx) is responsible
-      // for the actual save operation; this is a safety net to prevent
-      // the window from closing even if that listener doesn't fire.
       if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
         e.preventDefault();
         return;
@@ -281,10 +331,17 @@ export default function App() {
         return;
       }
 
-      // Ctrl+T — New Terminal
+      // Ctrl+T — Chord prefix for Terminal shortcuts.
+      // No longer creates a terminal immediately; press T again to do that.
       if (e.ctrlKey && !e.shiftKey && e.key === "t") {
         e.preventDefault();
-        createTerminal();
+        if (chordPrefix === "T") {
+          // Tapped twice quickly — cancel chord
+          setChordPrefix(null);
+        } else {
+          setChordPrefix("T");
+          setTimeout(() => setChordPrefix(null), 1500);
+        }
         return;
       }
 
@@ -302,54 +359,47 @@ export default function App() {
       // Ctrl+A — Chord prefix for AI shortcuts
       if (e.ctrlKey && !e.shiftKey && e.key === "a") {
         e.preventDefault();
-        if (chordPending) {
-          setChordPending(false);
+        if (chordPrefix === "A") {
+          // Tapped twice quickly — cancel chord
+          setChordPrefix(null);
         } else {
-          setChordPending(true);
-          setTimeout(() => {
-            setChordPending(false);
-          }, 1500);
+          setChordPrefix("A");
+          setTimeout(() => setChordPrefix(null), 1500);
         }
         return;
       }
 
-      if (chordPending && e.key === "c") {
-        e.preventDefault();
-        setChordPending(false);
-        setShowChat((v) => !v);
-        return;
-      }
-
-      if (chordPending && e.key === "i") {
-        e.preventDefault();
-        setChordPending(false);
-        setShowAISettings(true);
-        return;
-      }
-
+      // Ctrl+Shift+I — Direct AI Settings access
       if (e.ctrlKey && e.shiftKey && e.key === "I") {
         e.preventDefault();
         setShowAISettings(true);
         return;
       }
 
+      // Ctrl+E — Toggle Explorer
       if (e.ctrlKey && !e.shiftKey && e.key === "e") {
         e.preventDefault();
         setShowExplorer((v) => !v);
         return;
       }
 
+      // Escape — Close overlays
       if (e.key === "Escape") {
         if (showAISettings) setShowAISettings(false);
+        if (showTermMemory) {
+          setShowTermMemory(false);
+        }
         return;
       }
 
       if (isInput) return;
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [openFolder, refreshFolder, createTerminal, showAISettings, chordPending, browserUrl, closeBrowser]);
+    // Use capture phase so the handler fires BEFORE xterm.js and other
+    // element-level keydown listeners can intercept/consume the event.
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
+  }, [openFolder, refreshFolder, createTerminal, showAISettings, chordPrefix, browserUrl, closeBrowser, showTermMemory]);
 
   // --- Menu ---
   const menus = [
@@ -364,7 +414,8 @@ export default function App() {
     {
       label: "Terminal",
       items: [
-        { label: "New Terminal", action: createTerminal, shortcut: "Ctrl+T" },
+        { label: "New Terminal", action: createTerminal, shortcut: "Ctrl+T, T" },
+        { label: "Terminal Memory", action: () => setShowTermMemory(true), shortcut: "Ctrl+T, M" },
         ...terminals.map((t) => ({
           label: t.label,
           action: () => setActiveTermId(t.id),
@@ -405,9 +456,13 @@ export default function App() {
 
   return (
     <div className="app">
-      {chordPending && (
+      {chordPrefix && (
         <div className="chord-hint">
-          Waiting for second key... (press <strong>I</strong> for AI Settings)
+          {chordPrefix === "A" ? (
+            <>Waiting for second key... (press <strong>C</strong> for Chat, <strong>I</strong> for AI Settings)</>
+          ) : (
+            <>Waiting for second key... (press <strong>T</strong> for Terminal, <strong>M</strong> for Memory)</>
+          )}
         </div>
       )}
 
@@ -518,6 +573,7 @@ export default function App() {
                 onSelect={setActiveTermId}
                 onClose={closeTerminal}
                 style={{ flex: ratioFlex(terminalPts) }}
+                lastCommandRef={lastCommandRef}
               />
             </>
           )}
@@ -538,6 +594,13 @@ export default function App() {
       <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} />
 
       <AISettings visible={showAISettings} onClose={() => setShowAISettings(false)} />
+
+      {showTermMemory && (
+        <TerminalMemoryOverlay
+          lastCommand={lastCommandRef.current}
+          onDismiss={() => setShowTermMemory(false)}
+        />
+      )}
     </div>
   );
 }
