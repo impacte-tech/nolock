@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Marked } from "marked";
 import FileAutocomplete from "./FileAutocomplete";
 import { countTokens } from "../lib/tokenizer";
@@ -54,6 +55,9 @@ export function MarkdownContent({ text }: { text: string }) {
 export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
   const [expanded, setExpanded] = useState(false);
 
+  // Check if any call is web_search to show attribution
+  const hasWebSearch = calls.some((c) => c.name === "web_search");
+
   return (
     <div className="tool-calls">
       <div className="tool-calls-header" onClick={() => setExpanded(!expanded)}>
@@ -78,6 +82,18 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
           ))}
         </div>
       )}
+      {hasWebSearch && (
+        <div className="tool-attribution">
+          <a
+            href="https://duckduckgo.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            Results from DuckDuckGo
+          </a>
+        </div>
+      )}
     </div>
   );
 }
@@ -93,6 +109,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const sendingRef = useRef(false); // guards against concurrent sendMessage calls
 
   // ---- File @mention state ----
   const [fileRefs, setFileRefs] = useState<FileRef[]>([]);
@@ -248,13 +265,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
 
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || loading || sendingRef.current) return;
+    sendingRef.current = true;
 
     // ---- /clear command ----
     if (trimmed === "/clear" || trimmed === "/clean") {
       setInput("");
       clearAllRefs();
       setMessages((prev) => [...prev, { role: "assistant", content: "_Context cleared._ All file references have been removed." }]);
+      sendingRef.current = false;
       return;
     }
 
@@ -288,8 +307,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
 
     // Accumulate context tokens for the persistent indicator
     const sentTokens = refsWithSize.reduce((sum: number, r: FileRef) => sum + (r._tokenCount || 0), 0);
-    if (sentTokens > 0) {
-      setAccumulatedContextTokens((prev) => prev + sentTokens);
+    const msgTokens = countTokens(apiContent);
+    if (sentTokens > 0 || msgTokens > 0) {
+      setAccumulatedContextTokens((prev) => prev + sentTokens + msgTokens);
     }
 
     const userMsg: Message = { role: "user", content: apiContent, displayContent: displayText };
@@ -299,6 +319,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
     setFileRefs([]); // Clear pending file refs after sending
     setLoading(true);
 
+    let unlisten: (() => void) | null = null;
     try {
       const backend = localStorage.getItem("nolock.backend") || "ollama";
       const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
@@ -310,6 +331,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
           ...prev,
           { role: "assistant", content: "No chat model configured. Open AI Integrations settings to set one." },
         ]);
+        sendingRef.current = false;
         setLoading(false);
         return;
       }
@@ -317,6 +339,21 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
       // Read enabled tools from localStorage
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
+
+      // ---- Set up streaming event listener ----
+      unlisten = await listen<{ token: string }>("stream-token", (event) => {
+        setMessages((prev) => {
+          const msgs = [...prev];
+          const last = msgs[msgs.length - 1];
+          if (last && last.role === "assistant") {
+            msgs[msgs.length - 1] = { ...last, content: last.content + event.payload.token };
+          }
+          return msgs;
+        });
+      });
+
+      // Add a placeholder assistant message that streaming tokens will fill
+      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
       const result: { content: string; tool_calls: ToolCallLog[] } = await invoke("ai_chat", {
         req: {
@@ -329,21 +366,45 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
         },
       });
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: result.content || "(no response)",
-          toolCalls: result.tool_calls?.length > 0 ? result.tool_calls : undefined,
-        },
-      ]);
+      // Accumulate assistant response tokens
+      const responseText = result.content || "";
+      if (responseText) {
+        const respTokens = countTokens(responseText);
+        if (respTokens > 0) {
+          setAccumulatedContextTokens((prev) => prev + respTokens);
+        }
+      }
+
+      // Finalise the assistant message with the complete result
+      setMessages((prev) => {
+        const msgs = [...prev];
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant") {
+          msgs[msgs.length - 1] = {
+            ...last,
+            content: responseText || "(no response)",
+            toolCalls: result.tool_calls?.length > 0 ? result.tool_calls : undefined,
+          };
+        }
+        return msgs;
+      });
     } catch (e: any) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `Error: ${e}` },
-      ]);
+      // On error, replace the empty placeholder with the error message
+      setMessages((prev) => {
+        const msgs = [...prev];
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant" && last.content === "") {
+          msgs[msgs.length - 1] = { role: "assistant", content: `Error: ${e}` };
+        } else {
+          msgs.push({ role: "assistant", content: `Error: ${e}` });
+        }
+        return msgs;
+      });
+    } finally {
+      if (unlisten) unlisten();
+      sendingRef.current = false;
+      setLoading(false);
     }
-    setLoading(false);
   }, [input, loading, messages, fileRefs, clearAllRefs]);
 
   return (
@@ -365,18 +426,25 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
               <ToolCallBlock calls={m.toolCalls} />
             )}
             {m.role === "assistant" ? (
-              <MarkdownContent text={m.content} />
+              <div className="assistant-content">
+                {m.content ? (
+                  <>
+                    <MarkdownContent text={m.content} />
+                    {i === messages.length - 1 && loading && (
+                      <span className="streaming-cursor" />
+                    )}
+                  </>
+                ) : loading && i === messages.length - 1 ? (
+                  <span className="loading-dots" aria-label="Thinking">
+                    <span>.</span><span>.</span><span>.</span>
+                  </span>
+                ) : null}
+              </div>
             ) : (
               <div className="chat-plain">{m.displayContent || m.content}</div>
             )}
           </div>
         ))}
-        {loading && (
-          <div className="chat-msg assistant">
-            <div className="role">assistant</div>
-            <div style={{ color: "var(--text-muted)" }}>thinking...</div>
-          </div>
-        )}
         <div ref={messagesEndRef} />
       </div>
       <div className="chat-input-area">
@@ -411,8 +479,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
             </div>
           </div>
         )}
-        {/* Persistent context indicator — shown when accumulated context exists but no pending file refs */}
-        {fileRefs.length === 0 && accumulatedContextTokens > 0 && (
+        {/* Persistent context indicator — shown when there are messages or accumulated context */}
+        {fileRefs.length === 0 && (accumulatedContextTokens > 0 || messages.length > 0) && (
           <div className="context-persistent-bar">
             <div className="context-bar-actions">
               {(() => {

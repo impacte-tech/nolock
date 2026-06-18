@@ -22,7 +22,8 @@ const BACKENDS = [
 ];
 
 const AVAILABLE_TOOLS = [
-  { id: "web_fetch", label: "Web Fetch", description: "Fetch and read web page content" },
+  { id: "web_search", label: "Web Search", description: "Search the internet (DuckDuckGo) to discover relevant URLs" },
+  { id: "web_fetch", label: "Web Fetch", description: "Fetch and read web page content from a specific URL" },
   { id: "read_file", label: "Read File", description: "Read file contents from disk" },
   { id: "list_directory", label: "List Directory", description: "Explore project structure" },
 ];

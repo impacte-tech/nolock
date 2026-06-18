@@ -626,6 +626,58 @@ html, body, #root {
   margin-bottom: 2px;
 }
 
+/* Inline assistant content wrapper — holds the markdown + streaming cursor */
+.assistant-content {
+  display: inline;
+}
+
+/* Blinking cursor shown while tokens are streaming in */
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent);
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  animation: blink-cursor 0.8s step-end infinite;
+}
+
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* 3-dot loading animation — shown before the first streaming token arrives */
+.loading-dots {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+
+.loading-dots span {
+  display: inline-block;
+  animation: dot-bounce 1.4s ease-in-out infinite both;
+}
+
+.loading-dots span:nth-child(1) { animation-delay: 0s; }
+.loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+.loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes dot-bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.3;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
 /* ===== Chat markdown rendering ===== */
 .chat-markdown {
   font-size: 13px;
