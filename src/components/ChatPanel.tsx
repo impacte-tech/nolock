@@ -340,6 +340,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
 
+      // Read per-tool configuration from localStorage
+      const toolConfigRaw = localStorage.getItem("nolock.toolConfig") || "{}";
+      const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
+
       // ---- Set up streaming event listener ----
       unlisten = await listen<{ token: string }>("stream-token", (event) => {
         setMessages((prev) => {
@@ -363,6 +367,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
           messages: allMessages.map((m) => ({ role: m.role, content: m.content })),
           apiKey: apiKey || null,
           toolsEnabled,
+          toolConfigs,
         },
       });
 

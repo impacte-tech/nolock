@@ -348,6 +348,10 @@ struct ChatRequest {
     api_key: Option<String>,
     #[serde(default)]
     tools_enabled: Vec<String>,
+    /// Per-tool configuration (e.g. web_search provider + api_key).
+    /// Stored in localStorage on the frontend as `nolock.toolConfig`.
+    #[serde(default)]
+    tool_configs: HashMap<String, serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
@@ -458,6 +462,7 @@ async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
     client: &reqwest::Client,
+    tool_configs: &HashMap<String, serde_json::Value>,
 ) -> Result<String, String> {
     match name {
         "web_fetch" => {
@@ -523,89 +528,161 @@ async fn execute_tool(
                 .ok_or("Missing required parameter: query")?;
             eprintln!("[nolock] tool web_search query={}", query);
 
-            // Use DuckDuckGo's Instant Answer API (free, no API key, privacy-respecting)
-            let resp = client
-                .get("https://api.duckduckgo.com/")
-                .query(&[
-                    ("q", query),
-                    ("format", "json"),
-                    ("no_html", "1"),
-                    ("skip_disambig", "1"),
-                    ("t", "nolock"),
-                ])
-                .timeout(std::time::Duration::from_secs(10))
-                .header("User-Agent", "nolock/0.1")
-                .send()
-                .await
-                .map_err(|e| format!("Failed to search: {}", e))?;
-            let status = resp.status();
-            if !status.is_success() {
-                return Ok(format!("Search API error: HTTP {}", status));
-            }
-            let text = resp.text().await.map_err(|e| e.to_string())?;
+            // Determine provider from tool_configs (default: DuckDuckGo)
+            let provider = tool_configs
+                .get("web_search")
+                .and_then(|c| c["provider"].as_str())
+                .unwrap_or("duckduckgo");
 
-            // Parse the JSON response
-            let data: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+            match provider {
+                "brave" => {
+                    // Brave Search API — requires a free API key
+                    let api_key = tool_configs
+                        .get("web_search")
+                        .and_then(|c| c["api_key"].as_str())
+                        .unwrap_or("");
 
-            let mut results: Vec<String> = Vec::new();
-
-            // Extract AbstractText if available (instant answer summary)
-            if let Some(abstract_text) = data["AbstractText"].as_str() {
-                if !abstract_text.is_empty() {
-                    if let Some(abstract_url) = data["AbstractURL"].as_str() {
-                        if !abstract_url.is_empty() {
-                            results.push(format!("[Summary] {} - {}", abstract_text, abstract_url));
-                        }
-                    } else {
-                        results.push(format!("[Summary] {}", abstract_text));
+                    if api_key.is_empty() {
+                        return Ok("Brave Search requires an API key. Get one free at https://brave.com/search/api/ and configure it in AI Integrations settings.".to_string());
                     }
-                }
-            }
 
-            // Extract RelatedTopics (the actual search results)
-            if let Some(topics) = data["RelatedTopics"].as_array() {
-                fn extract_topics(
-                    topics: &[serde_json::Value],
-                    out: &mut Vec<String>,
-                    depth: usize,
-                ) {
-                    if depth > 3 {
-                        return;
+                    let resp = client
+                        .get("https://api.search.brave.com/res/v1/web/search")
+                        .query(&[("q", query), ("count", "10")])
+                        .timeout(std::time::Duration::from_secs(10))
+                        .header("Accept", "application/json")
+                        // NOTE: Do NOT set Accept-Encoding manually — reqwest's default
+                        // gzip feature handles decompression automatically. Setting it
+                        // explicitly would override auto-decompression and produce raw
+                        // gzip bytes, causing JSON parse errors.
+                        .header("X-Subscription-Token", api_key)
+                        .send()
+                        .await
+                        .map_err(|e| format!("Brave Search request failed: {}", e))?;
+
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Ok(format!("Brave Search API error (HTTP {}): {}", status, body));
                     }
-                    for topic in topics {
-                        if let Some(text) = topic["Text"].as_str() {
-                            // Direct result
-                            let url = topic["FirstURL"]
-                                .as_str()
-                                .unwrap_or("(no URL)")
-                                .to_string();
-                            // Text format is "Title - Snippet"
-                            out.push(format!("{} - {}", text, url));
-                        }
-                        if let Some(sub_topics) = topic["Topics"].as_array() {
-                            // Category grouping — recurse
-                            extract_topics(sub_topics, out, depth + 1);
+
+                    let text = resp.text().await.map_err(|e| e.to_string())?;
+                    let data: serde_json::Value =
+                        serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+
+                    let mut results: Vec<String> = Vec::new();
+
+                    // Extract web results
+                    if let Some(web_results) = data["web"]["results"].as_array() {
+                        for result in web_results {
+                            let title = result["title"].as_str().unwrap_or("(no title)");
+                            let url = result["url"].as_str().unwrap_or("(no URL)");
+                            let desc = result["description"].as_str().unwrap_or("");
+                            if !desc.is_empty() {
+                                results.push(format!("{} - {} - {}", title, desc, url));
+                            } else {
+                                results.push(format!("{} - {}", title, url));
+                            }
                         }
                     }
-                }
-                extract_topics(topics, &mut results, 0);
-            }
 
-            if results.is_empty() {
-                return Ok("No search results found.".to_string());
-            }
+                    if results.is_empty() {
+                        return Ok("Brave Search returned no results.".to_string());
+                    }
 
-            // Format results, limiting total length
-            let mut output = String::new();
-            for (i, r) in results.iter().enumerate() {
-                if output.len() > 8000 {
-                    output.push_str(&format!("\n... and {} more results", results.len() - i));
-                    break;
+                    let mut output = String::new();
+                    for (i, r) in results.iter().enumerate() {
+                        if output.len() > 8000 {
+                            output.push_str(&format!("\n... and {} more results", results.len() - i));
+                            break;
+                        }
+                        output.push_str(&format!("{}. {}\n", i + 1, r));
+                    }
+                    Ok(format!("{}\n\n[Search powered by Brave Search]", output.trim()))
                 }
-                output.push_str(&format!("{}. {}\n", i + 1, r));
+                _ => {
+                    // Default: DuckDuckGo Instant Answer API (free, no API key, privacy-respecting)
+                    // NOTE: This API is limited — it returns curated instant answers (Wikipedia
+                    // summaries, categories), NOT full web search results. For specific/technical
+                    // queries it often returns nothing. Use Brave Search for better results.
+                    let resp = client
+                        .get("https://api.duckduckgo.com/")
+                        .query(&[
+                            ("q", query),
+                            ("format", "json"),
+                            ("no_html", "1"),
+                            ("skip_disambig", "1"),
+                            ("t", "nolock"),
+                        ])
+                        .timeout(std::time::Duration::from_secs(10))
+                        .header("User-Agent", "nolock/0.1")
+                        .send()
+                        .await
+                        .map_err(|e| format!("Failed to search: {}", e))?;
+
+                    let status = resp.status();
+                    if !status.is_success() {
+                        return Ok(format!("DuckDuckGo search error: HTTP {}", status));
+                    }
+
+                    let text = resp.text().await.map_err(|e| e.to_string())?;
+                    let data: serde_json::Value =
+                        serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+
+                    let mut results: Vec<String> = Vec::new();
+
+                    // Extract AbstractText (instant answer summary)
+                    if let Some(abstract_text) = data["AbstractText"].as_str() {
+                        if !abstract_text.is_empty() {
+                            if let Some(abstract_url) = data["AbstractURL"].as_str() {
+                                if !abstract_url.is_empty() {
+                                    results.push(format!("[Summary] {} - {}", abstract_text, abstract_url));
+                                }
+                            } else {
+                                results.push(format!("[Summary] {}", abstract_text));
+                            }
+                        }
+                    }
+
+                    // Extract RelatedTopics (related links and categories)
+                    if let Some(topics) = data["RelatedTopics"].as_array() {
+                        fn extract_topics(
+                            topics: &[serde_json::Value],
+                            out: &mut Vec<String>,
+                            depth: usize,
+                        ) {
+                            if depth > 3 { return; }
+                            for topic in topics {
+                                if let Some(text) = topic["Text"].as_str() {
+                                    let url = topic["FirstURL"]
+                                        .as_str()
+                                        .unwrap_or("(no URL)")
+                                        .to_string();
+                                    out.push(format!("{} - {}", text, url));
+                                }
+                                if let Some(sub_topics) = topic["Topics"].as_array() {
+                                    extract_topics(sub_topics, out, depth + 1);
+                                }
+                            }
+                        }
+                        extract_topics(topics, &mut results, 0);
+                    }
+
+                    if results.is_empty() {
+                        return Ok("DuckDuckGo Instant Answer API returned no results. This API is experimental and limited — try enabling Brave Search in AI Integrations settings for real web search results.".to_string());
+                    }
+
+                    let mut output = String::new();
+                    for (i, r) in results.iter().enumerate() {
+                        if output.len() > 8000 {
+                            output.push_str(&format!("\n... and {} more results", results.len() - i));
+                            break;
+                        }
+                        output.push_str(&format!("{}. {}\n", i + 1, r));
+                    }
+                    Ok(format!("{}\n\n[Results from DuckDuckGo]", output.trim()))
+                }
             }
-            Ok(output.trim().to_string())
         }
         _ => Err(format!("Unknown tool: {}", name)),
     }
@@ -623,6 +700,7 @@ async fn ollama_chat_with_tools(
     messages: &[ChatMessage],
     tools: &[serde_json::Value],
     max_iterations: usize,
+    tool_configs: &HashMap<String, serde_json::Value>,
 ) -> Result<ChatResult, String> {
     // Build initial messages array — inject system prompt about tools
     let mut ollama_msgs: Vec<serde_json::Value> = Vec::new();
@@ -759,7 +837,7 @@ async fn ollama_chat_with_tools(
                 let name = call["function"]["name"].as_str().unwrap_or("unknown");
                 let args = &call["function"]["arguments"];
 
-                let result = execute_tool(name, args, client)
+                let result = execute_tool(name, args, client, tool_configs)
                     .await
                     .unwrap_or_else(|e| format!("Tool error: {}", e));
 
@@ -1005,7 +1083,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     match req.backend.as_str() {
         "ollama" => {
             if has_tools {
-                ollama_chat_with_tools(&app_handle, &client, &req.url, &req.model, &req.messages, &tools, 10)
+                ollama_chat_with_tools(&app_handle, &client, &req.url, &req.model, &req.messages, &tools, 10, &req.tool_configs)
                     .await
             } else {
                 // No tools — simple single-turn chat (streaming)
@@ -1485,7 +1563,7 @@ mod tests {
     async fn test_execute_tool_unknown_name() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("unknown_tool", &args, &client).await;
+        let result = execute_tool("unknown_tool", &args, &client, &HashMap::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown tool"));
     }
@@ -1494,7 +1572,7 @@ mod tests {
     async fn test_execute_tool_web_fetch_missing_url() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("web_fetch", &args, &client).await;
+        let result = execute_tool("web_fetch", &args, &client, &HashMap::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
@@ -1503,7 +1581,7 @@ mod tests {
     async fn test_execute_tool_read_file_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_file_xyzzy_123.test" });
-        let result = execute_tool("read_file", &args, &client).await;
+        let result = execute_tool("read_file", &args, &client, &HashMap::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read"));
     }
@@ -1512,7 +1590,7 @@ mod tests {
     async fn test_execute_tool_list_directory_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_dir_xyzzy_123" });
-        let result = execute_tool("list_directory", &args, &client).await;
+        let result = execute_tool("list_directory", &args, &client, &HashMap::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read dir"));
     }

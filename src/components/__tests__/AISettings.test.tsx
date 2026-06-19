@@ -131,7 +131,7 @@ describe("AISettings", () => {
 
   it("renders tool descriptions for each available tool", () => {
     render(<AISettings visible={true} onClose={vi.fn()} />);
-    expect(screen.getByText("Search the internet (DuckDuckGo) to discover relevant URLs")).toBeInTheDocument();
+    expect(screen.getByText("Search the internet to discover relevant URLs before fetching them")).toBeInTheDocument();
     expect(screen.getByText("Fetch and read web page content from a specific URL")).toBeInTheDocument();
     expect(screen.getByText("Read file contents from disk")).toBeInTheDocument();
     expect(screen.getByText("Explore project structure")).toBeInTheDocument();
