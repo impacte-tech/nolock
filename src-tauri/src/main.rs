@@ -52,6 +52,53 @@ fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
     Ok(entries)
 }
 
+#[tauri::command]
+fn rename_file(path: String, new_name: String) -> Result<(), String> {
+    let parent = std::path::Path::new(&path)
+        .parent()
+        .ok_or_else(|| "Cannot determine parent directory".to_string())?;
+    let new_path = parent.join(&new_name);
+    std::fs::rename(&path, &new_path)
+        .map_err(|e| format!("Failed to rename {} to {}: {}", path, new_name, e))
+}
+
+#[tauri::command]
+fn delete_file(path: String) -> Result<(), String> {
+    let meta = std::fs::metadata(&path)
+        .map_err(|e| format!("Failed to access {}: {}", path, e))?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&path)
+            .map_err(|e| format!("Failed to delete directory {}: {}", path, e))
+    } else {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete file {}: {}", path, e))
+    }
+}
+
+#[tauri::command]
+fn copy_file(source: String, destination: String) -> Result<(), String> {
+    let dest_path = std::path::Path::new(&destination);
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create destination directory: {}", e))?;
+    }
+    // Use copy_options to avoid following symlinks and preserve permissions
+    std::fs::copy(&source, &destination)
+        .map_err(|e| format!("Failed to copy {} to {}: {}", source, destination, e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn create_file(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+    }
+    std::fs::write(&path, "")
+        .map_err(|e| format!("Failed to create file {}: {}", path, e))
+}
+
 #[derive(serde::Serialize)]
 struct DirEntry {
     name: String,
@@ -1429,6 +1476,10 @@ pub fn run() {
             read_file,
             write_file,
             list_directory,
+            rename_file,
+            delete_file,
+            copy_file,
+            create_file,
             get_model_info,
             ai_complete,
             ai_chat,

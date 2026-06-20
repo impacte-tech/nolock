@@ -291,6 +291,52 @@ html, body, #root {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* ===== Inline rename / new-file input in tree ===== */
+.tree-rename-input {
+  background: var(--bg-surface);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  margin-left: 2px;
+  outline: none;
+  padding: 1px 4px;
+  width: 140px;
+}
+
+/* ===== Right-click context menu in file explorer ===== */
+.ctx-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  min-width: 130px;
+  padding: 4px 0;
+}
+
+.ctx-menu-item {
+  padding: 5px 16px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+
+.ctx-menu-item:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ctx-menu-separator {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--border);
+}
+
 .chevron {
   display: inline-block;
   width: 16px;
