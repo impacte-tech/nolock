@@ -180,6 +180,28 @@ After installation, configure your preferred AI backend:
    - **OpenCode Zen** — Runs locally at `http://localhost:11435`
 3. Enter your model names and save.
 
+### Recommended Ollama Models
+
+For the best experience with nolock, here are the recommended Ollama models for each AI feature:
+
+| Feature | Recommended Model | Size | Notes |
+|---|---|---|---|
+| **Code Completions (FITM)** | `qwen2.5-coder:0.5b` | 0.5B params | Fast, lightweight fill-in-the-middle completions. Runs on CPU or low-end GPU. |
+| **Agent Chat (Tool Calling)** | `qwen3:0.6b` | 0.6B params | Smallest model with reliable tool-calling capabilities. Good for basic web search, file read, and directory listing tasks. |
+
+**Installation:**
+
+```bash
+ollama pull qwen2.5-coder:0.5b
+ollama pull qwen3:0.6b
+```
+
+Then in nolock's AI Settings (`Ctrl+A, I`):
+- Set **Completion Model** to `qwen2.5-coder:0.5b`
+- Set **Chat Model** to `qwen3:0.6b`
+
+> **Note:** For agent chat with tool calling, the model must support the `tools` parameter in Ollama's `/api/chat` endpoint. The `qwen3:0.6b` model is the smallest tested model that supports this. Larger models (e.g., `qwen3.5-4b`) will provide better results at the cost of higher resource usage.
+
 ### Keyboard Shortcuts
 
 | Shortcut | Action |

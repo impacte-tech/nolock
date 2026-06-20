@@ -190,6 +190,23 @@ export default function Editor({ filePath, content, onChange, onSave }: Props) {
   useEffect(() => {
     if (!containerRef.current) return;
 
+    // Disable all TypeScript/JavaScript diagnostics — Monaco ships with full
+    // semantic validation, syntax validation, and suggestion diagnostics (e.g.
+    // unreachable code detection) enabled by default, which surfaces lint-style
+    // errors for any untyped JS/TS code. nolock intentionally omits this layer
+    // so that developers can add their own linting setup (ESLint, TypeScript
+    // strict mode, etc.) without interference from the editor's built-in checker.
+    monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+      noSemanticValidation: true,
+      noSyntaxValidation: true,
+      noSuggestionDiagnostics: true,
+    });
+    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+      noSemanticValidation: true,
+      noSyntaxValidation: true,
+      noSuggestionDiagnostics: true,
+    });
+
     const model = monaco.editor.createModel(content, getLanguage(filePath));
     const editor = monaco.editor.create(containerRef.current, {
       model,

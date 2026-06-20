@@ -110,6 +110,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false); // guards against concurrent sendMessage calls
+  const stopRequestedRef = useRef(false); // set to true when user clicks stop
+  const unlistenRef = useRef<(() => void) | null>(null); // stored stream-token unlisten callback
 
   // ---- File @mention state ----
   const [fileRefs, setFileRefs] = useState<FileRef[]>([]);
@@ -263,6 +265,17 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
     setAccumulatedContextTokens(0);
   }, []);
 
+  /** Stop an in-progress generation — clean up the event listener and reset UI state. */
+  const stopGeneration = useCallback(() => {
+    stopRequestedRef.current = true;
+    if (unlistenRef.current) {
+      unlistenRef.current();
+      unlistenRef.current = null;
+    }
+    sendingRef.current = false;
+    setLoading(false);
+  }, []);
+
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
     if (!trimmed || loading || sendingRef.current) return;
@@ -346,6 +359,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
 
       // ---- Set up streaming event listener ----
       unlisten = await listen<{ token: string }>("stream-token", (event) => {
+        // If the user clicked Stop, ignore all subsequent tokens
+        if (stopRequestedRef.current) return;
         setMessages((prev) => {
           const msgs = [...prev];
           const last = msgs[msgs.length - 1];
@@ -355,6 +370,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
           return msgs;
         });
       });
+      unlistenRef.current = unlisten;
 
       // Add a placeholder assistant message that streaming tokens will fill
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
@@ -370,6 +386,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
           toolConfigs,
         },
       });
+
+      // If the user clicked Stop while waiting for the full response, discard the result
+      if (stopRequestedRef.current) {
+        // unlisten is already cleaned up by stopGeneration; just skip processing
+        return;
+      }
 
       // Accumulate assistant response tokens
       const responseText = result.content || "";
@@ -464,6 +486,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
               ))}
             </div>
             <div className="file-ref-chips-actions">
+              {loading && (
+                <button className="stop-generation-btn" onClick={stopGeneration} title="Stop generation">
+                  &#x25A0;
+                </button>
+              )}
               {(() => {
                 const total = contextSize;
                 const circumference = 2 * Math.PI * 8;
@@ -488,6 +515,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
         {fileRefs.length === 0 && (accumulatedContextTokens > 0 || messages.length > 0) && (
           <div className="context-persistent-bar">
             <div className="context-bar-actions">
+              {/* Stop button — only visible while the model is generating */}
+              {loading && (
+                <button className="stop-generation-btn" onClick={stopGeneration} title="Stop generation">
+                  &#x25A0;
+                </button>
+              )}
               {(() => {
                 const circumference = 2 * Math.PI * 8;
                 const progress = Math.min(accumulatedContextTokens / maxTokens, 1);

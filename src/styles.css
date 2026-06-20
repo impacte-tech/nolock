@@ -1033,6 +1033,25 @@ html, body, #root {
   font-variant-numeric: tabular-nums;
 }
 
+/* ===== Stop generation button ===== */
+.stop-generation-btn {
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 7px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.stop-generation-btn:hover {
+  color: #fff;
+  border-color: #e06c75;
+  background: #e06c7520;
+}
+
 /* ===== Clear context button ===== */
 .clear-context-btn {
   background: none;
