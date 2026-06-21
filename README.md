@@ -85,7 +85,9 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 
 nolock would not exist without the following open-source projects and communities:
 
-- **[OpenCode Zen](https://opencode.ai)** — For providing an open AI coding backend and inspiring the vision of local-first AI development tools.
+- **[OpenCode Zen](https://opencode.ai)** — For providing an open AI coding backend and inspiring the vision of local-first AI development tools. This project was built primarily using the **Big Pickle** model (`opencode/big-pickle`) — a generous, free-tier AI provider that made autonomous development workflows possible without any API costs.
+
+  > **Cost Tracker:** This project has incurred **$0.00 USD** in AI API costs to date. All development was powered entirely by OpenCode Zen's free Big Pickle model.
 - **[OpenRouter](https://openrouter.ai)** — For building a unified API that makes dozens of AI models accessible from a single endpoint.
 - **[Ollama](https://ollama.com)** — For making local LLM deployment as simple as a single command, enabling private and offline AI-powered development.
 - **[llama.cpp](https://github.com/ggerganov/llama.cpp)** — For the incredible engineering achievement of running state-of-the-art LLMs efficiently on consumer hardware.
