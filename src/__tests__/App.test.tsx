@@ -27,18 +27,19 @@ describe("App", () => {
 
   it("renders the titlebar and empty state", () => {
     render(<App />);
-    // "nolock" appears in both the titlebar and the empty state
-    expect(screen.getAllByText("nolock").length).toBeGreaterThanOrEqual(1);
-    // Empty state
-    expect(screen.getByText("File → Open Folder to get started")).toBeInTheDocument();
+    // The nolock logo uses alt text
+    expect(screen.getByAltText("nolock")).toBeInTheDocument();
+    // App renders the keyboard shortcuts screen when no folder is open
+    expect(screen.getByText("General")).toBeInTheDocument();
+    expect(screen.getByText("Open folder")).toBeInTheDocument();
   });
 
   it("renders the menu bar", () => {
     render(<App />);
     expect(screen.getByText("File Explorer")).toBeInTheDocument();
-    expect(screen.getByText("Terminal")).toBeInTheDocument();
-    expect(screen.getByText("Browser")).toBeInTheDocument();
-    expect(screen.getByText("AI Integrations")).toBeInTheDocument();
+    expect(screen.getAllByText("Terminal").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Browser").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("AI Integrations").length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders the status bar", () => {

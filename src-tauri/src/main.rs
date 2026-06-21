@@ -107,6 +107,39 @@ struct DirEntry {
 }
 
 // ---------------------------------------------------------------------------
+// OS Keychain commands — store secrets via the native OS keyring
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn store_secret(service: String, key: String, value: String) -> Result<(), String> {
+    let entry = keyring::Entry::new(&service, &key)
+        .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
+    entry
+        .set_password(&value)
+        .map_err(|e| format!("Failed to store secret: {}", e))
+}
+
+#[tauri::command]
+fn get_secret(service: String, key: String) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(&service, &key)
+        .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
+    match entry.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("Failed to get secret: {}", e)),
+    }
+}
+
+#[tauri::command]
+fn delete_secret(service: String, key: String) -> Result<(), String> {
+    let entry = keyring::Entry::new(&service, &key)
+        .map_err(|e| format!("Failed to create keyring entry: {}", e))?;
+    entry
+        .delete_password()
+        .map_err(|e| format!("Failed to delete secret: {}", e))
+}
+
+// ---------------------------------------------------------------------------
 // PTY — real interactive terminal
 // ---------------------------------------------------------------------------
 
@@ -1480,6 +1513,9 @@ pub fn run() {
             delete_file,
             copy_file,
             create_file,
+            store_secret,
+            get_secret,
+            delete_secret,
             get_model_info,
             ai_complete,
             ai_chat,
