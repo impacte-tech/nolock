@@ -64,6 +64,12 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 | **OpenRouter** | A unified API gateway that provides access to dozens of AI models from multiple providers. | Supports chat completions and tool calling through the OpenAI-compatible `/chat/completions` endpoint. |
 | **OpenCode Zen** | An open-source AI coding backend. | Supports code completions and chat via its `/api/generate` endpoint. |
 
+### Search & Data
+
+| Technology | What it is | How nolock uses it |
+|---|---|---|
+| **DuckDuckGo Instant Answer API** | A free, no-API-key search API that returns topic summaries, definitions, and related topics as JSON. | Powers the `web_search` tool in Agent Chat — enables the AI to discover relevant URLs before fetching page content with `web_fetch`. No signup, no cost, privacy-respecting. |
+
 ---
 
 ## Features
@@ -91,6 +97,7 @@ nolock would not exist without the following open-source projects and communitie
 - **[OpenRouter](https://openrouter.ai)** — For building a unified API that makes dozens of AI models accessible from a single endpoint.
 - **[Ollama](https://ollama.com)** — For making local LLM deployment as simple as a single command, enabling private and offline AI-powered development.
 - **[llama.cpp](https://github.com/ggerganov/llama.cpp)** — For the incredible engineering achievement of running state-of-the-art LLMs efficiently on consumer hardware.
+- **[DuckDuckGo](https://duckduckgo.com)** — For providing a free, no-API-key Instant Answer API that powers the `web_search` tool in Agent Chat. Results from DuckDuckGo.
 
 And to all the open-source projects listed above — Monaco Editor, React, Tauri, xterm.js, and every other library that makes this possible. Thank you.
 
@@ -174,6 +181,28 @@ After installation, configure your preferred AI backend:
    - **OpenRouter** — Requires an API key from [openrouter.ai](https://openrouter.ai)
    - **OpenCode Zen** — Runs locally at `http://localhost:11435`
 3. Enter your model names and save.
+
+### Recommended Ollama Models
+
+For the best experience with nolock, here are the recommended Ollama models for each AI feature:
+
+| Feature | Recommended Model | Size | Notes |
+|---|---|---|---|
+| **Code Completions (FITM)** | `qwen2.5-coder:0.5b` | 0.5B params | Fast, lightweight fill-in-the-middle completions. Runs on CPU or low-end GPU. |
+| **Agent Chat (Tool Calling)** | `qwen3:0.6b` | 0.6B params | Smallest model with reliable tool-calling capabilities. Good for basic web search, file read, and directory listing tasks. |
+
+**Installation:**
+
+```bash
+ollama pull qwen2.5-coder:0.5b
+ollama pull qwen3:0.6b
+```
+
+Then in nolock's AI Settings (`Ctrl+A, I`):
+- Set **Completion Model** to `qwen2.5-coder:0.5b`
+- Set **Chat Model** to `qwen3:0.6b`
+
+> **Note:** For agent chat with tool calling, the model must support the `tools` parameter in Ollama's `/api/chat` endpoint. The `qwen3:0.6b` model is the smallest tested model that supports this. Larger models (e.g., `qwen3.5-4b`) will provide better results at the cost of higher resource usage.
 
 ### Keyboard Shortcuts
 

@@ -291,6 +291,52 @@ html, body, #root {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* ===== Inline rename / new-file input in tree ===== */
+.tree-rename-input {
+  background: var(--bg-surface);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  margin-left: 2px;
+  outline: none;
+  padding: 1px 4px;
+  width: 140px;
+}
+
+/* ===== Right-click context menu in file explorer ===== */
+.ctx-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  min-width: 130px;
+  padding: 4px 0;
+}
+
+.ctx-menu-item {
+  padding: 5px 16px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+
+.ctx-menu-item:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ctx-menu-separator {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--border);
+}
+
 .chevron {
   display: inline-block;
   width: 16px;
@@ -624,6 +670,58 @@ html, body, #root {
   letter-spacing: 0.5px;
   color: var(--text-muted);
   margin-bottom: 2px;
+}
+
+/* Inline assistant content wrapper — holds the markdown + streaming cursor */
+.assistant-content {
+  display: inline;
+}
+
+/* Blinking cursor shown while tokens are streaming in */
+.streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--accent);
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  animation: blink-cursor 0.8s step-end infinite;
+}
+
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* 3-dot loading animation — shown before the first streaming token arrives */
+.loading-dots {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+}
+
+.loading-dots span {
+  display: inline-block;
+  animation: dot-bounce 1.4s ease-in-out infinite both;
+}
+
+.loading-dots span:nth-child(1) { animation-delay: 0s; }
+.loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+.loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes dot-bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.3;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
 }
 
 /* ===== Chat markdown rendering ===== */
@@ -979,6 +1077,25 @@ html, body, #root {
   font-size: 10px;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* ===== Stop generation button ===== */
+.stop-generation-btn {
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 7px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.stop-generation-btn:hover {
+  color: #fff;
+  border-color: #e06c75;
+  background: #e06c7520;
 }
 
 /* ===== Clear context button ===== */

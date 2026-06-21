@@ -14,6 +14,14 @@ interface AIConfig {
   toolsEnabled: string[];
 }
 
+/** Per-tool configuration (provider, api keys, etc.). Stored in localStorage as nolock.toolConfig. */
+interface ToolConfig {
+  [toolId: string]: {
+    provider?: string;
+    api_key?: string;
+  };
+}
+
 const BACKENDS = [
   { value: "ollama", label: "Ollama", defaultUrl: "http://localhost:11434" },
   { value: "llamacpp", label: "llama.cpp", defaultUrl: "http://localhost:8080" },
@@ -21,8 +29,14 @@ const BACKENDS = [
   { value: "opencode", label: "OpenCode Zen", defaultUrl: "http://localhost:11435" },
 ];
 
+const WEB_SEARCH_PROVIDERS = [
+  { value: "duckduckgo", label: "DuckDuckGo (experimental)", description: "Free, no API key. Uses Instant Answer API — limited results, best for broad topics." },
+  { value: "brave", label: "Brave Search", description: "Real web search results. Requires a free API key from brave.com/search/api/" },
+];
+
 const AVAILABLE_TOOLS = [
-  { id: "web_fetch", label: "Web Fetch", description: "Fetch and read web page content" },
+  { id: "web_search", label: "Web Search", description: "Search the internet to discover relevant URLs before fetching them" },
+  { id: "web_fetch", label: "Web Fetch", description: "Fetch and read web page content from a specific URL" },
   { id: "read_file", label: "Read File", description: "Read file contents from disk" },
   { id: "list_directory", label: "List Directory", description: "Explore project structure" },
 ];
@@ -36,11 +50,13 @@ export default function AISettings({ visible, onClose }: Props) {
     apiKey: "",
     toolsEnabled: [],
   });
+  const [toolConfig, setToolConfig] = useState<ToolConfig>({});
 
   useEffect(() => {
     if (visible) {
       const oldModel = localStorage.getItem("nolock.model");
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled");
+      const toolConfigRaw = localStorage.getItem("nolock.toolConfig");
       setConfig({
         backend: localStorage.getItem("nolock.backend") || "ollama",
         url: localStorage.getItem("nolock.url") || "http://localhost:11434",
@@ -49,8 +65,17 @@ export default function AISettings({ visible, onClose }: Props) {
         apiKey: localStorage.getItem("nolock.apiKey") || "",
         toolsEnabled: toolsRaw ? JSON.parse(toolsRaw) : [],
       });
+      setToolConfig(toolConfigRaw ? JSON.parse(toolConfigRaw) : {});
     }
   }, [visible]);
+
+  /** Update a specific tool's config field */
+  const updateToolConfig = (toolId: string, field: string, value: string) => {
+    setToolConfig((prev) => ({
+      ...prev,
+      [toolId]: { ...(prev[toolId] || {}), [field]: value },
+    }));
+  };
 
   const save = () => {
     localStorage.setItem("nolock.backend", config.backend);
@@ -59,6 +84,7 @@ export default function AISettings({ visible, onClose }: Props) {
     localStorage.setItem("nolock.chatModel", config.chatModel);
     localStorage.setItem("nolock.apiKey", config.apiKey);
     localStorage.setItem("nolock.toolsEnabled", JSON.stringify(config.toolsEnabled));
+    localStorage.setItem("nolock.toolConfig", JSON.stringify(toolConfig));
     localStorage.setItem("nolock.model", config.completionModel);
     onClose();
   };
@@ -187,6 +213,76 @@ export default function AISettings({ visible, onClose }: Props) {
                 </div>
               </label>
             ))}
+
+            {/* --- Per-tool sub-configuration: web_search --- */}
+            {supportsTools && config.toolsEnabled.includes("web_search") && (
+              <div style={{
+                marginTop: 8,
+                padding: "10px 12px",
+                background: "var(--bg-secondary)",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+              }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 8 }}>
+                  Web Search Provider
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {WEB_SEARCH_PROVIDERS.map((p) => (
+                    <label
+                      key={p.value}
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: 6,
+                        cursor: "pointer",
+                        padding: "4px 0",
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="web_search_provider"
+                        value={p.value}
+                        checked={(toolConfig.web_search?.provider || "duckduckgo") === p.value}
+                        onChange={() => updateToolConfig("web_search", "provider", p.value)}
+                        style={{ marginTop: 2, accentColor: "var(--accent)" }}
+                      />
+                      <div>
+                        <div style={{ fontSize: 12, color: "var(--text-primary)" }}>{p.label}</div>
+                        <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{p.description}</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+
+                {/* Brave API key field */}
+                {(toolConfig.web_search?.provider || "duckduckgo") === "brave" && (
+                  <div style={{ marginTop: 8 }}>
+                    <label style={{ fontSize: 11, color: "var(--text-secondary)", display: "block", marginBottom: 4 }}>
+                      Brave Search API Key
+                    </label>
+                    <input
+                      className="field-input"
+                      type="password"
+                      placeholder="BSA-..."
+                      value={toolConfig.web_search?.api_key || ""}
+                      onChange={(e) => updateToolConfig("web_search", "api_key", e.target.value)}
+                      style={{ fontSize: 12, padding: "6px 8px" }}
+                    />
+                    <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+                      Get your free API key at{" "}
+                      <a
+                        href="https://brave.com/search/api/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: "var(--accent)" }}
+                      >
+                        brave.com/search/api
+                      </a>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
         <div className="modal-footer">

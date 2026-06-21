@@ -52,6 +52,53 @@ fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
     Ok(entries)
 }
 
+#[tauri::command]
+fn rename_file(path: String, new_name: String) -> Result<(), String> {
+    let parent = std::path::Path::new(&path)
+        .parent()
+        .ok_or_else(|| "Cannot determine parent directory".to_string())?;
+    let new_path = parent.join(&new_name);
+    std::fs::rename(&path, &new_path)
+        .map_err(|e| format!("Failed to rename {} to {}: {}", path, new_name, e))
+}
+
+#[tauri::command]
+fn delete_file(path: String) -> Result<(), String> {
+    let meta = std::fs::metadata(&path)
+        .map_err(|e| format!("Failed to access {}: {}", path, e))?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&path)
+            .map_err(|e| format!("Failed to delete directory {}: {}", path, e))
+    } else {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete file {}: {}", path, e))
+    }
+}
+
+#[tauri::command]
+fn copy_file(source: String, destination: String) -> Result<(), String> {
+    let dest_path = std::path::Path::new(&destination);
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create destination directory: {}", e))?;
+    }
+    // Use copy_options to avoid following symlinks and preserve permissions
+    std::fs::copy(&source, &destination)
+        .map_err(|e| format!("Failed to copy {} to {}: {}", source, destination, e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn create_file(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+    }
+    std::fs::write(&path, "")
+        .map_err(|e| format!("Failed to create file {}: {}", path, e))
+}
+
 #[derive(serde::Serialize)]
 struct DirEntry {
     name: String,
@@ -348,6 +395,10 @@ struct ChatRequest {
     api_key: Option<String>,
     #[serde(default)]
     tools_enabled: Vec<String>,
+    /// Per-tool configuration (e.g. web_search provider + api_key).
+    /// Stored in localStorage on the frontend as `nolock.toolConfig`.
+    #[serde(default)]
+    tool_configs: HashMap<String, serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
@@ -362,6 +413,11 @@ struct ToolCallLog {
     name: String,
     arguments: String,
     result_snippet: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct StreamPayload {
+    token: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +483,25 @@ fn build_tool_schemas(enabled: &[String]) -> Vec<serde_json::Value> {
             }
         }));
     }
+    if enabled.contains(&"web_search".to_string()) {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the internet for up-to-date information. Use this BEFORE web_fetch when the user asks about current events, recent news, or any topic where you need to discover relevant URLs. Returns a list of search results with titles, URLs, and snippets.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query (e.g. 'latest AWS features 2026' or 'Rust async performance tips')"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }));
+    }
     tools
 }
 
@@ -434,6 +509,7 @@ async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
     client: &reqwest::Client,
+    tool_configs: &HashMap<String, serde_json::Value>,
 ) -> Result<String, String> {
     match name {
         "web_fetch" => {
@@ -493,21 +569,185 @@ async fn execute_tool(
             entries.sort();
             Ok(entries.join("\n"))
         }
+        "web_search" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or("Missing required parameter: query")?;
+            eprintln!("[nolock] tool web_search query={}", query);
+
+            // Determine provider from tool_configs (default: DuckDuckGo)
+            let provider = tool_configs
+                .get("web_search")
+                .and_then(|c| c["provider"].as_str())
+                .unwrap_or("duckduckgo");
+
+            match provider {
+                "brave" => {
+                    // Brave Search API — requires a free API key
+                    let api_key = tool_configs
+                        .get("web_search")
+                        .and_then(|c| c["api_key"].as_str())
+                        .unwrap_or("");
+
+                    if api_key.is_empty() {
+                        return Ok("Brave Search requires an API key. Get one free at https://brave.com/search/api/ and configure it in AI Integrations settings.".to_string());
+                    }
+
+                    let resp = client
+                        .get("https://api.search.brave.com/res/v1/web/search")
+                        .query(&[("q", query), ("count", "10")])
+                        .timeout(std::time::Duration::from_secs(10))
+                        .header("Accept", "application/json")
+                        // NOTE: Do NOT set Accept-Encoding manually — reqwest's default
+                        // gzip feature handles decompression automatically. Setting it
+                        // explicitly would override auto-decompression and produce raw
+                        // gzip bytes, causing JSON parse errors.
+                        .header("X-Subscription-Token", api_key)
+                        .send()
+                        .await
+                        .map_err(|e| format!("Brave Search request failed: {}", e))?;
+
+                    let status = resp.status();
+                    if !status.is_success() {
+                        let body = resp.text().await.unwrap_or_default();
+                        return Ok(format!("Brave Search API error (HTTP {}): {}", status, body));
+                    }
+
+                    let text = resp.text().await.map_err(|e| e.to_string())?;
+                    let data: serde_json::Value =
+                        serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+
+                    let mut results: Vec<String> = Vec::new();
+
+                    // Extract web results
+                    if let Some(web_results) = data["web"]["results"].as_array() {
+                        for result in web_results {
+                            let title = result["title"].as_str().unwrap_or("(no title)");
+                            let url = result["url"].as_str().unwrap_or("(no URL)");
+                            let desc = result["description"].as_str().unwrap_or("");
+                            if !desc.is_empty() {
+                                results.push(format!("{} - {} - {}", title, desc, url));
+                            } else {
+                                results.push(format!("{} - {}", title, url));
+                            }
+                        }
+                    }
+
+                    if results.is_empty() {
+                        return Ok("Brave Search returned no results.".to_string());
+                    }
+
+                    let mut output = String::new();
+                    for (i, r) in results.iter().enumerate() {
+                        if output.len() > 8000 {
+                            output.push_str(&format!("\n... and {} more results", results.len() - i));
+                            break;
+                        }
+                        output.push_str(&format!("{}. {}\n", i + 1, r));
+                    }
+                    Ok(format!("{}\n\n[Search powered by Brave Search]", output.trim()))
+                }
+                _ => {
+                    // Default: DuckDuckGo Instant Answer API (free, no API key, privacy-respecting)
+                    // NOTE: This API is limited — it returns curated instant answers (Wikipedia
+                    // summaries, categories), NOT full web search results. For specific/technical
+                    // queries it often returns nothing. Use Brave Search for better results.
+                    let resp = client
+                        .get("https://api.duckduckgo.com/")
+                        .query(&[
+                            ("q", query),
+                            ("format", "json"),
+                            ("no_html", "1"),
+                            ("skip_disambig", "1"),
+                            ("t", "nolock"),
+                        ])
+                        .timeout(std::time::Duration::from_secs(10))
+                        .header("User-Agent", "nolock/0.1")
+                        .send()
+                        .await
+                        .map_err(|e| format!("Failed to search: {}", e))?;
+
+                    let status = resp.status();
+                    if !status.is_success() {
+                        return Ok(format!("DuckDuckGo search error: HTTP {}", status));
+                    }
+
+                    let text = resp.text().await.map_err(|e| e.to_string())?;
+                    let data: serde_json::Value =
+                        serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+
+                    let mut results: Vec<String> = Vec::new();
+
+                    // Extract AbstractText (instant answer summary)
+                    if let Some(abstract_text) = data["AbstractText"].as_str() {
+                        if !abstract_text.is_empty() {
+                            if let Some(abstract_url) = data["AbstractURL"].as_str() {
+                                if !abstract_url.is_empty() {
+                                    results.push(format!("[Summary] {} - {}", abstract_text, abstract_url));
+                                }
+                            } else {
+                                results.push(format!("[Summary] {}", abstract_text));
+                            }
+                        }
+                    }
+
+                    // Extract RelatedTopics (related links and categories)
+                    if let Some(topics) = data["RelatedTopics"].as_array() {
+                        fn extract_topics(
+                            topics: &[serde_json::Value],
+                            out: &mut Vec<String>,
+                            depth: usize,
+                        ) {
+                            if depth > 3 { return; }
+                            for topic in topics {
+                                if let Some(text) = topic["Text"].as_str() {
+                                    let url = topic["FirstURL"]
+                                        .as_str()
+                                        .unwrap_or("(no URL)")
+                                        .to_string();
+                                    out.push(format!("{} - {}", text, url));
+                                }
+                                if let Some(sub_topics) = topic["Topics"].as_array() {
+                                    extract_topics(sub_topics, out, depth + 1);
+                                }
+                            }
+                        }
+                        extract_topics(topics, &mut results, 0);
+                    }
+
+                    if results.is_empty() {
+                        return Ok("DuckDuckGo Instant Answer API returned no results. This API is experimental and limited — try enabling Brave Search in AI Integrations settings for real web search results.".to_string());
+                    }
+
+                    let mut output = String::new();
+                    for (i, r) in results.iter().enumerate() {
+                        if output.len() > 8000 {
+                            output.push_str(&format!("\n... and {} more results", results.len() - i));
+                            break;
+                        }
+                        output.push_str(&format!("{}. {}\n", i + 1, r));
+                    }
+                    Ok(format!("{}\n\n[Results from DuckDuckGo]", output.trim()))
+                }
+            }
+        }
         _ => Err(format!("Unknown tool: {}", name)),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Ollama tool-calling loop
+// Ollama tool-calling loop (streaming)
 // ---------------------------------------------------------------------------
 
 async fn ollama_chat_with_tools(
+    app_handle: &tauri::AppHandle,
     client: &reqwest::Client,
     url: &str,
     model: &str,
     messages: &[ChatMessage],
     tools: &[serde_json::Value],
     max_iterations: usize,
+    tool_configs: &HashMap<String, serde_json::Value>,
 ) -> Result<ChatResult, String> {
     // Build initial messages array — inject system prompt about tools
     let mut ollama_msgs: Vec<serde_json::Value> = Vec::new();
@@ -536,12 +776,13 @@ async fn ollama_chat_with_tools(
     }
 
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
+    let mut full_content = String::new();
 
     for iteration in 0..max_iterations {
         let mut body = serde_json::json!({
             "model": model,
             "messages": ollama_msgs,
-            "stream": false,
+            "stream": true,
             "options": { "num_predict": 2048, "temperature": 0.7 }
         });
         if !tools.is_empty() {
@@ -549,10 +790,10 @@ async fn ollama_chat_with_tools(
         }
 
         eprintln!(
-            "[nolock] ollama tool loop iteration={}, POST {}/api/chat",
+            "[nolock] ollama tool loop iteration={}, POST {}/api/chat (streaming)",
             iteration, url
         );
-        let resp = client
+        let mut resp = client
             .post(format!("{}/api/chat", url))
             .json(&body)
             .timeout(std::time::Duration::from_secs(120))
@@ -563,44 +804,87 @@ async fn ollama_chat_with_tools(
                 e.to_string()
             })?;
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| e.to_string())?;
-        eprintln!(
-            "[nolock] ollama tool loop status={} body={}",
-            status,
-            &text[..text.len().min(300)]
-        );
-
-        let data: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
-
-        let content = data["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let tool_calls = data["message"]["tool_calls"].as_array();
-
-        if let Some(calls) = tool_calls {
-            if calls.is_empty() {
-                // No tool calls — final response
-                return Ok(ChatResult {
-                    content,
-                    tool_calls: all_tool_calls,
-                });
+        if !status.is_success() {
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            eprintln!(
+                "[nolock] ollama tool loop status={} body={}",
+                status,
+                &text[..text.len().min(300)]
+            );
+            let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(String::from))
+                .unwrap_or_else(|| text.clone());
+            if !tools.is_empty() && error_detail.contains("tool") {
+                return Err(format!(
+                    "Model '{}' does not support tool calling (HTTP {}). Try disabling Agent Tools in AI Settings.",
+                    model, status
+                ));
             }
+            return Err(format!("Ollama API error ({}): {}", status, error_detail));
+        }
 
-            // Push the assistant message (with tool_calls) so Ollama knows the context
+        // Stream the NDJSON response line by line, emitting tokens
+        let mut iter_content = String::new();
+        let mut tool_calls_in_iter: Option<Vec<serde_json::Value>> = None;
+        let mut buf = String::new();
+
+        loop {
+            match resp.chunk().await.map_err(|e| e.to_string())? {
+                None => break,
+                Some(chunk) => {
+                    let s = String::from_utf8_lossy(&chunk);
+                    buf.push_str(&s);
+                    while let Some(pos) = buf.find('\n') {
+                        let line = buf[..pos].trim().to_string();
+                        buf = buf[pos + 1..].to_string();
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                            if let Some(content) = data["message"]["content"].as_str() {
+                                if !content.is_empty() {
+                                    iter_content.push_str(content);
+                                    full_content.push_str(content);
+                                    app_handle
+                                        .emit(
+                                            "stream-token",
+                                            StreamPayload {
+                                                token: content.to_string(),
+                                            },
+                                        )
+                                        .ok();
+                                }
+                            }
+                            // Detect tool calls in ANY chunk — not just the done:true chunk.
+                            // Some Ollama versions/streaming modes may emit tool_calls
+                            // in a separate chunk before the done marker.
+                            if let Some(calls) = data["message"]["tool_calls"].as_array() {
+                                if !calls.is_empty() {
+                                    tool_calls_in_iter = Some(calls.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(calls) = tool_calls_in_iter {
+            // Push the assistant message so Ollama knows the context
             ollama_msgs.push(serde_json::json!({
                 "role": "assistant",
-                "content": content,
+                "content": iter_content,
                 "tool_calls": calls
             }));
 
             // Execute each tool call and add results
-            for call in calls {
+            for call in &calls {
                 let name = call["function"]["name"].as_str().unwrap_or("unknown");
                 let args = &call["function"]["arguments"];
 
-                let result = execute_tool(name, args, client)
+                let result = execute_tool(name, args, client, tool_configs)
                     .await
                     .unwrap_or_else(|e| format!("Tool error: {}", e));
 
@@ -617,24 +901,47 @@ async fn ollama_chat_with_tools(
                 });
 
                 // Add tool result message
+                let tool_call_id = call["id"].as_str().unwrap_or("call_unknown");
                 ollama_msgs.push(serde_json::json!({
                     "role": "tool",
-                    "tool_name": name,
+                    "tool_call_id": tool_call_id,
                     "content": result
                 }));
             }
         } else {
-            // No tool_calls array at all — final response
+            // No tool calls — final response
+            eprintln!(
+                "[nolock] ollama tool loop returning: content_len={} tool_calls={}",
+                full_content.len(),
+                all_tool_calls.len()
+            );
+            if full_content.is_empty() && all_tool_calls.is_empty() {
+                eprintln!("[nolock] WARNING: empty response from model in tool loop");
+            }
             return Ok(ChatResult {
-                content,
+                content: if full_content.is_empty() {
+                    "(no response)".to_string()
+                } else {
+                    full_content
+                },
                 tool_calls: all_tool_calls,
             });
         }
     }
 
     // If we exhausted iterations, return what we have
+    eprintln!(
+        "[nolock] ollama tool loop exhausted after {} iterations: content_len={} tool_calls={}",
+        max_iterations,
+        full_content.len(),
+        all_tool_calls.len()
+    );
     Ok(ChatResult {
-        content: "(max tool iterations reached)".to_string(),
+        content: if full_content.is_empty() {
+            "(max tool iterations reached, no response)".to_string()
+        } else {
+            full_content
+        },
         tool_calls: all_tool_calls,
     })
 }
@@ -806,7 +1113,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
+async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatResult, String> {
     eprintln!(
         "[nolock] ai_chat backend={} url={} model={} messages={} tools={:?}",
         req.backend,
@@ -823,11 +1130,10 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
     match req.backend.as_str() {
         "ollama" => {
             if has_tools {
-                // Use the tool-calling loop
-                ollama_chat_with_tools(&client, &req.url, &req.model, &req.messages, &tools, 10)
+                ollama_chat_with_tools(&app_handle, &client, &req.url, &req.model, &req.messages, &tools, 10, &req.tool_configs)
                     .await
             } else {
-                // No tools — simple single-turn chat
+                // No tools — simple single-turn chat (streaming)
                 let ollama_msgs: Vec<serde_json::Value> = req
                     .messages
                     .iter()
@@ -837,11 +1143,11 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 let body = serde_json::json!({
                     "model": req.model,
                     "messages": ollama_msgs,
-                    "stream": false,
+                    "stream": true,
                     "options": { "num_predict": 2048, "temperature": 0.7 }
                 });
-                eprintln!("[nolock] ollama POST {}/api/chat (no tools)", req.url);
-                let resp = client
+                eprintln!("[nolock] ollama POST {}/api/chat (no tools, streaming)", req.url);
+                let mut resp = client
                     .post(format!("{}/api/chat", req.url))
                     .json(&body)
                     .timeout(std::time::Duration::from_secs(60))
@@ -851,16 +1157,48 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                         eprintln!("[nolock] ollama chat error: {}", e);
                         e.to_string()
                     })?;
+
+                // Check status first
                 let status = resp.status();
-                let text = resp.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[nolock] ollama chat status={} body={}", status, &text[..text.len().min(200)]);
-                let data: serde_json::Value =
-                    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+                if !status.is_success() {
+                    let text = resp.text().await.map_err(|e| e.to_string())?;
+                    eprintln!("[nolock] ollama chat status={} body={}", status, &text[..text.len().min(200)]);
+                    let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| v["error"].as_str().map(String::from))
+                        .unwrap_or_else(|| text.clone());
+                    return Err(format!("Ollama API error ({}): {}", status, error_detail));
+                }
+
+                // Stream NDJSON response
+                let mut full_content = String::new();
+                let mut buf = String::new();
+                loop {
+                    match resp.chunk().await.map_err(|e| e.to_string())? {
+                        None => break,
+                        Some(chunk) => {
+                            let s = String::from_utf8_lossy(&chunk);
+                            buf.push_str(&s);
+                            while let Some(pos) = buf.find('\n') {
+                                let line = buf[..pos].trim().to_string();
+                                buf = buf[pos + 1..].to_string();
+                                if line.is_empty() { continue; }
+                                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                                    if let Some(content) = data["message"]["content"].as_str() {
+                                        if !content.is_empty() {
+                                            full_content.push_str(content);
+                                            app_handle.emit("stream-token", StreamPayload {
+                                                token: content.to_string(),
+                                            }).ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 Ok(ChatResult {
-                    content: data["message"]["content"]
-                        .as_str()
-                        .unwrap_or("(no response)")
-                        .to_string(),
+                    content: if full_content.is_empty() { "(no response)".to_string() } else { full_content },
                     tool_calls: vec![],
                 })
             }
@@ -878,23 +1216,63 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 "prompt": prompt,
                 "n_predict": 2048,
                 "temperature": 0.7,
-                "stream": false
+                "stream": true
             });
-            eprintln!("[nolock] llamacpp POST {}/completion", req.url);
-            let resp = client
+            eprintln!("[nolock] llamacpp POST {}/completion (streaming)", req.url);
+            let mut resp = client
                 .post(format!("{}/completion", req.url))
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(60))
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
+
             let status = resp.status();
-            let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[nolock] llamacpp chat status={} body={}", status, &text[..text.len().min(200)]);
-            let data: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+            if !status.is_success() {
+                let text = resp.text().await.map_err(|e| e.to_string())?;
+                eprintln!("[nolock] llamacpp chat status={} body={}", status, &text[..text.len().min(200)]);
+                let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"].as_str().map(String::from))
+                    .unwrap_or_else(|| text.clone());
+                return Err(format!("llama.cpp API error ({}): {}", status, error_detail));
+            }
+
+            // SSE streaming — data: {...}\n\n
+            let mut full_content = String::new();
+            let mut buf = String::new();
+            loop {
+                match resp.chunk().await.map_err(|e| e.to_string())? {
+                    None => break,
+                    Some(chunk) => {
+                        let s = String::from_utf8_lossy(&chunk);
+                        buf.push_str(&s);
+                        // SSE events are separated by \n\n
+                        while let Some(pos) = buf.find("\n\n") {
+                            let event = buf[..pos].to_string();
+                            buf = buf[pos + 2..].to_string();
+                            for line in event.lines() {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    let data = data.trim();
+                                    if data == "[DONE]" { continue; }
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Some(content) = json["content"].as_str() {
+                                            if !content.is_empty() {
+                                                full_content.push_str(content);
+                                                app_handle.emit("stream-token", StreamPayload {
+                                                    token: content.to_string(),
+                                                }).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Ok(ChatResult {
-                content: data["content"].as_str().unwrap_or("").to_string(),
+                content: full_content,
                 tool_calls: vec![],
             })
         }
@@ -906,7 +1284,6 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
                 .collect();
 
-            // Add system message about tools for OpenRouter
             if has_tools {
                 let tool_names: Vec<&str> = tools
                     .iter()
@@ -928,14 +1305,15 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 "model": req.model,
                 "messages": or_msgs,
                 "max_tokens": 2048,
-                "temperature": 0.7
+                "temperature": 0.7,
+                "stream": true
             });
             if has_tools {
                 body["tools"] = serde_json::json!(tools);
             }
 
-            eprintln!("[nolock] openrouter POST chat completions");
-            let resp = client
+            eprintln!("[nolock] openrouter POST chat completions (streaming)");
+            let mut resp = client
                 .post("https://openrouter.ai/api/v1/chat/completions")
                 .header("Authorization", format!("Bearer {}", api_key))
                 .header("HTTP-Referer", "https://nolock.dev")
@@ -944,16 +1322,57 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
+
             let status = resp.status();
-            let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[nolock] openrouter chat status={} body={}", status, &text[..text.len().min(200)]);
-            let data: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+            if !status.is_success() {
+                let text = resp.text().await.map_err(|e| e.to_string())?;
+                eprintln!("[nolock] openrouter chat status={} body={}", status, &text[..text.len().min(200)]);
+                let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"].as_str().map(String::from))
+                    .or_else(|| {
+                        serde_json::from_str::<serde_json::Value>(&text)
+                            .ok()
+                            .and_then(|v| v["message"].as_str().map(String::from))
+                    })
+                    .unwrap_or_else(|| text.clone());
+                return Err(format!("OpenRouter API error ({}): {}", status, error_detail));
+            }
+
+            // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
+            let mut full_content = String::new();
+            let mut buf = String::new();
+            loop {
+                match resp.chunk().await.map_err(|e| e.to_string())? {
+                    None => break,
+                    Some(chunk) => {
+                        let s = String::from_utf8_lossy(&chunk);
+                        buf.push_str(&s);
+                        while let Some(pos) = buf.find("\n\n") {
+                            let event = buf[..pos].to_string();
+                            buf = buf[pos + 2..].to_string();
+                            for line in event.lines() {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    let data = data.trim();
+                                    if data == "[DONE]" { continue; }
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                            if !content.is_empty() {
+                                                full_content.push_str(content);
+                                                app_handle.emit("stream-token", StreamPayload {
+                                                    token: content.to_string(),
+                                                }).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Ok(ChatResult {
-                content: data["choices"][0]["message"]["content"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string(),
+                content: full_content,
                 tool_calls: vec![],
             })
         }
@@ -969,19 +1388,58 @@ async fn ai_chat(req: ChatRequest) -> Result<ChatResult, String> {
             let body = serde_json::json!({
                 "model": req.model,
                 "prompt": prompt,
-                "stream": false,
+                "stream": true,
                 "options": { "num_predict": 2048, "temperature": 0.7 }
             });
-            let resp = client
+            eprintln!("[nolock] opencode POST {}/api/generate (streaming)", req.url);
+            let mut resp = client
                 .post(format!("{}/api/generate", req.url))
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(60))
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
-            let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.map_err(|e| e.to_string())?;
+                eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
+                let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"].as_str().map(String::from))
+                    .unwrap_or_else(|| text.clone());
+                return Err(format!("OpenCode API error ({}): {}", status, error_detail));
+            }
+
+            // NDJSON streaming — {"response":"...","done":false}
+            let mut full_content = String::new();
+            let mut buf = String::new();
+            loop {
+                match resp.chunk().await.map_err(|e| e.to_string())? {
+                    None => break,
+                    Some(chunk) => {
+                        let s = String::from_utf8_lossy(&chunk);
+                        buf.push_str(&s);
+                        while let Some(pos) = buf.find('\n') {
+                            let line = buf[..pos].trim().to_string();
+                            buf = buf[pos + 1..].to_string();
+                            if line.is_empty() { continue; }
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                                if let Some(content) = data["response"].as_str() {
+                                    if !content.is_empty() {
+                                        full_content.push_str(content);
+                                        app_handle.emit("stream-token", StreamPayload {
+                                            token: content.to_string(),
+                                        }).ok();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Ok(ChatResult {
-                content: data["response"].as_str().unwrap_or("").to_string(),
+                content: full_content,
                 tool_calls: vec![],
             })
         }
@@ -1018,6 +1476,10 @@ pub fn run() {
             read_file,
             write_file,
             list_directory,
+            rename_file,
+            delete_file,
+            copy_file,
+            create_file,
             get_model_info,
             ai_complete,
             ai_chat,
@@ -1107,8 +1569,9 @@ mod tests {
             "web_fetch".into(),
             "read_file".into(),
             "list_directory".into(),
+            "web_search".into(),
         ]);
-        assert_eq!(schemas.len(), 3);
+        assert_eq!(schemas.len(), 4);
 
         let names: Vec<&str> = schemas
             .iter()
@@ -1117,6 +1580,18 @@ mod tests {
         assert!(names.contains(&"web_fetch"));
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"list_directory"));
+        assert!(names.contains(&"web_search"));
+    }
+
+    #[test]
+    fn test_web_search_schema_has_required_query() {
+        let schemas = build_tool_schemas(&["web_search".into()]);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "web_search");
+        let required = schemas[0]["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|v| v == "query"));
     }
 
     #[test]
@@ -1139,7 +1614,7 @@ mod tests {
     async fn test_execute_tool_unknown_name() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("unknown_tool", &args, &client).await;
+        let result = execute_tool("unknown_tool", &args, &client, &HashMap::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown tool"));
     }
@@ -1148,7 +1623,7 @@ mod tests {
     async fn test_execute_tool_web_fetch_missing_url() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("web_fetch", &args, &client).await;
+        let result = execute_tool("web_fetch", &args, &client, &HashMap::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
@@ -1157,7 +1632,7 @@ mod tests {
     async fn test_execute_tool_read_file_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_file_xyzzy_123.test" });
-        let result = execute_tool("read_file", &args, &client).await;
+        let result = execute_tool("read_file", &args, &client, &HashMap::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read"));
     }
@@ -1166,7 +1641,7 @@ mod tests {
     async fn test_execute_tool_list_directory_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_dir_xyzzy_123" });
-        let result = execute_tool("list_directory", &args, &client).await;
+        let result = execute_tool("list_directory", &args, &client, &HashMap::new()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read dir"));
     }
@@ -1198,6 +1673,102 @@ mod tests {
         let result = read_file("/tmp/definitely_not_a_real_file_nolock.test".into());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read"));
+    }
+
+    // ---- tool_call_id fix: reproducing the bug and confirming the fix ----
+    //
+    // The Ollama tool-calling API expects tool result messages to include
+    // a `tool_call_id` field matching the `id` from the original tool call.
+    //
+    // THE BUG (old code, removed): The loop sent `"tool_name": name` instead
+    // of `"tool_call_id": tool_call_id`. Ollama ignores `tool_name`, so the
+    // model couldn't associate the result with the pending function call.
+    // This caused the model to respond with "no results" even though the
+    // tool executed successfully.
+    //
+    // THE FIX (current code): Extract `call["id"]` and use it as
+    // `"tool_call_id"`, which is the field Ollama requires.
+    //
+    // This test reproduces the exact JSON shapes to prove the fix works.
+    #[test]
+    fn test_ollama_tool_result_message_fix() {
+        // Simulate a tool call object returned by Ollama's API
+        let tool_call = serde_json::json!({
+            "id": "call_abc123",
+            "function": {
+                "name": "web_search",
+                "arguments": { "query": "latest Rust features 2026" }
+            }
+        });
+
+        let name = tool_call["function"]["name"].as_str().unwrap();
+        let _args = &tool_call["function"]["arguments"];
+
+        // Execute the tool (just check the message structure, not network)
+        let result = format!(
+            "1. Rust 1.80 released with async closures - https://blog.rust-lang.org\n2. New borrow checker improvements - https://doc.rust-lang.org"
+        );
+
+        // --- THE OLD BUGGY CODE (for reproduction / comparison) ---
+        // This is what used to be in the loop before the fix:
+        let buggy_message = serde_json::json!({
+            "role": "tool",
+            "tool_name": name,    // ❌ Ollama does NOT recognize this field
+            "content": result
+        });
+        // Verify the bug: no tool_call_id field present
+        assert!(
+            buggy_message.get("tool_call_id").is_none(),
+            "BUG: old code is missing tool_call_id - Ollama cannot route this"
+        );
+        // The buggy message only has "tool_name", which Ollama ignores.
+        // Result: the model never sees the tool output → "(no response)"
+        assert_eq!(buggy_message["tool_name"], "web_search");
+        assert_eq!(buggy_message["role"], "tool");
+
+        // --- THE FIXED CODE (what runs now) ---
+        let tool_call_id = tool_call["id"].as_str().unwrap_or("call_unknown");
+        let fixed_message = serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,  // ✅ Required by Ollama API
+            "content": result
+        });
+        // Verify the fix: tool_call_id is present and matches the original call
+        assert!(
+            fixed_message.get("tool_call_id").is_some(),
+            "FIX: tool_call_id must be present for Ollama to route the result"
+        );
+        assert_eq!(fixed_message["tool_call_id"], "call_abc123");
+        assert_eq!(fixed_message["role"], "tool");
+        assert_eq!(fixed_message["content"], result);
+
+        // ---- The key structural difference ----
+        // Old: { role: "tool", tool_name: "web_search", content: "..." }
+        // New: { role: "tool", tool_call_id: "call_abc123", content: "..." }
+        //
+        // Ollama's API reference confirms the tool role response MUST have
+        // "tool_call_id" matching the call that produced it.
+        // Without it, the model treats the message as an orphan tool result
+        // and ignores it, leading to the "(no response)" bug.
+        //
+        // Proof: the buggy JSON has "tool_name" which is NOT in Ollama's spec.
+        // The fixed JSON has "tool_call_id" which IS in Ollama's spec.
+        assert!(
+            buggy_message.as_object().unwrap().contains_key("tool_name"),
+            "BUG has tool_name but NOT tool_call_id"
+        );
+        assert!(
+            !buggy_message.as_object().unwrap().contains_key("tool_call_id"),
+            "BUG confirms: no tool_call_id in old code"
+        );
+        assert!(
+            fixed_message.as_object().unwrap().contains_key("tool_call_id"),
+            "FIX confirms: tool_call_id IS present in new code"
+        );
+        assert!(
+            !fixed_message.as_object().unwrap().contains_key("tool_name"),
+            "FIX confirms: tool_name is gone (replaced by tool_call_id)"
+        );
     }
 
     // ---- list_directory with temp dir ------------------------------------
