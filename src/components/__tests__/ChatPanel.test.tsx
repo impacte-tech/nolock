@@ -131,7 +131,7 @@ describe("ChatPanel", () => {
     fireEvent.change(input, { target: { value: "test" } });
     fireEvent.click(screen.getByText("Send"));
 
-    expect(await screen.findByText("thinking...")).toBeInTheDocument();
+    expect(await screen.findByText("Thinking...")).toBeInTheDocument();
   });
 
   it("disables send button while loading", () => {
