@@ -4,6 +4,8 @@ use std::sync::Mutex;
 use tauri::Manager;
 use tauri::Emitter;
 
+use regex::Regex;
+
 mod browser;
 mod terminal_memory;
 
@@ -104,6 +106,255 @@ struct DirEntry {
     name: String,
     path: String,
     is_dir: bool,
+}
+
+// ---------------------------------------------------------------------------
+// File search & replace commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct SearchMatch {
+    file_path: String,
+    line_number: usize,
+    line_content: String,
+    match_start: usize,
+    match_end: usize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchRequest {
+    root_path: String,
+    query: String,
+    #[serde(default)]
+    match_case: bool,
+    #[serde(default)]
+    use_regex: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaceRequest {
+    root_path: String,
+    query: String,
+    replacement: String,
+    #[serde(default)]
+    match_case: bool,
+    #[serde(default)]
+    use_regex: bool,
+    #[serde(default)]
+    target_files: Option<Vec<String>>,
+}
+
+#[derive(serde::Serialize)]
+struct ReplaceResult {
+    files_changed: usize,
+    replacements_made: usize,
+}
+
+/// Directories to skip when walking (case-insensitive).
+const SKIP_DIRS: &[&str] = &[
+    ".git", "node_modules", "target", ".ruff_cache", ".cache",
+    "__pycache__", ".venv", "venv", ".next", "dist", "build",
+];
+
+/// Returns true if the path should be skipped.
+fn should_skip_entry(entry: &std::path::Path, is_dir: bool) -> bool {
+    // Skip hidden files/dirs
+    if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
+        if name.starts_with('.') && name != "." {
+            return true;
+        }
+        if is_dir {
+            let lower = name.to_lowercase();
+            if SKIP_DIRS.iter().any(|d| *d == &lower) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a file is likely binary by scanning the first 4 KiB for null bytes.
+fn is_binary(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return true, // treat unreadable as binary
+    };
+    let mut buf = [0u8; 4096];
+    let n = file.read(&mut buf).unwrap_or(0);
+    buf[..n].contains(&0u8)
+}
+
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+const MAX_RESULTS: usize = 5000;
+
+/// Build a compiled Regex from the search request.
+fn build_search_regex(query: &str, use_regex: bool, match_case: bool) -> Result<Regex, String> {
+    let pattern = if use_regex {
+        query.to_string()
+    } else {
+        regex::escape(query)
+    };
+    let pattern = if match_case {
+        pattern
+    } else {
+        format!("(?i){}", pattern)
+    };
+    Regex::new(&pattern).map_err(|e| format!("Invalid search pattern: {}", e))
+}
+
+#[tauri::command]
+fn search_in_files(req: SearchRequest) -> Result<Vec<SearchMatch>, String> {
+    let re = build_search_regex(&req.query, req.use_regex, req.match_case)?;
+
+    let root = std::path::Path::new(&req.root_path);
+    let mut results = Vec::new();
+    let mut dirs_to_visit = vec![root.to_path_buf()];
+
+    while let Some(dir) = dirs_to_visit.pop() {
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        for entry in read_dir {
+            if results.len() >= MAX_RESULTS {
+                break;
+            }
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            if metadata.is_dir() {
+                if !should_skip_entry(&path, true) {
+                    dirs_to_visit.push(path);
+                }
+            } else if metadata.is_file() {
+                if should_skip_entry(&path, false) {
+                    continue;
+                }
+                // Skip large files
+                if metadata.len() > MAX_FILE_SIZE {
+                    continue;
+                }
+                // Skip binaries
+                if is_binary(&path) {
+                    continue;
+                }
+
+                let file_path_str = path.to_string_lossy().to_string();
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                for (line_num, line) in content.lines().enumerate() {
+                    if results.len() >= MAX_RESULTS {
+                        break;
+                    }
+                    for m in re.find_iter(line) {
+                        results.push(SearchMatch {
+                            file_path: file_path_str.clone(),
+                            line_number: line_num + 1, // 1-indexed
+                            line_content: line.to_string(),
+                            match_start: m.start(),
+                            match_end: m.end(),
+                        });
+                        if results.len() >= MAX_RESULTS {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+fn replace_in_files(req: ReplaceRequest) -> Result<ReplaceResult, String> {
+    let re = build_search_regex(&req.query, req.use_regex, req.match_case)?;
+
+    let root = std::path::Path::new(&req.root_path);
+    let mut files_changed = 0;
+    let mut replacements_made = 0;
+    let mut dirs_to_visit = vec![root.to_path_buf()];
+
+    while let Some(dir) = dirs_to_visit.pop() {
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            if metadata.is_dir() {
+                if !should_skip_entry(&path, true) {
+                    dirs_to_visit.push(path);
+                }
+            } else if metadata.is_file() {
+                if should_skip_entry(&path, false) {
+                    continue;
+                }
+                if metadata.len() > MAX_FILE_SIZE {
+                    continue;
+                }
+                if is_binary(&path) {
+                    continue;
+                }
+
+                let file_path_str = path.to_string_lossy().to_string();
+
+                // If target_files is specified, only operate on those files
+                if let Some(ref targets) = req.target_files {
+                    if !targets.iter().any(|t| t == &file_path_str) {
+                        continue;
+                    }
+                }
+
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                let count = re.find_iter(&content).count();
+
+                if count > 0 {
+                    let new_content = re.replace_all(&content, req.replacement.as_str());
+                    match std::fs::write(&path, new_content.as_ref()) {
+                        Ok(_) => {
+                            replacements_made += count;
+                            files_changed += 1;
+                        }
+                        Err(_) => continue,
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ReplaceResult {
+        files_changed,
+        replacements_made,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1480,6 +1731,8 @@ pub fn run() {
             delete_file,
             copy_file,
             create_file,
+            search_in_files,
+            replace_in_files,
             get_model_info,
             ai_complete,
             ai_chat,

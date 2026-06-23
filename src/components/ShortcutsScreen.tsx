@@ -17,9 +17,10 @@ const GROUPS: ShortcutGroup[] = [
   {
     title: "General",
     items: [
-      { keys: "Ctrl+O", description: "Open folder" },
-      { keys: "Ctrl+E", description: "Toggle file explorer" },
-      { keys: "Ctrl+R", description: "Refresh explorer" },
+      { keys: "Ctrl+F, O", description: "Open folder" },
+      { keys: "Ctrl+F, E", description: "Toggle file explorer" },
+      { keys: "Ctrl+F, R", description: "Refresh explorer" },
+      { keys: "Ctrl+F, S", description: "Search in files" },
       { keys: "Escape", description: "Close overlays" },
     ],
   },

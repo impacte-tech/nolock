@@ -20,6 +20,12 @@ interface Props {
   content: string;
   onChange: (content: string) => void;
   onSave: () => void;
+  /** If set, the editor will scroll to this line after mount/content render. */
+  revealLine?: number;
+  /** Optional column to position cursor at when revealing a line. */
+  revealColumn?: number;
+  /** Called after the editor has consumed a revealLine instruction. */
+  onRevealConsumed?: () => void;
 }
 
 function getLanguage(filePath: string): string {
@@ -179,7 +185,7 @@ class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsPr
   freeInlineCompletions(): void {}
 }
 
-export default function Editor({ filePath, content, onChange, onSave }: Props) {
+export default function Editor({ filePath, content, onChange, onSave, revealLine, revealColumn, onRevealConsumed }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 
@@ -276,6 +282,21 @@ export default function Editor({ filePath, content, onChange, onSave }: Props) {
       document.removeEventListener("keydown", preventNativeSave, true);
     };
   }, [filePath]);
+
+  // Separate effect: navigate to revealed line without re-creating the editor
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || revealLine === undefined || revealLine <= 0) return;
+
+    const model = editor.getModel();
+    if (!model) return;
+
+    const line = Math.min(revealLine, model.getLineCount());
+    editor.revealLineInCenter(line);
+    editor.setPosition({ lineNumber: line, column: revealColumn || 1 });
+    editor.focus();
+    onRevealConsumed?.();
+  }, [revealLine, revealColumn, onRevealConsumed]);
 
   return <div ref={containerRef} style={{ width: "100%", height: "100%" }} />;
 }

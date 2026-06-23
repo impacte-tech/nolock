@@ -12,6 +12,7 @@ import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import StatusBar from "./components/StatusBar";
 import ResizableHandle from "./components/ResizableHandle";
 import ShortcutsScreen from "./components/ShortcutsScreen";
+import SearchPanel from "./components/SearchPanel";
 import nolockLogo from "./assets/nolocklogo-white.svg";
 
 // ---------------------------------------------------------------------------
@@ -76,6 +77,12 @@ export default function App() {
   const [showExplorer, setShowExplorer] = useState(true);
   const [showChat, setShowChat] = useState(false);
   const [showAISettings, setShowAISettings] = useState(false);
+
+  // --- Search ---
+  const [showSearch, setShowSearch] = useState(false);
+
+  // --- Editor line navigation (from search results) ---
+  const [revealLine, setRevealLine] = useState<{ filePath: string; lineNumber: number } | null>(null);
 
   // --- Browser panel ---
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
@@ -256,6 +263,38 @@ export default function App() {
     );
   }, []);
 
+  // --- Search result → open file and navigate to line ---
+  const handleSearchResultClick = useCallback(
+    (filePath: string, lineNumber: number) => {
+      const fileName = filePath.split("/").pop() || filePath;
+      // Open the file if not already open
+      const existing = openFiles.find((f) => f.path === filePath);
+      if (!existing) {
+        // Open asynchronously
+        invoke("read_file", { path: filePath })
+          .then((content: any) => {
+            setOpenFiles((prev) => [
+              ...prev,
+              { path: filePath, name: fileName, content, dirty: false },
+            ]);
+            setActiveFile(filePath);
+            // Schedule reveal after React renders the new Editor
+            requestAnimationFrame(() => {
+              setRevealLine({ filePath, lineNumber });
+            });
+          })
+          .catch((e) => console.error("Failed to open file from search:", e));
+      } else {
+        setActiveFile(filePath);
+        // Schedule reveal after React re-renders with the new activeFile
+        requestAnimationFrame(() => {
+          setRevealLine({ filePath, lineNumber });
+        });
+      }
+    },
+    [openFiles],
+  );
+
   const currentFile = openFiles.find((f) => f.path === activeFile);
 
   // --- Global keyboard shortcuts ---
@@ -293,6 +332,36 @@ export default function App() {
             e.preventDefault();
             setChordPrefix(null);
             setShowTermMemory(true);
+            return;
+          }
+        }
+
+        if (chordPrefix === "F") {
+          if (e.key === "s" || e.key === "S") {
+            e.preventDefault();
+            setChordPrefix(null);
+            if (!showSearch) {
+              setShowExplorer(true);
+            }
+            setShowSearch((v) => !v);
+            return;
+          }
+          if (e.key === "o" || e.key === "O") {
+            e.preventDefault();
+            setChordPrefix(null);
+            openFolder();
+            return;
+          }
+          if (e.key === "e" || e.key === "E") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowExplorer((v) => !v);
+            return;
+          }
+          if (e.key === "r" || e.key === "R") {
+            e.preventDefault();
+            setChordPrefix(null);
+            refreshFolder();
             return;
           }
         }
@@ -357,6 +426,19 @@ export default function App() {
         return;
       }
 
+      // Ctrl+F — Chord prefix for File/Search shortcuts.
+      if (e.ctrlKey && !e.shiftKey && e.key === "f") {
+        e.preventDefault();
+        if (chordPrefix === "F") {
+          // Tapped twice quickly — cancel chord
+          setChordPrefix(null);
+        } else {
+          setChordPrefix("F");
+          setTimeout(() => setChordPrefix(null), 1500);
+        }
+        return;
+      }
+
       // Ctrl+A — Chord prefix for AI shortcuts
       if (e.ctrlKey && !e.shiftKey && e.key === "a") {
         e.preventDefault();
@@ -377,7 +459,7 @@ export default function App() {
         return;
       }
 
-      // Ctrl+E — Toggle Explorer
+      // Ctrl+E — Toggle Explorer (still works directly, also available via Ctrl+F,E)
       if (e.ctrlKey && !e.shiftKey && e.key === "e") {
         e.preventDefault();
         setShowExplorer((v) => !v);
@@ -386,6 +468,10 @@ export default function App() {
 
       // Escape — Close overlays
       if (e.key === "Escape") {
+        if (showSearch) {
+          setShowSearch(false);
+          return;
+        }
         if (showAISettings) setShowAISettings(false);
         if (showTermMemory) {
           setShowTermMemory(false);
@@ -400,16 +486,20 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, showAISettings, chordPrefix, browserUrl, closeBrowser, showTermMemory]);
+  }, [openFolder, refreshFolder, createTerminal, showAISettings, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
 
   // --- Menu ---
   const menus = [
     {
       label: "File Explorer",
       items: [
-        { label: "Open Folder", action: openFolder, shortcut: "Ctrl+O" },
-        { label: "Refresh Explorer", action: refreshFolder, shortcut: "Ctrl+R" },
-        { label: "Toggle Explorer", action: () => setShowExplorer((v) => !v), shortcut: "Ctrl+E" },
+        { label: "Open Folder", action: openFolder, shortcut: "Ctrl+F, O" },
+        { label: "Refresh Explorer", action: refreshFolder, shortcut: "Ctrl+F, R" },
+        { label: "Toggle Explorer", action: () => setShowExplorer((v) => !v), shortcut: "Ctrl+F, E" },
+        { label: "Search in Files", action: () => {
+          if (!showSearch) setShowExplorer(true);
+          setShowSearch((v) => !v);
+        }, shortcut: "Ctrl+F, S" },
       ],
     },
     {
@@ -461,8 +551,10 @@ export default function App() {
         <div className="chord-hint">
           {chordPrefix === "A" ? (
             <>Waiting for second key... (press <strong>C</strong> for Chat, <strong>I</strong> for AI Settings)</>
-          ) : (
+          ) : chordPrefix === "T" ? (
             <>Waiting for second key... (press <strong>T</strong> for Terminal, <strong>M</strong> for Memory)</>
+          ) : (
+            <>Waiting for second key... (press <strong>S</strong> for Search, <strong>O</strong> for Open Folder, <strong>E</strong> for Explorer, <strong>R</strong> for Refresh)</>
           )}
         </div>
       )}
@@ -475,14 +567,23 @@ export default function App() {
       <div className="main-area" ref={mainAreaRef}>
         {hasExplorer && (
           <>
-            <FileExplorer
-              onFileOpen={openFile}
-              rootPath={rootPath}
-              setRootPath={setRootPath}
-              visible={true}
-              refreshKey={refreshKey}
-              style={{ flex: ratioFlex(explorerPts) }}
-            />
+            {showSearch ? (
+              <SearchPanel
+                rootPath={rootPath}
+                onResultClick={handleSearchResultClick}
+                onClose={() => setShowSearch(false)}
+                style={{ flex: ratioFlex(explorerPts) }}
+              />
+            ) : (
+              <FileExplorer
+                onFileOpen={openFile}
+                rootPath={rootPath}
+                setRootPath={setRootPath}
+                visible={true}
+                refreshKey={refreshKey}
+                style={{ flex: ratioFlex(explorerPts) }}
+              />
+            )}
             <ResizableHandle
               direction="horizontal"
               onDrag={makeResizeHandler(setExplorerPts, 8, 50, mainAreaRef, "width", 100, true)}
@@ -532,6 +633,8 @@ export default function App() {
                     content={currentFile.content}
                     onChange={(content) => updateFileContent(currentFile.path, content)}
                     onSave={() => saveFile(currentFile.path)}
+                    revealLine={revealLine?.filePath === currentFile.path ? revealLine.lineNumber : undefined}
+                    onRevealConsumed={() => setRevealLine(null)}
                   />
                 ) : (
                   <ShortcutsScreen />

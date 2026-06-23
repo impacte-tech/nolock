@@ -2030,6 +2030,7 @@ version = "0.1.0"
 dependencies = [
  "gtk",
  "portable-pty",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2720,9 +2721,9 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.12.4"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1292b7759ae1cb9ec195452d1390a074f0cd8541ab7a5a8c31cd6db45d4a6ba"
+checksum = "b544ef1b4eac5dc2db33ea63606ae9ffcfac26c1416a2806ae0bf5f56b201191"
 dependencies = [
  "aho-corasick",
  "memchr",
