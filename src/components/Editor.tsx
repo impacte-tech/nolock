@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import * as monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
+import { getSecret } from "../lib/secrets";
 
 // Configure Monaco workers
 self.MonacoEnvironment = {
@@ -137,7 +138,7 @@ class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsPr
       const backend = localStorage.getItem("nolock.backend") || "ollama";
       const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
-      const apiKey = localStorage.getItem("nolock.apiKey") || "";
+      const apiKey = (await getSecret("apiKey")) ?? localStorage.getItem("nolock.apiKey") ?? "";
 
       if (!completionModel) {
         return { items: [] };

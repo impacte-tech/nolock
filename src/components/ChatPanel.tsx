@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Marked } from "marked";
 import FileAutocomplete from "./FileAutocomplete";
 import { countTokens } from "../lib/tokenizer";
+import { getSecret } from "../lib/secrets";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -337,7 +338,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
       const backend = localStorage.getItem("nolock.backend") || "ollama";
       const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
-      const apiKey = localStorage.getItem("nolock.apiKey") || "";
 
       if (!chatModel) {
         setMessages((prev) => [
@@ -349,12 +349,16 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
         return;
       }
 
+      // Read API key from keychain (fallback: localStorage)
+      const apiKey = (await getSecret("apiKey")) ?? localStorage.getItem("nolock.apiKey") ?? "";
+
       // Read enabled tools from localStorage
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
 
-      // Read per-tool configuration from localStorage
-      const toolConfigRaw = localStorage.getItem("nolock.toolConfig") || "{}";
+      // Read per-tool configuration from keychain (fallback: localStorage)
+      const toolConfigStored = await getSecret("toolConfig");
+      const toolConfigRaw = toolConfigStored ?? localStorage.getItem("nolock.toolConfig") ?? "{}";
       const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
 
       // ---- Set up streaming event listener ----

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { getSecret, setSecret } from "../lib/secrets";
 
 interface Props {
   visible: boolean;
@@ -53,20 +54,34 @@ export default function AISettings({ visible, onClose }: Props) {
   const [toolConfig, setToolConfig] = useState<ToolConfig>({});
 
   useEffect(() => {
-    if (visible) {
-      const oldModel = localStorage.getItem("nolock.model");
-      const toolsRaw = localStorage.getItem("nolock.toolsEnabled");
-      const toolConfigRaw = localStorage.getItem("nolock.toolConfig");
-      setConfig({
-        backend: localStorage.getItem("nolock.backend") || "ollama",
-        url: localStorage.getItem("nolock.url") || "http://localhost:11434",
-        completionModel: localStorage.getItem("nolock.completionModel") || oldModel || "",
-        chatModel: localStorage.getItem("nolock.chatModel") || oldModel || "",
-        apiKey: localStorage.getItem("nolock.apiKey") || "",
-        toolsEnabled: toolsRaw ? JSON.parse(toolsRaw) : [],
-      });
-      setToolConfig(toolConfigRaw ? JSON.parse(toolConfigRaw) : {});
-    }
+    if (!visible) return;
+
+    const oldModel = localStorage.getItem("nolock.model");
+    const toolsRaw = localStorage.getItem("nolock.toolsEnabled");
+    const toolConfigRaw = localStorage.getItem("nolock.toolConfig");
+
+    // Set state synchronously from localStorage first (for immediate render)
+    setConfig({
+      backend: localStorage.getItem("nolock.backend") || "ollama",
+      url: localStorage.getItem("nolock.url") || "http://localhost:11434",
+      completionModel: localStorage.getItem("nolock.completionModel") || oldModel || "",
+      chatModel: localStorage.getItem("nolock.chatModel") || oldModel || "",
+      apiKey: localStorage.getItem("nolock.apiKey") || "",
+      toolsEnabled: toolsRaw ? JSON.parse(toolsRaw) : [],
+    });
+    setToolConfig(toolConfigRaw ? JSON.parse(toolConfigRaw) : {});
+
+    // Then asynchronously upgrade from OS keychain if available
+    (async () => {
+      const storedApiKey = await getSecret("apiKey");
+      if (storedApiKey != null) {
+        setConfig((prev) => ({ ...prev, apiKey: storedApiKey }));
+      }
+      const storedToolConfig = await getSecret("toolConfig");
+      if (storedToolConfig != null) {
+        setToolConfig(JSON.parse(storedToolConfig));
+      }
+    })();
   }, [visible]);
 
   /** Update a specific tool's config field */
@@ -82,10 +97,14 @@ export default function AISettings({ visible, onClose }: Props) {
     localStorage.setItem("nolock.url", config.url);
     localStorage.setItem("nolock.completionModel", config.completionModel);
     localStorage.setItem("nolock.chatModel", config.chatModel);
-    localStorage.setItem("nolock.apiKey", config.apiKey);
     localStorage.setItem("nolock.toolsEnabled", JSON.stringify(config.toolsEnabled));
-    localStorage.setItem("nolock.toolConfig", JSON.stringify(toolConfig));
     localStorage.setItem("nolock.model", config.completionModel);
+
+    // Store secrets in OS keychain + localStorage (dual-write)
+    // Fire-and-forget: close modal immediately, keychain writes happen async
+    setSecret("apiKey", config.apiKey);
+    setSecret("toolConfig", JSON.stringify(toolConfig));
+
     onClose();
   };
 
