@@ -121,31 +121,6 @@ struct SearchMatch {
     match_end: usize,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchRequest {
-    root_path: String,
-    query: String,
-    #[serde(default)]
-    match_case: bool,
-    #[serde(default)]
-    use_regex: bool,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReplaceRequest {
-    root_path: String,
-    query: String,
-    replacement: String,
-    #[serde(default)]
-    match_case: bool,
-    #[serde(default)]
-    use_regex: bool,
-    #[serde(default)]
-    target_files: Option<Vec<String>>,
-}
-
 #[derive(serde::Serialize)]
 struct ReplaceResult {
     files_changed: usize,
@@ -206,10 +181,15 @@ fn build_search_regex(query: &str, use_regex: bool, match_case: bool) -> Result<
 }
 
 #[tauri::command]
-fn search_in_files(req: SearchRequest) -> Result<Vec<SearchMatch>, String> {
-    let re = build_search_regex(&req.query, req.use_regex, req.match_case)?;
+fn search_in_files(
+    root_path: String,
+    query: String,
+    match_case: bool,
+    use_regex: bool,
+) -> Result<Vec<SearchMatch>, String> {
+    let re = build_search_regex(&query, use_regex, match_case)?;
 
-    let root = std::path::Path::new(&req.root_path);
+    let root = std::path::Path::new(&root_path);
     let mut results = Vec::new();
     let mut dirs_to_visit = vec![root.to_path_buf()];
 
@@ -281,10 +261,17 @@ fn search_in_files(req: SearchRequest) -> Result<Vec<SearchMatch>, String> {
 }
 
 #[tauri::command]
-fn replace_in_files(req: ReplaceRequest) -> Result<ReplaceResult, String> {
-    let re = build_search_regex(&req.query, req.use_regex, req.match_case)?;
+fn replace_in_files(
+    root_path: String,
+    query: String,
+    replacement: String,
+    match_case: bool,
+    use_regex: bool,
+    target_files: Option<Vec<String>>,
+) -> Result<ReplaceResult, String> {
+    let re = build_search_regex(&query, use_regex, match_case)?;
 
-    let root = std::path::Path::new(&req.root_path);
+    let root = std::path::Path::new(&root_path);
     let mut files_changed = 0;
     let mut replacements_made = 0;
     let mut dirs_to_visit = vec![root.to_path_buf()];
@@ -324,7 +311,7 @@ fn replace_in_files(req: ReplaceRequest) -> Result<ReplaceResult, String> {
                 let file_path_str = path.to_string_lossy().to_string();
 
                 // If target_files is specified, only operate on those files
-                if let Some(ref targets) = req.target_files {
+                if let Some(ref targets) = target_files {
                     if !targets.iter().any(|t| t == &file_path_str) {
                         continue;
                     }
@@ -338,7 +325,7 @@ fn replace_in_files(req: ReplaceRequest) -> Result<ReplaceResult, String> {
                 let count = re.find_iter(&content).count();
 
                 if count > 0 {
-                    let new_content = re.replace_all(&content, req.replacement.as_str());
+                    let new_content = re.replace_all(&content, replacement.as_str());
                     match std::fs::write(&path, new_content.as_ref()) {
                         Ok(_) => {
                             replacements_made += count;
@@ -2022,6 +2009,392 @@ mod tests {
             !fixed_message.as_object().unwrap().contains_key("tool_name"),
             "FIX confirms: tool_name is gone (replaced by tool_call_id)"
         );
+    }
+
+    // ---- build_search_regex -----------------------------------------------
+    #[test]
+    fn test_build_search_regex_plain_case_sensitive() {
+        let re = build_search_regex("hello", false, true).unwrap();
+        assert!(re.is_match("hello"));
+        assert!(!re.is_match("HELLO"));
+        assert!(re.is_match("hello world"));
+    }
+
+    #[test]
+    fn test_build_search_regex_plain_case_insensitive() {
+        let re = build_search_regex("hello", false, false).unwrap();
+        assert!(re.is_match("hello"));
+        assert!(re.is_match("HELLO"));
+        assert!(re.is_match("Hello"));
+    }
+
+    #[test]
+    fn test_build_search_regex_regex_mode() {
+        let re = build_search_regex("he.*o", true, true).unwrap();
+        assert!(re.is_match("hello"));
+        assert!(re.is_match("he123o"));
+        assert!(!re.is_match("hxllo"));
+    }
+
+    #[test]
+    fn test_build_search_regex_regex_case_insensitive() {
+        let re = build_search_regex("hello", true, false).unwrap();
+        assert!(re.is_match("HELLO"));
+        assert!(re.is_match("hello"));
+    }
+
+    #[test]
+    fn test_build_search_regex_invalid_regex() {
+        let result = build_search_regex("[invalid", true, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_search_regex_escapes_plain_text() {
+        // In plain text mode, regex special chars should be escaped
+        let re = build_search_regex("foo.bar", false, true).unwrap();
+        // Should match literal "foo.bar", not "fooXbar"
+        assert!(re.is_match("foo.bar"));
+        assert!(!re.is_match("fooXbar"));
+    }
+
+    // ---- should_skip_entry ------------------------------------------------
+    #[test]
+    fn test_should_skip_hidden_files() {
+        let path = std::path::Path::new("/test/.hidden");
+        assert!(should_skip_entry(path, false));
+    }
+
+    #[test]
+    fn test_should_skip_git_dir() {
+        let path = std::path::Path::new("/test/.git");
+        assert!(should_skip_entry(path, true));
+    }
+
+    #[test]
+    fn test_should_skip_node_modules() {
+        let path = std::path::Path::new("/test/node_modules");
+        assert!(should_skip_entry(path, true));
+    }
+
+    #[test]
+    fn test_should_not_skip_regular_file() {
+        let path = std::path::Path::new("/test/main.rs");
+        assert!(!should_skip_entry(path, false));
+    }
+
+    #[test]
+    fn test_should_not_skip_regular_dir() {
+        let path = std::path::Path::new("/test/src");
+        assert!(!should_skip_entry(path, true));
+    }
+
+    // ---- is_binary --------------------------------------------------------
+    #[test]
+    fn test_is_binary_with_text_file() {
+        let dir = std::env::temp_dir().join("nolock_test_binary_check");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("hello.txt");
+        std::fs::write(&path, "Hello, this is plain text!").unwrap();
+        assert!(!is_binary(&path));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_is_binary_with_binary_content() {
+        let dir = std::env::temp_dir().join("nolock_test_binary_check2");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("binary.bin");
+        let data = [0x00, 0x01, 0x02, 0x03, 0x04];
+        std::fs::write(&path, &data).unwrap();
+        assert!(is_binary(&path));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_is_binary_empty_file_not_binary() {
+        let dir = std::env::temp_dir().join("nolock_test_binary_check3");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.txt");
+        std::fs::write(&path, "").unwrap();
+        assert!(!is_binary(&path));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    // ---- search_in_files integration --------------------------------------
+    fn create_search_fixture(dir: &std::path::Path) {
+        let _ = std::fs::create_dir_all(dir.join("src"));
+        std::fs::write(dir.join("src/main.rs"), "fn main() {\n    println!(\"Hello\");\n}\n").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "pub fn greet() {\n    println!(\"Hello world\");\n}\n").unwrap();
+        std::fs::write(dir.join("README.md"), "# My Project\nHello everyone!\n").unwrap();
+        // Hidden dir should be skipped
+        let _ = std::fs::create_dir_all(dir.join(".git"));
+        std::fs::write(dir.join(".git/config"), "[core]\n\trepositoryformatversion = 0\n").unwrap();
+    }
+
+    #[test]
+    fn test_search_in_files_finds_matches() {
+        let dir = std::env::temp_dir().join("nolock_test_search_integration");
+        let _ = std::fs::create_dir_all(&dir);
+        create_search_fixture(&dir);
+
+        let result = search_in_files(
+            dir.to_string_lossy().to_string(),
+            "Hello".to_string(),
+            true,  // match_case
+            false, // use_regex
+        );
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        // Should find "Hello" in main.rs, lib.rs, and README.md
+        // But NOT in .git/config (hidden dir skipped)
+        assert_eq!(matches.len(), 3, "Expected 3 matches across 3 files");
+
+        // Verify file diversity
+        let mut files: Vec<&str> = matches.iter().map(|m| {
+            let name = std::path::Path::new(&m.file_path)
+                .file_name().unwrap().to_str().unwrap();
+            name
+        }).collect();
+        files.sort();
+        assert_eq!(files, vec!["README.md", "lib.rs", "main.rs"]);
+
+        // Cleanup
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_search_in_files_case_insensitive() {
+        let dir = std::env::temp_dir().join("nolock_test_search_case");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("test.txt"), "Hello\nWORLD\nhello\n").unwrap();
+
+        let result = search_in_files(
+            dir.to_string_lossy().to_string(),
+            "hello".to_string(),
+            false, // match_case = false
+            false,
+        );
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        // Should match "Hello" and "hello" but not "WORLD"
+        assert!(!matches.is_empty());
+        // check that line 1 (Hello) and line 3 (hello) are matched
+        let line_numbers: Vec<usize> = matches.iter().map(|m| m.line_number).collect();
+        assert!(line_numbers.contains(&1), "Line 1 (Hello) should match");
+        assert!(line_numbers.contains(&3), "Line 3 (hello) should match");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_search_in_files_no_results() {
+        let dir = std::env::temp_dir().join("nolock_test_search_no_results");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("test.txt"), "Hello\nWorld\n").unwrap();
+
+        let result = search_in_files(
+            dir.to_string_lossy().to_string(),
+            "XYZ".to_string(),
+            true, false,
+        );
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        assert!(matches.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_search_in_files_skips_hidden_dirs() {
+        let dir = std::env::temp_dir().join("nolock_test_search_hidden");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::create_dir_all(dir.join(".hidden_dir"));
+        std::fs::write(dir.join(".hidden_dir/secret.txt"), "secret stuff").unwrap();
+        std::fs::write(dir.join("visible.txt"), "visible stuff").unwrap();
+
+        let result = search_in_files(
+            dir.to_string_lossy().to_string(),
+            "stuff".to_string(),
+            true, false,
+        );
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        // Only visible.txt should match
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].file_path.contains("visible.txt"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_search_in_files_regex_mode() {
+        let dir = std::env::temp_dir().join("nolock_test_search_regex");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("data.txt"), "abc123\ndef456\nabc789\n").unwrap();
+
+        let result = search_in_files(
+            dir.to_string_lossy().to_string(),
+            r"abc\d+".to_string(),
+            true,  // match_case
+            true,  // use_regex
+        );
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        assert_eq!(matches.len(), 2, "Should match abc123 and abc789");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_search_in_files_returns_match_positions() {
+        let dir = std::env::temp_dir().join("nolock_test_search_positions");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("test.txt"), "abc hello def\n").unwrap();
+
+        let result = search_in_files(
+            dir.to_string_lossy().to_string(),
+            "hello".to_string(),
+            true, false,
+        );
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].match_start, 4);  // "hello" starts at index 4
+        assert_eq!(matches[0].match_end, 9);    // "hello" ends at index 9
+        assert_eq!(matches[0].line_number, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- replace_in_files integration ------------------------------------
+    #[test]
+    fn test_replace_in_files_basic() {
+        let dir = std::env::temp_dir().join("nolock_test_replace_basic");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("test.txt"), "Hello World\nGoodbye World\n").unwrap();
+
+        let result = replace_in_files(
+            dir.to_string_lossy().to_string(),
+            "World".to_string(),
+            "Moon".to_string(),
+            true,  // match_case
+            false, // use_regex
+            None,  // target_files
+        );
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert_eq!(res.files_changed, 1);
+        assert_eq!(res.replacements_made, 2);
+
+        // Verify file content
+        let content = std::fs::read_to_string(dir.join("test.txt")).unwrap();
+        assert_eq!(content, "Hello Moon\nGoodbye Moon\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_replace_in_files_case_insensitive() {
+        let dir = std::env::temp_dir().join("nolock_test_replace_case");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("test.txt"), "Hello WORLD world\n").unwrap();
+
+        let result = replace_in_files(
+            dir.to_string_lossy().to_string(),
+            "world".to_string(),
+            "Moon".to_string(),
+            false, // match_case = false
+            false,
+            None,
+        );
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert_eq!(res.replacements_made, 2); // WORLD and world
+
+        let content = std::fs::read_to_string(dir.join("test.txt")).unwrap();
+        assert_eq!(content, "Hello Moon Moon\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_replace_in_files_targeted_files() {
+        let dir = std::env::temp_dir().join("nolock_test_replace_targeted");
+        let _ = std::fs::create_dir_all(&dir);
+        let file1 = dir.join("keep.txt");
+        let file2 = dir.join("skip.txt");
+        std::fs::write(&file1, "Hello World\n").unwrap();
+        std::fs::write(&file2, "Hello World\n").unwrap();
+
+        let result = replace_in_files(
+            dir.to_string_lossy().to_string(),
+            "Hello".to_string(),
+            "Hi".to_string(),
+            true, false,
+            Some(vec![file1.to_string_lossy().to_string()]),
+        );
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert_eq!(res.files_changed, 1);
+        assert_eq!(res.replacements_made, 1);
+
+        // keep.txt was modified
+        let content1 = std::fs::read_to_string(&file1).unwrap();
+        assert_eq!(content1, "Hi World\n");
+        // skip.txt was NOT modified
+        let content2 = std::fs::read_to_string(&file2).unwrap();
+        assert_eq!(content2, "Hello World\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_replace_in_files_regex() {
+        let dir = std::env::temp_dir().join("nolock_test_replace_regex");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("test.txt"), "abc123 def456 ghi789\n").unwrap();
+
+        let result = replace_in_files(
+            dir.to_string_lossy().to_string(),
+            r"[a-z]+".to_string(),
+            "X".to_string(),
+            true, // match_case
+            true, // use_regex
+            None,
+        );
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert_eq!(res.replacements_made, 3);
+
+        let content = std::fs::read_to_string(dir.join("test.txt")).unwrap();
+        assert_eq!(content, "X123 X456 X789\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_replace_in_files_no_matches() {
+        let dir = std::env::temp_dir().join("nolock_test_replace_no_match");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("test.txt"), "Hello World\n").unwrap();
+
+        let result = replace_in_files(
+            dir.to_string_lossy().to_string(),
+            "XYZ".to_string(),
+            "ABC".to_string(),
+            true, false,
+            None,
+        );
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert_eq!(res.files_changed, 0);
+        assert_eq!(res.replacements_made, 0);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ---- list_directory with temp dir ------------------------------------

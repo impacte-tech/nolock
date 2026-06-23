@@ -127,12 +127,10 @@ export default function SearchPanel({ rootPath, onResultClick, onClose, style }:
 
       try {
         const matches: SearchMatch[] = await invoke("search_in_files", {
-          req: {
-            rootPath,
-            query: trimmed,
-            matchCase: mc,
-            useRegex: ur,
-          },
+          rootPath,
+          query: trimmed,
+          matchCase: mc,
+          useRegex: ur,
         });
 
         if (matches.length === 0) {
@@ -212,13 +210,11 @@ export default function SearchPanel({ rootPath, onResultClick, onClose, style }:
       const result: { files_changed: number; replacements_made: number } = await invoke(
         "replace_in_files",
         {
-          req: {
-            rootPath,
-            query: trimmed,
-            replacement,
-            matchCase,
-            useRegex,
-          },
+          rootPath,
+          query: trimmed,
+          replacement,
+          matchCase,
+          useRegex,
         },
       );
 
