@@ -20,9 +20,9 @@
 
 ## About
 
-**nolock** is a desktop IDE that puts you in full control. It combines a full-featured code editor (powered by Monaco), a real terminal emulator, an AI agent chat panel, and a native web browser — all running locally with no telemetry, no accounts, and no lock-in.
+**nolock** is a desktop IDE that puts you in full control. It combines a full-featured code editor (powered by Monaco), a real terminal emulator, an AI agent chat panel, a native web browser, and a workspace-wide file search — all running locally with no telemetry, no accounts, and no lock-in.
 
-Connect it to your preferred AI backend (Ollama, llama.cpp, OpenRouter, or OpenCode Zen) for inline code completions and agentic chat with tool-calling capabilities.
+Connect it to your preferred AI backend (Ollama, llama.cpp, OpenRouter, or OpenCode Zen) for inline code completions and agentic chat with tool-calling capabilities (web search, file read, directory listing).
 
 ---
 
@@ -52,6 +52,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 | **serde / serde_json** | A serialization/deserialization framework for Rust. | Handles all JSON serialization for IPC commands, AI API requests/responses, and configuration persistence. |
 | **reqwest** | An ergonomic, batteries-included HTTP client for Rust. | Makes HTTP requests to AI backends (Ollama, llama.cpp, OpenRouter, OpenCode Zen) for chat completions, code completions, and model information. |
 | **portable-pty** | A cross-platform PTY (pseudo-terminal) library for Rust that works on Linux, macOS, and Windows. | Spawns and manages real interactive shell sessions (bash, zsh, etc.) with proper terminal dimensions, resizing, and signal handling. |
+| **regex** | A Rust library for regular expression matching. | Powers workspace-wide file search with regex mode, case-insensitive matching, and batch find-and-replace across files. |
 | **wry** | A cross-platform webview rendering library used by Tauri. | On Linux, creates a native GTK-based webview overlay for the in-app browser panel (supporting sites that block iframes). |
 | **GTK3 (gtk-rs)** | Rust bindings for the GTK 3 toolkit. | On Linux, manages a GtkOverlay + GtkFixed widget setup to position the native browser webview precisely within the application layout. |
 
@@ -69,17 +70,20 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 | Technology | What it is | How nolock uses it |
 |---|---|---|
 | **DuckDuckGo Instant Answer API** | A free, no-API-key search API that returns topic summaries, definitions, and related topics as JSON. | Powers the `web_search` tool in Agent Chat — enables the AI to discover relevant URLs before fetching page content with `web_fetch`. No signup, no cost, privacy-respecting. |
+| **Brave Search API** | A privacy-focused web search API that returns real web search results (titles, URLs, descriptions). | Optional alternative to DuckDuckGo for the `web_search` tool — provides full web search results with better coverage for technical queries. Requires a free API key from [Brave Search API](https://brave.com/search/api/). |
 
 ---
 
 ## Features
 
 - **Code Editor** — Full-featured Monaco editor with syntax highlighting for 100+ languages, bracket colorization, minimap, and word wrap.
+- **File Search & Replace** — Search across all workspace files with regex support, match-case toggles, debounced live results, grouped by file with inline match previews, and batch replace-all with confirmation.
 - **AI Inline Completions** — Fill-In-The-Middle (FITM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
-- **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web fetch, file read, directory listing), and context token tracking.
+- **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing), and context token tracking.
+- **AI Agent Manager** — Create and manage specialized AI agents (e.g., code-reviewer, doc-writer) stored as `.json` files in the `.agents/` directory with custom system prompts.
 - **Integrated Terminal** — Real PTY-based shell sessions with multiple tabs, resize support, and command history tracking.
 - **Terminal Memory** — Automatically records commands, tracks frequency, and lets you organize commands into categories for quick recall.
-- **File Explorer** — Tree-based file browser with directory expansion, refresh, and file-type color coding.
+- **File Explorer** — Tree-based file browser with directory expansion, refresh, file-type color coding, and file/directory CRUD operations (create, rename, delete, copy).
 - **Native Browser Panel** — Embedded web browser using a native OS webview (not an iframe) — browse any site without leaving the app.
 - **Resizable Panels** — All panels (explorer, editor, terminal, browser, chat) are fully resizable with drag handles.
 - **Multi-Backend AI** — Switch between Ollama, llama.cpp, OpenRouter, and OpenCode Zen for completions and chat.
@@ -98,6 +102,7 @@ nolock would not exist without the following open-source projects and communitie
 - **[Ollama](https://ollama.com)** — For making local LLM deployment as simple as a single command, enabling private and offline AI-powered development.
 - **[llama.cpp](https://github.com/ggerganov/llama.cpp)** — For the incredible engineering achievement of running state-of-the-art LLMs efficiently on consumer hardware.
 - **[DuckDuckGo](https://duckduckgo.com)** — For providing a free, no-API-key Instant Answer API that powers the `web_search` tool in Agent Chat. Results from DuckDuckGo.
+- **[Brave Search](https://brave.com/search)** — For providing a privacy-focused web search API with real web search results, enabling the optional `web_search` tool backend for more comprehensive coverage.
 
 And to all the open-source projects listed above — Monaco Editor, React, Tauri, xterm.js, and every other library that makes this possible. Thank you.
 
@@ -206,17 +211,54 @@ Then in nolock's AI Settings (`Ctrl+A, I`):
 
 ### Keyboard Shortcuts
 
+#### File & Search (Ctrl+F chord)
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+F, S` | Toggle file search |
+| `Ctrl+F, O` | Open folder |
+| `Ctrl+F, E` | Toggle file explorer |
+| `Ctrl+F, R` | Refresh explorer |
+
+Within the search panel (`Ctrl+F, S`):
+
+| Key | Action |
+|---|---|
+| `Escape` | Close search panel |
+| `Enter` | Trigger search immediately (bypasses debounce) |
+| Click result line | Open file at that line |
+
+#### Terminal (Ctrl+T chord)
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+T, T` | New terminal |
+| `Ctrl+T, M` | Open terminal memory overlay |
+
+#### AI (Ctrl+A chord)
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+A, C` | Toggle agent chat panel |
+| `Ctrl+A, G` | Manage AI agents |
+| `Ctrl+A, I` | Open AI settings |
+| `Ctrl+Shift+I` | Direct AI settings |
+
+#### Browser
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Shift+B` | Toggle browser panel |
+
+#### Direct Shortcuts
+
 | Shortcut | Action |
 |---|---|
 | `Ctrl+O` | Open folder |
 | `Ctrl+E` | Toggle file explorer |
-| `Ctrl+T, T` | New terminal |
-| `Ctrl+T, M` | Open terminal memory |
-| `Ctrl+A, C` | Toggle agent chat |
-| `Ctrl+A, I` | Open AI settings |
-| `Ctrl+Shift+B` | Toggle browser panel |
-| `Ctrl+Shift+I` | Direct AI settings |
-| `Escape` | Close overlays |
+| `Ctrl+R` | Refresh explorer |
+| `Ctrl+S` | Save current file |
+| `Escape` | Close overlays / panels |
 
 ---
 
