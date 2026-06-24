@@ -29,7 +29,7 @@ describe("ChatPanel", () => {
 
   it("renders empty chat state", () => {
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
-    expect(screen.getByText("Ask anything about your code...")).toBeInTheDocument();
+    expect(screen.getByText(/Ask anything about your code/)).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/Ask the AI/)).toBeInTheDocument();
     expect(screen.getByText("Send")).toBeInTheDocument();
   });
@@ -166,6 +166,6 @@ describe("ChatPanel", () => {
     fireEvent.click(screen.getByText("Send"));
 
     // No messages should appear
-    expect(screen.getByText("Ask anything about your code...")).toBeInTheDocument();
+    expect(screen.getByText(/Ask anything about your code/)).toBeInTheDocument();
   });
 });

@@ -109,6 +109,62 @@ struct DirEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Agent management commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct AgentEntry {
+    name: String,       // file stem (e.g. "code-reviewer" from "code-reviewer.json")
+    path: String,       // full path to the file
+}
+
+/// List all agent files in the `.agents/` directory under root_path.
+/// Creates `.agents/` if it does not exist. Returns agent entries sorted by name.
+#[tauri::command]
+fn list_agents(root_path: String) -> Result<Vec<AgentEntry>, String> {
+    let agents_dir = std::path::Path::new(&root_path).join(".agents");
+    // Create the directory if it doesn't exist
+    if !agents_dir.exists() {
+        std::fs::create_dir_all(&agents_dir)
+            .map_err(|e| format!("Failed to create .agents directory: {}", e))?;
+        return Ok(Vec::new());
+    }
+
+    let read_dir = std::fs::read_dir(&agents_dir)
+        .map_err(|e| format!("Failed to read .agents directory: {}", e))?;
+
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+        if metadata.is_file() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            // Only include .json files
+            if file_name.ends_with(".json") {
+                let stem = file_name.strip_suffix(".json").unwrap_or(&file_name).to_string();
+                entries.push(AgentEntry {
+                    name: stem,
+                    path: entry.path().to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
+
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(entries)
+}
+
+/// Read and parse an agent JSON file by its full path.
+#[tauri::command]
+fn read_agent(path: String) -> Result<serde_json::Value, String> {
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read agent file {}: {}", path, e))?;
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse agent file {}: {}", path, e))?;
+    Ok(parsed)
+}
+
+// ---------------------------------------------------------------------------
 // File search & replace commands
 // ---------------------------------------------------------------------------
 
@@ -1718,6 +1774,8 @@ pub fn run() {
             delete_file,
             copy_file,
             create_file,
+            list_agents,
+            read_agent,
             search_in_files,
             replace_in_files,
             get_model_info,

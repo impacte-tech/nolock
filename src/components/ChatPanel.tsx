@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Marked } from "marked";
-import FileAutocomplete from "./FileAutocomplete";
+import FileAutocomplete, { type AgentRef } from "./FileAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
 
@@ -24,6 +24,8 @@ interface Message {
   /** Text to display in the chat UI (user sees this instead of the full API content) */
   displayContent?: string;
   toolCalls?: ToolCallLog[];
+  /** File and agent @mentions referenced in this message (for context badges). */
+  contextRefs?: { type: "file" | "agent"; name: string }[];
 }
 
 export interface FileRef {
@@ -38,6 +40,8 @@ interface Props {
   onOpenUrl: (url: string) => void;
   rootPath?: string;
   style?: React.CSSProperties;
+  /** Called to open the agent manager UI */
+  onOpenAgentManager?: () => void;
 }
 
 // Mutable ref set by ChatPanel so MarkdownContent can call it without props drilling
@@ -99,7 +103,26 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
   );
 }
 
-export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: Props) {
+/**
+ * Renders text with @mentions highlighted in a distinct colour.
+ * Splits on @word patterns and wraps matches in a styled span.
+ */
+function MentionHighlight({ text }: { text: string }) {
+  const parts = text.split(/(@\w[\w.-]*)/g);
+  return (
+    <>
+      {parts.map((part, i) =>
+        part.startsWith("@") ? (
+          <span key={i} className="mention-highlight">{part}</span>
+        ) : (
+          part
+        )
+      )}
+    </>
+  );
+}
+
+export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, onOpenAgentManager }: Props) {
   // Wire up global ref so MarkdownContent can open URLs
   useEffect(() => {
     globalOpenUrl = onOpenUrl;
@@ -116,31 +139,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
 
   // ---- File @mention state ----
   const [fileRefs, setFileRefs] = useState<FileRef[]>([]);
+  const [agentRefs, setAgentRefs] = useState<AgentRef[]>([]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState<number>(-1);
-  const [autoCompletePos, setAutoCompletePos] = useState<{ left: number; bottom: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   /** Tracks total context tokens sent across the conversation (persists after fileRefs are cleared). */
   const [accumulatedContextTokens, setAccumulatedContextTokens] = useState(0);
-
-  /** Roughly estimates the viewport position of the character at `pos` in the textarea. */
-  const getCaretPos = useCallback((textarea: HTMLTextAreaElement, pos: number) => {
-    const rect = textarea.getBoundingClientRect();
-    const style = getComputedStyle(textarea);
-    const lineHeight = parseInt(style.lineHeight) || 20;
-    const padLeft = parseInt(style.paddingLeft) || 10;
-    const padTop = parseInt(style.paddingTop) || 8;
-    const before = textarea.value.substring(0, pos);
-    const lines = before.split("\n");
-    const lineIdx = lines.length - 1;
-    const colIdx = lines[lineIdx]?.length || 0;
-    const charWidth = 7.5; // approximate for 13px font in this UI
-    return {
-      left: rect.left + padLeft + colIdx * charWidth,
-      bottom: rect.top + padTop + (lineIdx + 1) * lineHeight - textarea.scrollTop,
-    };
-  }, []);
 
   /** Detect @mention patterns as the user types. */
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -151,7 +156,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
     if (cursorPos === null) {
       setMentionQuery(null);
       setMentionIndex(-1);
-      setAutoCompletePos(null);
       return;
     }
 
@@ -164,9 +168,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
       if (!/\s/.test(afterAt)) {
         setMentionQuery(afterAt);
         setMentionIndex(atIdx);
-        if (textareaRef.current) {
-          setAutoCompletePos(getCaretPos(textareaRef.current, atIdx));
-        }
         return;
       }
     }
@@ -174,16 +175,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
     // No active mention
     setMentionQuery(null);
     setMentionIndex(-1);
-    setAutoCompletePos(null);
-  }, [getCaretPos]);
+  }, []);
 
   /** Called when user selects a file from the autocomplete dropdown. */
   const handleFileSelect = useCallback((filePath: string, fileName: string) => {
-    // Remove the @mention text from the input
+    // Keep the @name visible in the input (replace the partial query with the full @name)
     if (mentionIndex !== -1 && mentionQuery !== null) {
       const before = input.substring(0, mentionIndex);
       const after = input.substring(mentionIndex + 1 + mentionQuery.length);
-      setInput(before + after);
+      setInput(before + "@" + fileName + after);
     }
 
     // Add to file refs (deduplicate by path)
@@ -192,7 +192,26 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
     // Close autocomplete
     setMentionQuery(null);
     setMentionIndex(-1);
-    setAutoCompletePos(null);
+
+    // Refocus the textarea
+    textareaRef.current?.focus();
+  }, [input, mentionIndex, mentionQuery]);
+
+  /** Called when user selects an agent from the autocomplete dropdown. */
+  const handleAgentSelect = useCallback((agent: AgentRef) => {
+    // Keep the @name visible in the input (replace the partial query with the full @name)
+    if (mentionIndex !== -1 && mentionQuery !== null) {
+      const before = input.substring(0, mentionIndex);
+      const after = input.substring(mentionIndex + 1 + mentionQuery.length);
+      setInput(before + "@" + agent.name + after);
+    }
+
+    // Add to agent refs (deduplicate by path)
+    setAgentRefs((prev) => (prev.some((r) => r.path === agent.path) ? prev : [...prev, agent]));
+
+    // Close autocomplete
+    setMentionQuery(null);
+    setMentionIndex(-1);
 
     // Refocus the textarea
     textareaRef.current?.focus();
@@ -200,6 +219,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
 
   const removeFileRef = useCallback((path: string) => {
     setFileRefs((prev) => prev.filter((r) => r.path !== path));
+  }, []);
+
+  const removeAgentRef = useCallback((path: string) => {
+    setAgentRefs((prev) => prev.filter((r) => r.path !== path));
   }, []);
 
   useEffect(() => {
@@ -259,10 +282,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
   }, []);
 
   /** Compute total context size: accumulated (from prior sends) + pending (current chips). */
-  const contextSize = accumulatedContextTokens + fileRefs.reduce((sum, ref) => sum + (ref._tokenCount || 0), 0);
+  const contextSize = accumulatedContextTokens
+    + fileRefs.reduce((sum, ref) => sum + (ref._tokenCount || 0), 0)
+    + agentRefs.length * 50; // rough estimate for agent system prompt tokens
 
   const clearAllRefs = useCallback(() => {
     setFileRefs([]);
+    setAgentRefs([]);
     setAccumulatedContextTokens(0);
   }, []);
 
@@ -292,14 +318,21 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
     }
 
     // ---- Build display content (what the user sees in chat) ----
-    const fileAnnotations = fileRefs.map((r) => r.name).join(", ");
-    const displayText = fileAnnotations ? `${trimmed}\n[ref: ${fileAnnotations}]` : trimmed;
+    // The @mentions are already embedded in the input text (kept on autocomplete select).
+    // We just show the message as-is, with context badges below.
+    const contextRefs: { type: "file" | "agent"; name: string }[] = [
+      ...fileRefs.map((r) => ({ type: "file" as const, name: r.name })),
+      ...agentRefs.map((r) => ({ type: "agent" as const, name: r.name })),
+    ];
+    const displayText = trimmed;
 
     // ---- Build API content (sent to the AI backend) ----
     let apiContent = trimmed;
     const refsWithSize: FileRef[] = [];
+
+    // Collect file contexts
+    const contextParts: string[] = [];
     if (fileRefs.length > 0) {
-      const contextParts: string[] = [];
       for (const ref of fileRefs) {
         try {
           const fileContent: string = await invoke("read_file", { path: ref.path });
@@ -310,13 +343,27 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
           console.error(`Failed to read referenced file ${ref.path}:`, e);
         }
       }
-      // Update pending fileRefs with character counts (for chip-level context indicator)
       if (refsWithSize.length > 0) {
         setFileRefs(refsWithSize);
       }
-      if (contextParts.length > 0) {
-        apiContent = `Context:\n${contextParts.join("\n\n")}\n\n---\n${apiContent}`;
+    }
+
+    // Build system message from agent prompts
+    const agentSystemMessages: { role: "system"; content: string }[] = [];
+    for (const agent of agentRefs) {
+      try {
+        const data: any = await invoke("read_agent", { path: agent.path });
+        if (data.prompt) {
+          agentSystemMessages.push({ role: "system", content: data.prompt });
+        }
+      } catch (e) {
+        console.error(`Failed to read agent prompt for ${agent.name}:`, e);
       }
+    }
+
+    // Append file context to the user message
+    if (contextParts.length > 0) {
+      apiContent = `Context:\n${contextParts.join("\n\n")}\n\n---\n${apiContent}`;
     }
 
     // Accumulate context tokens for the persistent indicator
@@ -326,11 +373,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
       setAccumulatedContextTokens((prev) => prev + sentTokens + msgTokens);
     }
 
-    const userMsg: Message = { role: "user", content: apiContent, displayContent: displayText };
+    const userMsg: Message = { role: "user", content: apiContent, displayContent: displayText, contextRefs };
     const allMessages = [...messages, userMsg];
     setMessages(allMessages);
     setInput("");
     setFileRefs([]); // Clear pending file refs after sending
+    setAgentRefs([]); // Clear pending agent refs after sending
     setLoading(true);
 
     let unlisten: (() => void) | null = null;
@@ -379,12 +427,18 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
       // Add a placeholder assistant message that streaming tokens will fill
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
+      // Prepend agent system messages before user messages
+      const apiMessages = [
+        ...agentSystemMessages,
+        ...allMessages.map((m) => ({ role: m.role, content: m.content })),
+      ];
+
       const result: { content: string; tool_calls: ToolCallLog[] } = await invoke("ai_chat", {
         req: {
           backend,
           url,
           model: chatModel,
-          messages: allMessages.map((m) => ({ role: m.role, content: m.content })),
+          messages: apiMessages,
           apiKey: apiKey || null,
           toolsEnabled,
           toolConfigs,
@@ -436,18 +490,33 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
       sendingRef.current = false;
       setLoading(false);
     }
-  }, [input, loading, messages, fileRefs, clearAllRefs]);
+  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs]);
 
   return (
     <div className="chat-panel" style={style}>
       <div className="chat-header">
         <span>Agent Chat</span>
-        <button onClick={onClose}>&times;</button>
+        <div className="chat-header-actions">
+          {rootPath && onOpenAgentManager && (
+            <button className="chat-header-btn" onClick={onOpenAgentManager} title="Manage AI Agents">
+              <svg className="robot-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="4" x2="12" y2="7" />
+                <circle cx="12" cy="3" r="1.5" fill="currentColor" />
+                <rect x="3" y="7" width="18" height="13" rx="5" />
+                <circle cx="8.5" cy="11.5" r="2" fill="currentColor" />
+                <circle cx="15.5" cy="11.5" r="2" fill="currentColor" />
+                <path d="M9 16 Q12 18.5 15 16" strokeWidth="1.5" fill="none" />
+              </svg>
+            </button>
+          )}
+          <button onClick={onClose}>&times;</button>
+        </div>
       </div>
       <div className="chat-messages" ref={messagesContainerRef}>
         {messages.length === 0 && (
           <div style={{ color: "var(--text-muted)", fontSize: 13, textAlign: "center", marginTop: 40 }}>
-            Ask anything about your code...
+            Ask anything about your code...<br />
+            Use <strong>@agent-name</strong> to invoke an AI agent.
           </div>
         )}
         {messages.map((m, i) => (
@@ -472,13 +541,42 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
                 ) : null}
               </div>
             ) : (
-              <div className="chat-plain">{m.displayContent || m.content}</div>
+              <>
+                <div className="chat-plain">
+                  <MentionHighlight text={m.displayContent || m.content} />
+                </div>
+                {m.contextRefs && m.contextRefs.length > 0 && (
+                  <div className="context-badges">
+                    {m.contextRefs.map((ref) => (
+                      <span key={ref.name} className={`context-badge ${ref.type}`}>
+                        {ref.type === "agent" ? (
+                          <svg className="robot-icon-small" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="12" y1="4" x2="12" y2="7" />
+                            <circle cx="12" cy="3" r="1.5" fill="currentColor" />
+                            <rect x="3" y="7" width="18" height="13" rx="5" />
+                            <circle cx="8.5" cy="11.5" r="2" fill="currentColor" />
+                            <circle cx="15.5" cy="11.5" r="2" fill="currentColor" />
+                            <path d="M9 16 Q12 18.5 15 16" strokeWidth="1.5" fill="none" />
+                          </svg>
+                        ) : (
+                          <svg className="file-icon-small" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                            <polyline points="14 2 14 8 20 8" />
+                          </svg>
+                        )}
+                        {ref.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
         ))}
         <div ref={messagesEndRef} />
       </div>
       <div className="chat-input-area">
+        {/* File ref chips */}
         {fileRefs.length > 0 && (
           <div className="file-ref-chips">
             <div className="file-ref-chips-list">
@@ -489,34 +587,63 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
                 </div>
               ))}
             </div>
-            <div className="file-ref-chips-actions">
-              {loading && (
-                <button className="stop-generation-btn" onClick={stopGeneration} title="Stop generation">
-                  &#x25A0;
-                </button>
-              )}
-              {(() => {
-                const total = contextSize;
-                const circumference = 2 * Math.PI * 8;
-                const progress = Math.min(total / maxTokens, 1);
-                const pct = Math.round(progress * 100);
-                const color = pct > 90 ? "#e06c75" : pct > 70 ? "#e5c07b" : "var(--accent)";
-                return (
-                  <div className="context-indicator" title={`${total.toLocaleString()} tokens / ${maxTokens.toLocaleString()} tokens`}>
-                    <svg width="16" height="16" viewBox="0 0 20 20">
-                      <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" strokeWidth="2" />
-                      <circle cx="10" cy="10" r="8" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeDasharray={`${circumference}`} strokeDashoffset={`${circumference * (1 - progress)}`} transform="rotate(-90 10 10)" />
+          </div>
+        )}
+
+        {/* Agent ref chips */}
+        {agentRefs.length > 0 && (
+          <div className="file-ref-chips">
+            <div className="file-ref-chips-list">
+              {agentRefs.map((ref) => (
+                <div key={ref.path} className="agent-ref-chip">
+                  <span className="agent-ref-icon">
+                    <svg className="robot-icon-small" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="12" y1="4" x2="12" y2="7" />
+                      <circle cx="12" cy="3" r="1.5" fill="currentColor" />
+                      <rect x="3" y="7" width="18" height="13" rx="5" />
+                      <circle cx="8.5" cy="11.5" r="2" fill="currentColor" />
+                      <circle cx="15.5" cy="11.5" r="2" fill="currentColor" />
+                      <path d="M9 16 Q12 18.5 15 16" strokeWidth="1.5" fill="none" />
                     </svg>
-                    <span className="context-indicator-text">{pct}%</span>
-                  </div>
-                );
-              })()}
-              <button className="clear-context-btn" onClick={clearAllRefs} title="Clear all context">&times;</button>
+                  </span>
+                  <span className="file-ref-name">@{ref.name}</span>
+                  <span className="file-ref-remove" onClick={() => removeAgentRef(ref.path)}>&times;</span>
+                </div>
+              ))}
             </div>
           </div>
         )}
+
+        {/* Actions bar (when chips are present) */}
+        {(fileRefs.length > 0 || agentRefs.length > 0) && (
+          <div className="file-ref-chips-actions" style={{ marginBottom: 6 }}>
+            {loading && (
+              <button className="stop-generation-btn" onClick={stopGeneration} title="Stop generation">
+                &#x25A0;
+              </button>
+            )}
+            {(() => {
+              const total = contextSize;
+              const circumference = 2 * Math.PI * 8;
+              const progress = Math.min(total / maxTokens, 1);
+              const pct = Math.round(progress * 100);
+              const color = pct > 90 ? "#e06c75" : pct > 70 ? "#e5c07b" : "var(--accent)";
+              return (
+                <div className="context-indicator" title={`${total.toLocaleString()} tokens / ${maxTokens.toLocaleString()} tokens`}>
+                  <svg width="16" height="16" viewBox="0 0 20 20">
+                    <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" strokeWidth="2" />
+                    <circle cx="10" cy="10" r="8" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeDasharray={`${circumference}`} strokeDashoffset={`${circumference * (1 - progress)}`} transform="rotate(-90 10 10)" />
+                  </svg>
+                  <span className="context-indicator-text">{pct}%</span>
+                </div>
+              );
+            })()}
+            <button className="clear-context-btn" onClick={clearAllRefs} title="Clear all context">&times;</button>
+          </div>
+        )}
+
         {/* Persistent context indicator — shown when there are messages or accumulated context */}
-        {fileRefs.length === 0 && (accumulatedContextTokens > 0 || messages.length > 0) && (
+        {fileRefs.length === 0 && agentRefs.length === 0 && (accumulatedContextTokens > 0 || messages.length > 0) && (
           <div className="context-persistent-bar">
             <div className="context-bar-actions">
               {/* Stop button — only visible while the model is generating */}
@@ -544,18 +671,34 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
             </div>
           </div>
         )}
+        {/* Inline autocomplete panel — appears between messages and input when @mention is active */}
+        {mentionQuery !== null && rootPath && (
+          <div className="chat-autocomplete-panel">
+            <FileAutocomplete
+              query={mentionQuery}
+              rootPath={rootPath}
+              onSelect={handleFileSelect}
+              onSelectAgent={handleAgentSelect}
+              onClose={() => {
+                setMentionQuery(null);
+                setMentionIndex(-1);
+              }}
+            />
+          </div>
+        )}
+
         <div className="chat-input-wrapper">
           <textarea
             ref={textareaRef}
             className="chat-input"
             rows={2}
-            placeholder="Type @ to reference a file... Ask the AI..."
+            placeholder="Type @ to reference a file or agent... Ask the AI..."
             value={input}
             onChange={handleInputChange}
             onKeyDown={(e) => {
               if (mentionQuery !== null) {
                 // Autocomplete is open — prevent these keys from affecting the textarea
-                if (["ArrowUp", "ArrowDown", "Enter", "Tab", "Escape"].includes(e.key)) {
+                if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Tab", "Escape"].includes(e.key)) {
                   e.preventDefault();
                   return;
                 }
@@ -566,19 +709,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style }: 
               }
             }}
           />
-          {mentionQuery !== null && rootPath && (
-            <FileAutocomplete
-              query={mentionQuery}
-              rootPath={rootPath}
-              anchorRect={autoCompletePos ? ({ left: autoCompletePos.left, bottom: autoCompletePos.bottom, top: 0, right: 0, width: 0, height: 0 } as DOMRect) : null}
-              onSelect={handleFileSelect}
-              onClose={() => {
-                setMentionQuery(null);
-                setMentionIndex(-1);
-                setAutoCompletePos(null);
-              }}
-            />
-          )}
         </div>
         <button className="chat-send" onClick={sendMessage} disabled={loading}>
           {loading ? "Thinking..." : "Send"}
