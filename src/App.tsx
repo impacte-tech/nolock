@@ -9,6 +9,7 @@ import BrowserPanel from "./components/BrowserPanel";
 import MenuBar from "./components/MenuBar";
 import AISettings from "./components/AISettings";
 import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
+import AgentManager from "./components/AgentManager";
 import StatusBar from "./components/StatusBar";
 import ResizableHandle from "./components/ResizableHandle";
 import ShortcutsScreen from "./components/ShortcutsScreen";
@@ -77,6 +78,10 @@ export default function App() {
   const [showExplorer, setShowExplorer] = useState(true);
   const [showChat, setShowChat] = useState(false);
   const [showAISettings, setShowAISettings] = useState(false);
+
+  // --- Agent Manager ---
+  const [showAgentManager, setShowAgentManager] = useState(false);
+  const [agentRefreshKey, setAgentRefreshKey] = useState(0);
 
   // --- Search ---
   const [showSearch, setShowSearch] = useState(false);
@@ -313,6 +318,12 @@ export default function App() {
             setShowChat((v) => !v);
             return;
           }
+          if (e.key === "g") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowAgentManager(true);
+            return;
+          }
           if (e.key === "i") {
             e.preventDefault();
             setChordPrefix(null);
@@ -472,6 +483,7 @@ export default function App() {
           setShowSearch(false);
           return;
         }
+        if (showAgentManager) setShowAgentManager(false);
         if (showAISettings) setShowAISettings(false);
         if (showTermMemory) {
           setShowTermMemory(false);
@@ -486,7 +498,7 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, showAISettings, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
+  }, [openFolder, refreshFolder, createTerminal, showAISettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
 
   // --- Menu ---
   const menus = [
@@ -523,6 +535,7 @@ export default function App() {
       label: "AI Integrations",
       items: [
         { label: "Toggle Agent Chat", action: () => setShowChat((v) => !v), shortcut: "Ctrl+A, C" },
+        { label: "Manage Agents...", action: () => setShowAgentManager(true), shortcut: "Ctrl+A, G" },
         { label: "Settings...", action: () => setShowAISettings(true), shortcut: "Ctrl+A, I" },
       ],
     },
@@ -550,7 +563,7 @@ export default function App() {
       {chordPrefix && (
         <div className="chord-hint">
           {chordPrefix === "A" ? (
-            <>Waiting for second key... (press <strong>C</strong> for Chat, <strong>I</strong> for AI Settings)</>
+            <>Waiting for second key... (press <strong>C</strong> for Chat, <strong>G</strong> for Agents, <strong>I</strong> for AI Settings)</>
           ) : chordPrefix === "T" ? (
             <>Waiting for second key... (press <strong>T</strong> for Terminal, <strong>M</strong> for Memory)</>
           ) : (
@@ -683,7 +696,7 @@ export default function App() {
               onDrag={makeResizeHandler(setChatPts, 15, 55, mainAreaRef, "width", 100, true)}
               onDragEnd={() => setResizeEpoch((e) => e + 1)}
             />
-            <ChatPanel onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} rootPath={rootPath} style={{ flex: ratioFlex(chatPts) }} />
+            <ChatPanel onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} rootPath={rootPath} style={{ flex: ratioFlex(chatPts) }} onOpenAgentManager={() => setShowAgentManager(true)} />
           </>
         )}
       </div>
@@ -691,6 +704,13 @@ export default function App() {
       <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} />
 
       <AISettings visible={showAISettings} onClose={() => setShowAISettings(false)} />
+
+      <AgentManager
+        visible={showAgentManager}
+        onClose={() => setShowAgentManager(false)}
+        rootPath={rootPath}
+        onAgentsChanged={() => setAgentRefreshKey((k) => k + 1)}
+      />
 
       {showTermMemory && (
         <TerminalMemoryOverlay

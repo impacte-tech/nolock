@@ -35,6 +35,7 @@ const GROUPS: ShortcutGroup[] = [
     title: "AI Integrations",
     items: [
       { keys: "Ctrl+A, C", description: "Toggle agent chat" },
+      { keys: "Ctrl+A, G", description: "Manage AI agents" },
       { keys: "Ctrl+A, I", description: "Open AI settings" },
       { keys: "Ctrl+Shift+I", description: "Direct AI settings" },
     ],
