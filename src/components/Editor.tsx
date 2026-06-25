@@ -16,6 +16,15 @@ self.MonacoEnvironment = {
   },
 };
 
+interface LinterDiagnostic {
+  line: number;
+  column: number;
+  message: string;
+  severity: string;
+  rule_id: string | null;
+  file_path: string;
+}
+
 interface Props {
   filePath: string;
   content: string;
@@ -186,6 +195,44 @@ class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsPr
   freeInlineCompletions(): void {}
 }
 
+// ---------------------------------------------------------------------------
+// Linter: run external linters and surface diagnostics as Monaco markers
+// ---------------------------------------------------------------------------
+
+async function runLinter(model: monaco.editor.ITextModel, filePath: string) {
+  try {
+    console.log("[linter] Running linter for:", filePath);
+    const prefs = {
+      ts_enabled: localStorage.getItem("nolock.linter.ts.enabled") !== "false",
+      py_enabled: localStorage.getItem("nolock.linter.py.enabled") !== "false",
+      rs_enabled: localStorage.getItem("nolock.linter.rs.enabled") !== "false",
+      ruff_select: localStorage.getItem("nolock.linter.py.ruffSelect") || null,
+      ruff_ignore: localStorage.getItem("nolock.linter.py.ruffIgnore") || null,
+    };
+    const diagnostics: LinterDiagnostic[] = await invoke("run_linter", { path: filePath, prefs });
+    console.log("[linter] Diagnostics received:", diagnostics.length, diagnostics);
+    const markers: monaco.editor.IMarkerData[] = diagnostics.map((d) => ({
+      severity:
+        d.severity === "error"
+          ? monaco.MarkerSeverity.Error
+          : d.severity === "warning"
+            ? monaco.MarkerSeverity.Warning
+            : monaco.MarkerSeverity.Info,
+      message: d.rule_id ? `[${d.rule_id}] ${d.message}` : d.message,
+      startLineNumber: d.line,
+      startColumn: d.column,
+      endLineNumber: d.line,
+      endColumn: d.column + 1,
+    }));
+    monaco.editor.setModelMarkers(model, "nolock-linter", markers);
+    console.log("[linter] Markers set:", markers.length);
+  } catch (err) {
+    console.log("[linter] Linter failed or unavailable:", err);
+    // Linter not installed, file unsupported, or transient error — clear markers
+    monaco.editor.setModelMarkers(model, "nolock-linter", []);
+  }
+}
+
 export default function Editor({ filePath, content, onChange, onSave, revealLine, revealColumn, onRevealConsumed }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
@@ -248,6 +295,9 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       try {
         onSaveRef.current();
+        // Run linter after save
+        const model = editor.getModel();
+        if (model) runLinter(model, filePath);
       } catch (err) {
         console.error("[Editor] Save handler threw synchronously:", err);
       }
@@ -274,9 +324,13 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
     };
     document.addEventListener("keydown", preventNativeSave, true);
 
+    // Run linter on file open
+    runLinter(model, filePath);
+
     editor.focus();
 
     return () => {
+      monaco.editor.setModelMarkers(model, "nolock-linter", []); // clear markers
       provider.dispose();
       editor.dispose();
       model.dispose();
