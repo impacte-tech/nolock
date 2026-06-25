@@ -3,3 +3,4 @@ dist/
 out/
 src-tauri/target/
 *.vsix
+.planning/

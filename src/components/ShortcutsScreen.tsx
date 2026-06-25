@@ -49,6 +49,8 @@ const GROUPS: ShortcutGroup[] = [
   {
     title: "Editor",
     items: [
+      { keys: "Ctrl+E, E", description: "Toggle file explorer" },
+      { keys: "Ctrl+E, S", description: "Open editor settings (linter)" },
       { keys: "Ctrl+S", description: "Save current file" },
     ],
   },

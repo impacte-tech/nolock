@@ -303,6 +303,7 @@ export default function AISettings({ visible, onClose }: Props) {
               </div>
             )}
           </div>
+
         </div>
         <div className="modal-footer">
           <button className="btn-secondary" onClick={onClose}>Cancel</button>

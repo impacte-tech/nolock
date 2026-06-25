@@ -76,7 +76,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 
 ## Features
 
-- **Code Editor** — Full-featured Monaco editor with syntax highlighting for 100+ languages, bracket colorization, minimap, and word wrap.
+- **Code Editor** — Full-featured Monaco editor with syntax highlighting for 100+ languages, bracket colorization, minimap, word wrap, and **inline linting** (ESLint for TypeScript/JavaScript, Ruff for Python, Clippy for Rust) with configurable rules via <kbd>Ctrl+E, S</kbd>.
 - **File Search & Replace** — Search across all workspace files with regex support, match-case toggles, debounced live results, grouped by file with inline match previews, and batch replace-all with confirmation.
 - **AI Inline Completions** — Fill-In-The-Middle (FITM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
 - **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing), and context token tracking.
@@ -211,6 +211,13 @@ Then in nolock's AI Settings (`Ctrl+A, I`):
 
 ### Keyboard Shortcuts
 
+#### Editor Settings (Ctrl+E chord)
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+E, E` | Toggle file explorer |
+| `Ctrl+E, S` | Open editor settings (linter configuration) |
+
 #### File & Search (Ctrl+F chord)
 
 | Shortcut | Action |
@@ -255,7 +262,6 @@ Within the search panel (`Ctrl+F, S`):
 | Shortcut | Action |
 |---|---|
 | `Ctrl+O` | Open folder |
-| `Ctrl+E` | Toggle file explorer |
 | `Ctrl+R` | Refresh explorer |
 | `Ctrl+S` | Save current file |
 | `Escape` | Close overlays / panels |

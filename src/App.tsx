@@ -8,6 +8,7 @@ import ChatPanel from "./components/ChatPanel";
 import BrowserPanel from "./components/BrowserPanel";
 import MenuBar from "./components/MenuBar";
 import AISettings from "./components/AISettings";
+import EditorSettings from "./components/EditorSettings";
 import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import AgentManager from "./components/AgentManager";
 import StatusBar from "./components/StatusBar";
@@ -78,6 +79,7 @@ export default function App() {
   const [showExplorer, setShowExplorer] = useState(true);
   const [showChat, setShowChat] = useState(false);
   const [showAISettings, setShowAISettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   // --- Agent Manager ---
   const [showAgentManager, setShowAgentManager] = useState(false);
@@ -347,6 +349,21 @@ export default function App() {
           }
         }
 
+        if (chordPrefix === "E") {
+          if (e.key === "e" || e.key === "E") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowExplorer((v) => !v);
+            return;
+          }
+          if (e.key === "s" || e.key === "S") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowSettings(true);
+            return;
+          }
+        }
+
         if (chordPrefix === "F") {
           if (e.key === "s" || e.key === "S") {
             e.preventDefault();
@@ -470,10 +487,16 @@ export default function App() {
         return;
       }
 
-      // Ctrl+E — Toggle Explorer (still works directly, also available via Ctrl+F,E)
+      // Ctrl+E — Chord prefix for Settings/Explorer shortcuts.
       if (e.ctrlKey && !e.shiftKey && e.key === "e") {
         e.preventDefault();
-        setShowExplorer((v) => !v);
+        if (chordPrefix === "E") {
+          // Tapped twice quickly — cancel chord
+          setChordPrefix(null);
+        } else {
+          setChordPrefix("E");
+          setTimeout(() => setChordPrefix(null), 1500);
+        }
         return;
       }
 
@@ -485,6 +508,7 @@ export default function App() {
         }
         if (showAgentManager) setShowAgentManager(false);
         if (showAISettings) setShowAISettings(false);
+        if (showSettings) setShowSettings(false);
         if (showTermMemory) {
           setShowTermMemory(false);
         }
@@ -498,7 +522,7 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, showAISettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
+  }, [openFolder, refreshFolder, createTerminal, showAISettings, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
 
   // --- Menu ---
   const menus = [
@@ -539,6 +563,12 @@ export default function App() {
         { label: "Settings...", action: () => setShowAISettings(true), shortcut: "Ctrl+A, I" },
       ],
     },
+    {
+      label: "Editor",
+      items: [
+        { label: "Editor Settings...", action: () => setShowSettings(true), shortcut: "Ctrl+E, S" },
+      ],
+    },
   ];
 
   // ---- Compute flex-grow values for the main-area row --------------------
@@ -566,6 +596,8 @@ export default function App() {
             <>Waiting for second key... (press <strong>C</strong> for Chat, <strong>G</strong> for Agents, <strong>I</strong> for AI Settings)</>
           ) : chordPrefix === "T" ? (
             <>Waiting for second key... (press <strong>T</strong> for Terminal, <strong>M</strong> for Memory)</>
+          ) : chordPrefix === "E" ? (
+            <>Waiting for second key... (press <strong>E</strong> for Explorer, <strong>S</strong> for Editor Settings)</>
           ) : (
             <>Waiting for second key... (press <strong>S</strong> for Search, <strong>O</strong> for Open Folder, <strong>E</strong> for Explorer, <strong>R</strong> for Refresh)</>
           )}
@@ -704,6 +736,7 @@ export default function App() {
       <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} />
 
       <AISettings visible={showAISettings} onClose={() => setShowAISettings(false)} />
+      <EditorSettings visible={showSettings} onClose={() => setShowSettings(false)} />
 
       <AgentManager
         visible={showAgentManager}

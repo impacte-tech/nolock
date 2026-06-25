@@ -7,6 +7,7 @@ use tauri::Emitter;
 use regex::Regex;
 
 mod browser;
+mod linter;
 mod terminal_memory;
 
 // ---------------------------------------------------------------------------
@@ -1788,6 +1789,7 @@ pub fn run() {
             browser::create_browser_webview,
             browser::close_browser_webview,
             browser::update_browser_webview,
+            linter::run_linter,
             terminal_memory::record_command,
             terminal_memory::get_top_commands,
             terminal_memory::get_command_categories,
