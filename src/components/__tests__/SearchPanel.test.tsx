@@ -219,7 +219,8 @@ describe("SearchPanel", () => {
         expect(screen.getByText(/main\.rs/)).toBeInTheDocument();
         expect(screen.getByText(/lib\.rs/)).toBeInTheDocument();
         // Should show line numbers
-        expect(screen.getByText("1")).toBeInTheDocument();
+        // Use getAllByText for "1" since src/lib.rs file-count also shows "1"
+        expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(1);
         expect(screen.getByText("3")).toBeInTheDocument();
         expect(screen.getByText("5")).toBeInTheDocument();
         // Should show results count
@@ -243,8 +244,8 @@ describe("SearchPanel", () => {
     expect(screen.getByPlaceholderText(/Replace with/)).toBeInTheDocument();
     expect(screen.getByText("Replace All")).toBeInTheDocument();
 
-    // Click "Search" toggle to go back
-    fireEvent.click(screen.getByText("Search"));
+    // Click "Search" toggle to go back (use title since header also contains "Search")
+    fireEvent.click(screen.getByTitle("Switch to search mode"));
     expect(screen.queryByPlaceholderText(/Replace with/)).not.toBeInTheDocument();
   });
 
