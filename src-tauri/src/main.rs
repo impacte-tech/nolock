@@ -1262,9 +1262,14 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
             let body = |with_suffix: bool| {
                 let mut b = serde_json::json!({
                     "model": req.model,
+                    "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
                     "prompt": req.prompt,
                     "stream": false,
-                    "options": { "num_predict": 64, "temperature": 0.2, "stop": ["\n\n"] }
+                    "options": {
+                        "num_predict": 64,
+                        "temperature": 0.2,
+                        "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+                    }
                 });
                 if with_suffix {
                     if let Some(ref suffix) = req.suffix {
@@ -1320,7 +1325,8 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 "n_predict": 64,
                 "temperature": 0.2,
                 "stream": false,
-                "stop": ["\n\n"]
+                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+                "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else."
             });
             if let Some(ref suffix) = req.suffix {
                 if !suffix.is_empty() {
@@ -1347,13 +1353,47 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
         }
         "openrouter" => {
             let api_key = req.api_key.unwrap_or_default();
+
+            // Build a structured prompt that includes both prefix and suffix context.
+            // OpenRouter uses the chat completions API which doesn't natively support
+            // suffix/FITM, so we encode both sides of the cursor in the message content.
+            let user_content = if let Some(ref suffix) = req.suffix {
+                if !suffix.is_empty() {
+                    format!(
+                        "Complete the code at the cursor position marked by <CURSOR>.\n\n\
+                         Before cursor:\n```\n{}\n```\n\n\
+                         After cursor:\n```\n{}\n```\n\n\
+                         Output ONLY the code that should replace <CURSOR>. No explanations, \
+                         no markdown formatting, no conversational text.",
+                        req.prompt, suffix
+                    )
+                } else {
+                    format!(
+                        "Complete the following code at the cursor. Output ONLY the code that \
+                         belongs at the cursor. No explanations, no markdown, no conversational text.\n\n```\n{}\n```",
+                        req.prompt
+                    )
+                }
+            } else {
+                format!(
+                    "Complete the following code at the cursor. Output ONLY the code that \
+                     belongs at the cursor. No explanations, no markdown, no conversational text.\n\n```\n{}\n```",
+                    req.prompt
+                )
+            };
+
             let body = serde_json::json!({
                 "model": req.model,
                 "messages": [
-                    { "role": "user", "content": req.prompt }
+                    {
+                        "role": "system",
+                        "content": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text."
+                    },
+                    { "role": "user", "content": user_content }
                 ],
                 "max_tokens": 64,
-                "temperature": 0.2
+                "temperature": 0.2,
+                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"]
             });
             eprintln!("[nolock] openrouter POST https://openrouter.ai/api/v1/chat/completions model={}", req.model);
             let resp = client
@@ -1381,9 +1421,14 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
         "opencode" => {
             let body = serde_json::json!({
                 "model": req.model,
+                "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
                 "prompt": req.prompt,
                 "stream": false,
-                "options": { "num_predict": 64, "temperature": 0.2 }
+                "options": {
+                    "num_predict": 64,
+                    "temperature": 0.2,
+                    "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+                }
             });
             eprintln!("[nolock] opencode POST {}/api/generate", req.url);
             let resp = client
@@ -2496,5 +2541,243 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    // ---- AI completion body construction ----------------------------------
+    #[test]
+    fn test_ai_complete_ollama_body_has_system_field() {
+        // Verify the Ollama request body includes a system prompt
+        let req = CompletionRequest {
+            backend: "ollama".into(),
+            url: "http://localhost:11434".into(),
+            model: "qwen2.5-coder:1.5b".into(),
+            prompt: "fn main() {".into(),
+            suffix: Some("}".into()),
+            api_key: None,
+        };
+
+        let with_suffix = req.suffix.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+        let mut b = serde_json::json!({
+            "model": req.model,
+            "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+            "prompt": req.prompt,
+            "stream": false,
+            "options": {
+                "num_predict": 64,
+                "temperature": 0.2,
+                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+            }
+        });
+        if with_suffix {
+            if let Some(ref suffix) = req.suffix {
+                if !suffix.is_empty() {
+                    b["suffix"] = serde_json::json!(suffix);
+                }
+            }
+        }
+
+        assert_eq!(b["model"], "qwen2.5-coder:1.5b");
+        assert!(b["system"].as_str().unwrap().contains("code completion engine"));
+        assert!(b["system"].as_str().unwrap().contains("Output ONLY valid code"));
+        assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("\n\n")));
+        assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("Here is")));
+        assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("Explanation")));
+        assert_eq!(b["suffix"], "}");
+        assert_eq!(b["prompt"], "fn main() {");
+    }
+
+    #[test]
+    fn test_ai_complete_llamacpp_body_has_system_field() {
+        let req = CompletionRequest {
+            backend: "llamacpp".into(),
+            url: "http://localhost:8080".into(),
+            model: "codellama".into(),
+            prompt: "def hello():".into(),
+            suffix: None,
+            api_key: None,
+        };
+
+        let mut b = serde_json::json!({
+            "prompt": req.prompt,
+            "n_predict": 64,
+            "temperature": 0.2,
+            "stream": false,
+            "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+            "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else."
+        });
+        if let Some(ref suffix) = req.suffix {
+            if !suffix.is_empty() {
+                b["suffix"] = serde_json::json!(suffix);
+            }
+        }
+
+        assert!(b["system"].as_str().unwrap().contains("code completion engine"));
+        assert!(b["stop"].as_array().unwrap().contains(&serde_json::json!("Sure")));
+        assert_eq!(b["prompt"], "def hello():");
+    }
+
+    #[test]
+    fn test_ai_complete_openrouter_uses_system_message() {
+        let req = CompletionRequest {
+            backend: "openrouter".into(),
+            url: "https://openrouter.ai".into(),
+            model: "qwen3:8b".into(),
+            prompt: "const x = ".into(),
+            suffix: Some(";".into()),
+            api_key: Some("sk-test".into()),
+        };
+
+        let user_content = format!(
+            "Complete the code at the cursor position marked by <CURSOR>.\n\n\
+             Before cursor:\n```\n{}\n```\n\n\
+             After cursor:\n```\n{}\n```\n\n\
+             Output ONLY the code that should replace <CURSOR>. No explanations, \
+             no markdown formatting, no conversational text.",
+            req.prompt,
+            req.suffix.as_deref().unwrap_or("")
+        );
+
+        let body = serde_json::json!({
+            "model": req.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text."
+                },
+                { "role": "user", "content": user_content }
+            ],
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"]
+        });
+
+        // Verify structure
+        assert_eq!(body["model"], "qwen3:8b");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0]["content"].as_str().unwrap().contains("code completion engine"));
+        assert_eq!(messages[1]["role"], "user");
+        assert!(messages[1]["content"].as_str().unwrap().contains("<CURSOR>"));
+        assert!(messages[1]["content"].as_str().unwrap().contains("const x ="));
+        assert!(messages[1]["content"].as_str().unwrap().contains(";"));
+        assert!(body["stop"].as_array().unwrap().contains(&serde_json::json!("I'll")));
+    }
+
+    #[test]
+    fn test_ai_complete_openrouter_no_suffix_uses_raw_prompt() {
+        let req = CompletionRequest {
+            backend: "openrouter".into(),
+            url: "https://openrouter.ai".into(),
+            model: "qwen3:8b".into(),
+            prompt: "const x = 42;".into(),
+            suffix: None,
+            api_key: Some("sk-test".into()),
+        };
+
+        let user_content = format!(
+            "Complete the following code at the cursor. Output ONLY the code that \
+             belongs at the cursor. No explanations, no markdown, no conversational text.\n\n```\n{}\n```",
+            req.prompt
+        );
+
+        let body = serde_json::json!({
+            "model": req.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text."
+                },
+                { "role": "user", "content": user_content }
+            ],
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"]
+        });
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert!(messages[1]["content"].as_str().unwrap().contains("const x = 42;"));
+        assert!(!messages[1]["content"].as_str().unwrap().contains("<CURSOR>"));
+    }
+
+    #[test]
+    fn test_ai_complete_opencode_body_has_system_field() {
+        let req = CompletionRequest {
+            backend: "opencode".into(),
+            url: "http://localhost:11434".into(),
+            model: "deepseek-coder".into(),
+            prompt: "import".into(),
+            suffix: None,
+            api_key: None,
+        };
+
+        let body = serde_json::json!({
+            "model": req.model,
+            "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+            "prompt": req.prompt,
+            "stream": false,
+            "options": {
+                "num_predict": 64,
+                "temperature": 0.2,
+                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+            }
+        });
+
+        assert!(body["system"].as_str().unwrap().contains("code completion engine"));
+        assert_eq!(body["prompt"], "import");
+        assert!(body["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("Let me")));
+    }
+
+    #[test]
+    fn test_ai_complete_stop_tokens_include_conversational_triggers() {
+        let all_backend_stops = [
+            // Ollama stops
+            vec!["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+            // llama.cpp stops
+            vec!["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+            // OpenRouter stops
+            vec!["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"],
+            // OpenCode stops
+            vec!["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+        ];
+
+        // Every backend's stop array must contain the core conversational triggers
+        for stops in &all_backend_stops {
+            assert!(stops.contains(&"\n\n"), "Every backend needs \\n\\n stop");
+            assert!(stops.contains(&"```"), "Every backend needs ``` stop");
+            assert!(stops.contains(&"Here is"), "Every backend needs 'Here is' stop");
+            assert!(stops.contains(&"I'll"), "Every backend needs 'I'll' stop");
+        }
+    }
+
+    #[test]
+    fn test_ai_complete_ollama_fim_fallback_body_no_suffix() {
+        // When FITM fails and we retry without suffix, the body should NOT have `suffix`
+        let req = CompletionRequest {
+            backend: "ollama".into(),
+            url: "http://localhost:11434".into(),
+            model: "some-model".into(),
+            prompt: "fn main() {".into(),
+            suffix: Some("}".into()),
+            api_key: None,
+        };
+
+        let body = serde_json::json!({
+            "model": req.model,
+            "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+            "prompt": req.prompt,
+            "stream": false,
+            "options": {
+                "num_predict": 64,
+                "temperature": 0.2,
+                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+            }
+        });
+        // Fallback body must NOT have suffix field
+        assert!(!body.as_object().unwrap().contains_key("suffix"),
+                "Fallback body (no suffix) must not contain a 'suffix' field");
     }
 }

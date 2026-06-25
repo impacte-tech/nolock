@@ -12,15 +12,54 @@
 
 // ---- editor ----------------------------------------------------------------
 
+// Track created models so getValueInRange can return actual content
+const models = new Map<symbol, { text: string; language: string }>();
+
 export const editor = {
-  createModel: () => ({
-    dispose: () => {},
-    onDidChangeContent: () => () => {},
-    getValue: () => "",
-    getValueInRange: () => "",
-    getLineCount: () => 1,
-    getLineMaxColumn: () => 1,
-  }),
+  createModel: (text: string, language?: string) => {
+    const id = Symbol("model-id");
+    models.set(id, { text: text || "", language: language || "plaintext" });
+    return {
+      _modelId: id,
+      dispose: () => { models.delete(id); },
+      onDidChangeContent: () => () => {},
+      getValue: () => models.get(id)?.text ?? "",
+      getValueInRange: (range: any) => {
+        const full = models.get(id)?.text ?? "";
+        if (!range) return full;
+        const lines = full.split("\n");
+        const startLine = range.startLineNumber ?? 1;
+        const startCol = range.startColumn ?? 1;
+        const endLine = range.endLineNumber ?? startLine;
+        const endCol = range.endColumn ?? (lines[startLine - 1]?.length ?? 0) + 1;
+
+        if (startLine === endLine) {
+          const line = lines[startLine - 1] ?? "";
+          return line.slice(startCol - 1, endCol - 1);
+        }
+
+        const parts: string[] = [];
+        for (let i = startLine - 1; i < endLine && i < lines.length; i++) {
+          if (i === startLine - 1) {
+            parts.push(lines[i].slice(startCol - 1));
+          } else if (i === endLine - 1) {
+            parts.push(lines[i].slice(0, endCol - 1));
+          } else {
+            parts.push(lines[i]);
+          }
+        }
+        return parts.join("\n");
+      },
+      getLineCount: () => {
+        const t = models.get(id)?.text ?? "";
+        return t ? t.split("\n").length : 1;
+      },
+      getLineMaxColumn: (_lineNumber: number) => {
+        const t = models.get(id)?.text ?? "";
+        return t ? t.split("\n")[_lineNumber - 1]?.length + 1 || 1 : 1;
+      },
+    };
+  },
   create: () => ({
     dispose: () => {},
     focus: () => {},

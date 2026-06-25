@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import * as monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
 import { getSecret } from "../lib/secrets";
+import { buildAiPrompt, processCompletionResponse } from "./fitm";
 
 // Configure Monaco workers
 self.MonacoEnvironment = {
@@ -65,7 +66,8 @@ function getLanguage(filePath: string): string {
 
 const DEBOUNCE_MS = 500;
 
-class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsProvider {
+/** @internal exported for testing */
+export class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsProvider {
   private _requestCounter = 0;
   private _timer: ReturnType<typeof setTimeout> | null = null;
   private _editor: monaco.editor.IStandaloneCodeEditor | null = null;
@@ -153,12 +155,15 @@ class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsPr
         return { items: [] };
       }
 
+      // Build the prompt with FIM tokens for better code-only completions
+      const fimPrompt = buildAiPrompt(prefix, suffix || null);
+
       const text: string = await invoke("ai_complete", {
         req: {
           backend,
           url,
           model: completionModel,
-          prompt: prefix,
+          prompt: fimPrompt,
           suffix: suffix || null,
           apiKey: apiKey || null,
         },
@@ -171,7 +176,8 @@ class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsPr
 
       if (!text) return { items: [] };
 
-      const cleaned = text.trimStart();
+      // Hybrid pipeline: extract code → score quality → truncate
+      const cleaned = processCompletionResponse(text);
       if (!cleaned) return { items: [] };
 
       return {
