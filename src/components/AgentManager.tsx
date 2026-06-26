@@ -20,12 +20,21 @@ export interface AgentEntry {
   path: string;
 }
 
+export interface SkillEntry {
+  name: string;
+  path: string;
+}
+
 interface Props {
   visible: boolean;
   onClose: () => void;
   rootPath: string;
   /** Called after creating/updating an agent so the parent can refresh. */
   onAgentsChanged?: () => void;
+  /** Called when user wants to edit a skill in the main editor. */
+  onOpenFile?: (path: string, name: string) => void;
+  /** Which tab to show when opened (default: "agents"). */
+  initialTab?: "agents" | "skills";
 }
 
 // ---------------------------------------------------------------------------
@@ -44,18 +53,33 @@ const DEFAULT_CONFIG: AgentConfig = {
 // Component
 // ---------------------------------------------------------------------------
 
-export default function AgentManager({ visible, onClose, rootPath, onAgentsChanged }: Props) {
-  // Agent list
+export default function AgentManager({ visible, onClose, rootPath, onAgentsChanged, onOpenFile, initialTab }: Props) {
+  // Tab state — reset to initialTab whenever the modal becomes visible
+  const [activeTab, setActiveTab] = useState<"agents" | "skills">(initialTab || "agents");
+
+  useEffect(() => {
+    if (visible && initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [visible, initialTab]);
+
+  // ---- Agent state ----
   const [agents, setAgents] = useState<AgentEntry[]>([]);
   const [loadingList, setLoadingList] = useState(false);
 
-  // Editor state: null = list view, AgentConfig = editing/creating
+  // Agent editor state: null = list view, AgentConfig = editing/creating
   const [editing, setEditing] = useState<AgentConfig | null>(null);
   const [isNew, setIsNew] = useState(false);
 
-  // Save state
+  // Agent save state
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // ---- Skill state ----
+  const [skills, setSkills] = useState<SkillEntry[]>([]);
+  const [loadingSkills, setLoadingSkills] = useState(false);
+  const [creatingSkill, setCreatingSkill] = useState(false);
+  const [newSkillName, setNewSkillName] = useState("");
 
   // ---- Load agents on mount / visibility change ----
   const loadAgents = useCallback(async () => {
@@ -77,14 +101,35 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
     }
   }, [visible, rootPath, loadAgents]);
 
-  // ---- Start creating a new agent ----
+  // ---- Load skills on mount / visibility change / tab switch ----
+  const loadSkills = useCallback(async () => {
+    if (!rootPath) return;
+    setLoadingSkills(true);
+    try {
+      const entries: SkillEntry[] = await invoke("list_skills", { rootPath });
+      setSkills(entries);
+    } catch (e) {
+      console.error("Failed to load skills:", e);
+      setSkills([]);
+    }
+    setLoadingSkills(false);
+  }, [rootPath]);
+
+  // Load skills whenever visible (needed for the agent editor's skill reference section too)
+  useEffect(() => {
+    if (visible && rootPath) {
+      loadSkills();
+    }
+  }, [visible, rootPath, loadSkills]);
+
+  // ---- Agent actions ----
+
   const startNew = useCallback(() => {
     setEditing({ ...DEFAULT_CONFIG });
     setIsNew(true);
     setError(null);
   }, []);
 
-  // ---- Start editing an existing agent ----
   const startEdit = useCallback(async (entry: AgentEntry) => {
     setError(null);
     try {
@@ -103,14 +148,12 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
     }
   }, []);
 
-  // ---- Cancel editing ----
   const cancelEdit = useCallback(() => {
     setEditing(null);
     setIsNew(false);
     setError(null);
   }, []);
 
-  // ---- Save agent ----
   const saveAgent = useCallback(async () => {
     if (!editing || !editing.name.trim()) {
       setError("Agent name is required.");
@@ -125,9 +168,17 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
     setError(null);
 
     try {
-      const fileName = `${editing.name.trim()}.json`;
+      const fileName = `${editing.name.trim()}.md`;
       const filePath = `${rootPath}/.agents/${fileName}`;
-      const content = JSON.stringify(editing, null, 2);
+      // Format as markdown with YAML-like frontmatter
+      const content = `---
+name: ${editing.name}
+description: ${editing.description || ""}
+model: ${editing.model || ""}
+temperature: ${editing.temperature}
+---
+
+${editing.prompt}`;
 
       await invoke("write_file", { path: filePath, content });
       await loadAgents();
@@ -140,7 +191,6 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
     setSaving(false);
   }, [editing, rootPath, loadAgents, onAgentsChanged]);
 
-  // ---- Delete agent ----
   const deleteAgent = useCallback(async (entry: AgentEntry) => {
     if (!confirm(`Delete agent "${entry.name}"?`)) return;
     try {
@@ -152,8 +202,7 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
     }
   }, [loadAgents, onAgentsChanged]);
 
-  // ---- Update a field in the editor ----
-  const updateField = useCallback(<K extends keyof AgentConfig>(
+  const updateAgentField = useCallback(<K extends keyof AgentConfig>(
     field: K,
     value: AgentConfig[K],
   ) => {
@@ -161,10 +210,93 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
     setEditing({ ...editing, [field]: value });
   }, [editing]);
 
+  // ---- Skill actions ----
+
+  const startCreateSkill = useCallback(() => {
+    setCreatingSkill(true);
+    setNewSkillName("");
+    setError(null);
+  }, []);
+
+  const cancelCreateSkill = useCallback(() => {
+    setCreatingSkill(false);
+    setNewSkillName("");
+    setError(null);
+  }, []);
+
+  const createSkill = useCallback(async () => {
+    const name = newSkillName.trim();
+    if (!name) {
+      setError("Skill name is required.");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      const fileName = `${name}.md`;
+      const filePath = `${rootPath}/.skills/${fileName}`;
+      const content = `# ${name}\n\nYour skill description and instructions here.\n`;
+      await invoke("write_file", { path: filePath, content });
+      setCreatingSkill(false);
+      setNewSkillName("");
+      await loadSkills();
+    } catch (e) {
+      setError(`Failed to create skill: ${e}`);
+    }
+    setSaving(false);
+  }, [newSkillName, rootPath, loadSkills]);
+
+  const editSkill = useCallback(async (entry: SkillEntry) => {
+    onOpenFile?.(entry.path, entry.name);
+    onClose();
+  }, [onOpenFile, onClose]);
+
+  const deleteSkill = useCallback(async (entry: SkillEntry) => {
+    if (!confirm(`Delete skill "${entry.name}"?`)) return;
+    try {
+      await invoke("delete_file", { path: entry.path });
+      await loadSkills();
+    } catch (e) {
+      setError(`Failed to delete skill: ${e}`);
+    }
+  }, [loadSkills]);
+
+  /** Append a skill's content to the agent prompt being edited. */
+  const appendSkillToPrompt = useCallback(async (entry: SkillEntry) => {
+    if (!editing) return;
+    try {
+      const content: string = await invoke("read_file", { path: entry.path });
+      const appendText = `\n\n---\n## Referenced Skill: ${entry.name}\n${content}\n---`;
+      setEditing({ ...editing, prompt: editing.prompt + appendText });
+    } catch (e) {
+      setError(`Failed to read skill: ${e}`);
+    }
+  }, [editing]);
+
   if (!visible) return null;
 
-  // ===== Editor view =====
-  if (editing) {
+  // ===== Tab bar =====
+  const renderTabBar = () => (
+    <div className="agent-tab-bar">
+      <button
+        className={`agent-tab ${activeTab === "agents" ? "active" : ""}`}
+        onClick={() => setActiveTab("agents")}
+      >
+        Agents
+      </button>
+      <button
+        className={`agent-tab ${activeTab === "skills" ? "active" : ""}`}
+        onClick={() => setActiveTab("skills")}
+      >
+        Skills
+      </button>
+    </div>
+  );
+
+  // ===== Agent editor view =====
+  if (editing && activeTab === "agents") {
     return (
       <div className="modal-overlay" onClick={onClose}>
         <div className="modal agent-editor-modal" onClick={(e) => e.stopPropagation()}>
@@ -179,7 +311,7 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
             <input
               className="field-input"
               value={editing.name}
-              onChange={(e) => updateField("name", e.target.value)}
+              onChange={(e) => updateAgentField("name", e.target.value)}
               placeholder="e.g. code-reviewer"
               disabled={!isNew}
               style={!isNew ? { opacity: 0.6, cursor: "not-allowed" } : undefined}
@@ -194,7 +326,7 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
             <input
               className="field-input"
               value={editing.description}
-              onChange={(e) => updateField("description", e.target.value)}
+              onChange={(e) => updateAgentField("description", e.target.value)}
               placeholder="Short description for the @mention list"
             />
 
@@ -202,17 +334,44 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
             <textarea
               className="field-input agent-prompt-input"
               value={editing.prompt}
-              onChange={(e) => updateField("prompt", e.target.value)}
+              onChange={(e) => updateAgentField("prompt", e.target.value)}
               placeholder="You are an expert AI agent that..."
               rows={10}
               style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12, minHeight: 120 }}
             />
 
+            {/* ---- Referenced Skills section ---- */}
+            {skills.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <label className="field-label">Referenced Skills</label>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
+                  Click a skill to append its content to the prompt above.
+                </div>
+                <div className="agent-list" style={{ maxHeight: 150, overflowY: "auto" }}>
+                  {skills.map((skill) => (
+                    <div key={skill.path} className="agent-list-item" style={{ padding: "4px 8px" }}>
+                      <div className="agent-list-item-info">
+                        <span className="agent-list-item-name">{skill.name}</span>
+                      </div>
+                      <button
+                        className="agent-action-btn"
+                        onClick={() => appendSkillToPrompt(skill)}
+                        title="Append skill content to prompt"
+                        style={{ fontSize: 11, padding: "2px 8px" }}
+                      >
+                        Append to prompt
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <label className="field-label">Model Override (optional)</label>
             <input
               className="field-input"
               value={editing.model}
-              onChange={(e) => updateField("model", e.target.value)}
+              onChange={(e) => updateAgentField("model", e.target.value)}
               placeholder="Leave empty to use default chat model"
             />
 
@@ -225,7 +384,7 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
               max="2"
               step="0.1"
               value={editing.temperature}
-              onChange={(e) => updateField("temperature", parseFloat(e.target.value))}
+              onChange={(e) => updateAgentField("temperature", parseFloat(e.target.value))}
               style={{ width: "100%", accentColor: "var(--accent)" }}
             />
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-muted)" }}>
@@ -244,77 +403,176 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
     );
   }
 
-  // ===== List view =====
+  // ===== Skills: creation form =====
+  if (creatingSkill) {
+    return (
+      <div className="modal-overlay" onClick={onClose}>
+        <div className="modal agent-manager-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-header">
+            <span>New Skill</span>
+            <button onClick={cancelCreateSkill}>&times;</button>
+          </div>
+          <div className="modal-body">
+            {error && <div className="agent-error">{error}</div>}
+            <label className="field-label">Skill Name</label>
+            <input
+              className="field-input"
+              value={newSkillName}
+              onChange={(e) => setNewSkillName(e.target.value)}
+              placeholder="e.g. code-review-checklist"
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") createSkill(); }}
+            />
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+              A markdown file will be created at <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 2 }}>.skills/{newSkillName || "..."}.md</code>
+            </div>
+          </div>
+          <div className="modal-footer">
+            <button className="btn-secondary" onClick={cancelCreateSkill}>Cancel</button>
+            <button className="btn-primary" onClick={createSkill} disabled={saving || !newSkillName.trim()}>
+              {saving ? "Creating..." : "Create Skill"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== List view: shared layout with tabs =====
   const noFolder = !rootPath;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal agent-manager-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span>AI Agents</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span>AI Agents & Skills</span>
+          </div>
           <button onClick={onClose}>&times;</button>
         </div>
+        {renderTabBar()}
         <div className="modal-body">
           {error && <div className="agent-error">{error}</div>}
 
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
-            Agents are stored as JSON files in the <code style={{ background: "var(--bg-surface)", padding: "1px 5px", borderRadius: 3 }}>.agents/</code> folder.
-            You can edit them here or directly in the file explorer.
-            Use <strong>@agent-name</strong> in chat to invoke an agent.
-          </div>
-
           {noFolder ? (
             <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
-              No folder is open. Open a folder first (Ctrl+F, O) to create and manage AI agents.
+              No folder is open. Open a folder first (Ctrl+F, O) to create and manage AI agents and skills.
             </div>
-          ) : loadingList ? (
-            <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
-              Loading agents...
-            </div>
-          ) : agents.length === 0 ? (
-            <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
-              No agents yet in this project. Create your first one!
-            </div>
-          ) : (
-            <div className="agent-list">
-              {agents.map((agent) => (
-                <div key={agent.path} className="agent-list-item">
-                  <div className="agent-list-item-info">
-                    <span className="agent-list-item-name">{agent.name}</span>
-                    <span className="agent-list-item-path">{agent.path}</span>
-                  </div>
-                  <div className="agent-list-item-actions">
-                    <button
-                      className="agent-action-btn"
-                      onClick={() => startEdit(agent)}
-                      title="Edit agent"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      className="agent-action-btn agent-action-btn-danger"
-                      onClick={() => deleteAgent(agent)}
-                      title="Delete agent"
-                    >
-                      Delete
-                    </button>
-                  </div>
+          ) : activeTab === "agents" ? (
+            // ===== Agents list =====
+            <>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
+                Agents are stored as markdown files in the <code style={{ background: "var(--bg-surface)", padding: "1px 5px", borderRadius: 3 }}>.agents/</code> folder.
+                You can edit them here or directly in the file explorer.
+                Use <strong>@agent-name</strong> in chat to invoke an agent.
+              </div>
+              {loadingList ? (
+                <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+                  Loading agents...
                 </div>
-              ))}
-            </div>
+              ) : agents.length === 0 ? (
+                <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+                  No agents yet in this project. Create your first one!
+                </div>
+              ) : (
+                <div className="agent-list">
+                  {agents.map((agent) => (
+                    <div key={agent.path} className="agent-list-item">
+                      <div className="agent-list-item-info">
+                        <span className="agent-list-item-name">{agent.name}</span>
+                        <span className="agent-list-item-path">{agent.path}</span>
+                      </div>
+                      <div className="agent-list-item-actions">
+                        <button
+                          className="agent-action-btn"
+                          onClick={() => startEdit(agent)}
+                          title="Edit agent"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="agent-action-btn agent-action-btn-danger"
+                          onClick={() => deleteAgent(agent)}
+                          title="Delete agent"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            // ===== Skills list =====
+            <>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
+                Skills are markdown files stored in the <code style={{ background: "var(--bg-surface)", padding: "1px 5px", borderRadius: 3 }}>.skills/</code> folder.
+                Create them here, in the terminal, or in the file editor.
+                Agents can reference skills to include their content as context.
+              </div>
+              {loadingSkills ? (
+                <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+                  Loading skills...
+                </div>
+              ) : skills.length === 0 ? (
+                <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+                  No skills yet in this project. Create your first one!
+                </div>
+              ) : (
+                <div className="agent-list">
+                  {skills.map((skill) => (
+                    <div key={skill.path} className="agent-list-item">
+                      <div className="agent-list-item-info">
+                        <span className="agent-list-item-name">{skill.name}</span>
+                        <span className="agent-list-item-path">{skill.path}</span>
+                      </div>
+                      <div className="agent-list-item-actions">
+                        <button
+                          className="agent-action-btn"
+                          onClick={() => editSkill(skill)}
+                          title="Edit skill in editor"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="agent-action-btn agent-action-btn-danger"
+                          onClick={() => deleteSkill(skill)}
+                          title="Delete skill"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
         <div className="modal-footer">
           <button className="btn-secondary" onClick={onClose}>Close</button>
-          <button
-            className="btn-primary"
-            onClick={startNew}
-            disabled={noFolder}
-            title={noFolder ? "Open a folder first to create agents" : "Create a new agent"}
-            style={noFolder ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
-          >
-            New Agent
-          </button>
+          {activeTab === "agents" ? (
+            <button
+              className="btn-primary"
+              onClick={startNew}
+              disabled={noFolder}
+              title={noFolder ? "Open a folder first to create agents" : "Create a new agent"}
+              style={noFolder ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
+            >
+              New Agent
+            </button>
+          ) : (
+            <button
+              className="btn-primary"
+              onClick={startCreateSkill}
+              disabled={noFolder}
+              title={noFolder ? "Open a folder first to create skills" : "Create a new skill"}
+              style={noFolder ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
+            >
+              New Skill
+            </button>
+          )}
         </div>
       </div>
     </div>

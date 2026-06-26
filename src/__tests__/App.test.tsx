@@ -99,14 +99,14 @@ describe("App", () => {
     expect(screen.queryByTitle("Close browser")).not.toBeInTheDocument();
   });
 
-  it("opens AI Settings on Ctrl+Shift+I", () => {
+  it("opens Model Providers on Ctrl+Shift+P", () => {
     render(<App />);
-    // "AI Integrations" always appears in the menubar — check for the modal content instead
     expect(screen.queryByText("Provider")).not.toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "I", ctrlKey: true, shiftKey: true });
-    // The AI Settings modal should be visible (but we need to check the header)
+    fireEvent.keyDown(window, { key: "P", ctrlKey: true, shiftKey: true });
+    // The Model Providers modal should be visible
     expect(screen.getByText("Provider")).toBeInTheDocument();
+    expect(screen.getByText("Model Providers")).toBeInTheDocument();
   });
 
   it("toggles file explorer on Ctrl+E", () => {
@@ -144,13 +144,16 @@ describe("App", () => {
     // to App's openInBrowser which calls setBrowserUrl.
   });
 
-  it("closes chat panel via Escape when AI Settings is open", () => {
+  it("closes Model Providers via Escape", () => {
     render(<App />);
 
-    // Open AI Settings
-    fireEvent.keyDown(window, { key: "I", ctrlKey: true, shiftKey: true });
-    // AI Settings should not close on Escape
-    // (Escape only closes AISettings when showAISettings is true)
+    // Open Model Providers
+    fireEvent.keyDown(window, { key: "P", ctrlKey: true, shiftKey: true });
+    expect(screen.getByText("Model Providers")).toBeInTheDocument();
+
+    // Escape closes it
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByText("Model Providers")).not.toBeInTheDocument();
   });
 
   // ---- Terminal Memory tests --------------------------------------------

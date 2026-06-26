@@ -1370,6 +1370,108 @@ html, body, #root {
   line-height: 1;
 }
 
+/* ===== Skill autocomplete styles ===== */
+.skill-autocomplete {
+  width: 100%;
+  max-height: 200px;
+  overflow-y: auto;
+  overflow-x: auto;
+  padding: 4px 0;
+  white-space: nowrap;
+}
+
+.skill-autocomplete::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.skill-autocomplete::-webkit-scrollbar-thumb {
+  background: var(--hover);
+  border-radius: 3px;
+}
+
+.skill-autocomplete-loading {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.skill-autocomplete-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.skill-autocomplete-item:hover,
+.skill-autocomplete-item.selected {
+  background: var(--accent);
+  color: var(--bg-primary);
+}
+
+.skill-autocomplete-icon {
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.skill-autocomplete-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.skill-autocomplete-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.skill-autocomplete-item.selected .skill-autocomplete-path,
+.skill-autocomplete-item:hover .skill-autocomplete-path {
+  color: var(--bg-primary);
+  opacity: 0.7;
+}
+
+/* ===== Skill ref chips in chat input ===== */
+.skill-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(100, 180, 255, 0.12);
+  border: 1px solid rgba(100, 180, 255, 0.4);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: #64b4ff;
+  white-space: nowrap;
+}
+
+.skill-ref-icon {
+  font-size: 12px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+}
+
+/* ===== Context badge for skill type ===== */
+.context-badge.skill {
+  background: rgba(100, 180, 255, 0.12);
+  border: 1px solid rgba(100, 180, 255, 0.4);
+  color: #64b4ff;
+}
+
 /* ===== Chat header actions (agent button) ===== */
 .chat-header-actions {
   display: flex;
@@ -1486,6 +1588,35 @@ html, body, #root {
   background: rgba(224, 108, 117, 0.2);
   border-color: #e06c75;
   color: #e06c75;
+}
+
+/* Agent / Skills tab bar */
+.agent-tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+  gap: 0;
+}
+
+.agent-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.agent-tab:hover {
+  color: var(--text-primary);
+}
+
+.agent-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
 /* ===== Empty state ===== */
