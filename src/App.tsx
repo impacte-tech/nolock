@@ -144,11 +144,13 @@ export default function App() {
 
       const ptsDelta = (delta / available) * totalPts;
 
-      // When `invert` is true, negate the delta so that dragging toward the
-      // controlled panel makes it shrink instead of grow.  This is needed
+      // When `invert` is true, the delta is negated so that moving the mouse
+      // toward the panel makes it *grow* (instead of shrink).  This is needed
       // when the controlled panel sits on the opposite side of the drag
-      // direction (e.g. the explorer handle: explorer is left of the divider,
-      // so dragging right should shrink explorer, not grow it).
+      // direction from the handle movement:
+      //   - Panel LEFT of handle: drag RIGHT  (delta > 0) → panel grows  → invert=false
+      //   - Panel RIGHT of handle: drag LEFT  (delta < 0) → panel grows  → invert=true
+      //   - Panel BELOW of handle: drag UP   (delta < 0) → panel grows  → invert=true
       const sign = invert ? -1 : 1;
 
       setter((prev) => Math.max(minPts, Math.min(maxPts, prev + sign * ptsDelta)));
@@ -631,7 +633,7 @@ export default function App() {
             )}
             <ResizableHandle
               direction="horizontal"
-              onDrag={makeResizeHandler(setExplorerPts, 8, 50, mainAreaRef, "width", 100, true)}
+              onDrag={makeResizeHandler(setExplorerPts, 8, 50, mainAreaRef, "width", 100, false)}
               onDragEnd={() => setResizeEpoch((e) => e + 1)}
             />
           </>
