@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Marked } from "marked";
 import FileAutocomplete, { type AgentRef } from "./FileAutocomplete";
+import SkillAutocomplete from "./SkillAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
 
@@ -24,8 +25,8 @@ interface Message {
   /** Text to display in the chat UI (user sees this instead of the full API content) */
   displayContent?: string;
   toolCalls?: ToolCallLog[];
-  /** File and agent @mentions referenced in this message (for context badges). */
-  contextRefs?: { type: "file" | "agent"; name: string }[];
+  /** File, agent, and skill mentions referenced in this message (for context badges). */
+  contextRefs?: { type: "file" | "agent" | "skill"; name: string }[];
 }
 
 export interface FileRef {
@@ -33,6 +34,11 @@ export interface FileRef {
   name: string;
   /** Internal: token count of file content (populated after first read). */
   _tokenCount?: number;
+}
+
+export interface SkillRef {
+  name: string;
+  path: string;
 }
 
 interface Props {
@@ -137,17 +143,19 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const stopRequestedRef = useRef(false); // set to true when user clicks stop
   const unlistenRef = useRef<(() => void) | null>(null); // stored stream-token unlisten callback
 
-  // ---- File @mention state ----
+  // ---- Mention state (@ for files/agents, / for skills) ----
   const [fileRefs, setFileRefs] = useState<FileRef[]>([]);
   const [agentRefs, setAgentRefs] = useState<AgentRef[]>([]);
+  const [skillRefs, setSkillRefs] = useState<SkillRef[]>([]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState<number>(-1);
+  const [mentionType, setMentionType] = useState<"file" | "skill" | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   /** Tracks total context tokens sent across the conversation (persists after fileRefs are cleared). */
   const [accumulatedContextTokens, setAccumulatedContextTokens] = useState(0);
 
-  /** Detect @mention patterns as the user types. */
+  /** Detect @mention (files/agents) or /mention (skills) patterns as the user types. */
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
     setInput(value);
@@ -156,25 +164,44 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     if (cursorPos === null) {
       setMentionQuery(null);
       setMentionIndex(-1);
+      setMentionType(null);
       return;
     }
 
     const textBefore = value.substring(0, cursorPos);
-    const atIdx = textBefore.lastIndexOf("@");
 
+    // Check @ mention (files/agents) — trigger on @ followed by non-whitespace
+    const atIdx = textBefore.lastIndexOf("@");
     if (atIdx !== -1) {
       const afterAt = textBefore.substring(atIdx + 1);
-      // Valid mention: no whitespace between @ and cursor, and no nested @
       if (!/\s/.test(afterAt)) {
         setMentionQuery(afterAt);
         setMentionIndex(atIdx);
+        setMentionType("file");
         return;
+      }
+    }
+
+    // Check / mention (skills) — trigger on / preceded by whitespace or at start,
+    // followed by non-whitespace. This avoids matching file paths like "src/main.rs".
+    const slashIdx = textBefore.lastIndexOf("/");
+    if (slashIdx !== -1) {
+      const beforeSlash = slashIdx === 0 ? " " : textBefore[slashIdx - 1];
+      if (/\s/.test(beforeSlash)) {
+        const afterSlash = textBefore.substring(slashIdx + 1);
+        if (!/\s/.test(afterSlash)) {
+          setMentionQuery(afterSlash);
+          setMentionIndex(slashIdx);
+          setMentionType("skill");
+          return;
+        }
       }
     }
 
     // No active mention
     setMentionQuery(null);
     setMentionIndex(-1);
+    setMentionType(null);
   }, []);
 
   /** Called when user selects a file from the autocomplete dropdown. */
@@ -192,6 +219,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     // Close autocomplete
     setMentionQuery(null);
     setMentionIndex(-1);
+    setMentionType(null);
 
     // Refocus the textarea
     textareaRef.current?.focus();
@@ -212,6 +240,28 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     // Close autocomplete
     setMentionQuery(null);
     setMentionIndex(-1);
+    setMentionType(null);
+
+    // Refocus the textarea
+    textareaRef.current?.focus();
+  }, [input, mentionIndex, mentionQuery]);
+
+  /** Called when user selects a skill from the / autocomplete dropdown. */
+  const handleSkillSelect = useCallback((skillPath: string, skillName: string) => {
+    // Keep the /name visible in the input (replace the partial query with the full /name)
+    if (mentionIndex !== -1 && mentionQuery !== null) {
+      const before = input.substring(0, mentionIndex);
+      const after = input.substring(mentionIndex + 1 + mentionQuery.length);
+      setInput(before + "/" + skillName + after);
+    }
+
+    // Add to skill refs (deduplicate by path)
+    setSkillRefs((prev) => (prev.some((r) => r.path === skillPath) ? prev : [...prev, { path: skillPath, name: skillName }]));
+
+    // Close autocomplete
+    setMentionQuery(null);
+    setMentionIndex(-1);
+    setMentionType(null);
 
     // Refocus the textarea
     textareaRef.current?.focus();
@@ -223,6 +273,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   const removeAgentRef = useCallback((path: string) => {
     setAgentRefs((prev) => prev.filter((r) => r.path !== path));
+  }, []);
+
+  const removeSkillRef = useCallback((path: string) => {
+    setSkillRefs((prev) => prev.filter((r) => r.path !== path));
   }, []);
 
   useEffect(() => {
@@ -284,11 +338,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   /** Compute total context size: accumulated (from prior sends) + pending (current chips). */
   const contextSize = accumulatedContextTokens
     + fileRefs.reduce((sum, ref) => sum + (ref._tokenCount || 0), 0)
-    + agentRefs.length * 50; // rough estimate for agent system prompt tokens
+    + agentRefs.length * 50 // rough estimate for agent system prompt tokens
+    + skillRefs.length * 100; // rough estimate for skill content tokens
 
   const clearAllRefs = useCallback(() => {
     setFileRefs([]);
     setAgentRefs([]);
+    setSkillRefs([]);
     setAccumulatedContextTokens(0);
   }, []);
 
@@ -318,11 +374,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     }
 
     // ---- Build display content (what the user sees in chat) ----
-    // The @mentions are already embedded in the input text (kept on autocomplete select).
+    // The @mentions and /mentions are already embedded in the input text (kept on autocomplete select).
     // We just show the message as-is, with context badges below.
-    const contextRefs: { type: "file" | "agent"; name: string }[] = [
+    const contextRefs: { type: "file" | "agent" | "skill"; name: string }[] = [
       ...fileRefs.map((r) => ({ type: "file" as const, name: r.name })),
       ...agentRefs.map((r) => ({ type: "agent" as const, name: r.name })),
+      ...skillRefs.map((r) => ({ type: "skill" as const, name: r.name })),
     ];
     const displayText = trimmed;
 
@@ -361,6 +418,26 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       }
     }
 
+    // Collect skill contexts — read skill files, execute any embedded commands, include output
+    for (const skill of skillRefs) {
+      try {
+        const result: { stdout: string; stderr: string; exit_code: number; content: string } =
+          await invoke("run_skill_command", { rootPath, skillName: skill.name });
+        const skillParts: string[] = [];
+        skillParts.push(`Skill: ${skill.name}\n\`\`\`\n${result.content}\n\`\`\``);
+        if (result.stdout) {
+          skillParts.push(`Command output (stdout):\n\`\`\`\n${result.stdout}\n\`\`\``);
+        }
+        if (result.stderr) {
+          skillParts.push(`Command stderr (exit code ${result.exit_code}):\n\`\`\`\n${result.stderr}\n\`\`\``);
+        }
+        contextParts.push(skillParts.join("\n\n"));
+      } catch (e) {
+        console.error(`Failed to process skill ${skill.name}:`, e);
+        contextParts.push(`Skill: ${skill.name}\n(Error reading skill: ${e})`);
+      }
+    }
+
     // Append file context to the user message
     if (contextParts.length > 0) {
       apiContent = `Context:\n${contextParts.join("\n\n")}\n\n---\n${apiContent}`;
@@ -379,6 +456,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setInput("");
     setFileRefs([]); // Clear pending file refs after sending
     setAgentRefs([]); // Clear pending agent refs after sending
+    setSkillRefs([]); // Clear pending skill refs after sending
     setLoading(true);
 
     let unlisten: (() => void) | null = null;
@@ -408,6 +486,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const toolConfigStored = await getSecret("toolConfig");
       const toolConfigRaw = toolConfigStored ?? localStorage.getItem("nolock.toolConfig") ?? "{}";
       const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
+
+      // Read chat model parameters from localStorage
+      const chatTemperature = localStorage.getItem("nolock.chatTemperature");
+      const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
+      const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
 
       // ---- Set up streaming event listener ----
       unlisten = await listen<{ token: string }>("stream-token", (event) => {
@@ -442,6 +525,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           apiKey: apiKey || null,
           toolsEnabled,
           toolConfigs,
+          temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
+          maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
+          systemPrompt: chatSystemPrompt || undefined,
         },
       });
 
@@ -516,7 +602,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         {messages.length === 0 && (
           <div style={{ color: "var(--text-muted)", fontSize: 13, textAlign: "center", marginTop: 40 }}>
             Ask anything about your code...<br />
-            Use <strong>@agent-name</strong> to invoke an AI agent.
+            Use <strong>@agent-name</strong> to invoke an AI agent.<br />
+            Use <strong>/skill-name</strong> to run a skill command.
+
           </div>
         )}
         {messages.map((m, i) => (
@@ -557,6 +645,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                             <circle cx="8.5" cy="11.5" r="2" fill="currentColor" />
                             <circle cx="15.5" cy="11.5" r="2" fill="currentColor" />
                             <path d="M9 16 Q12 18.5 15 16" strokeWidth="1.5" fill="none" />
+                          </svg>
+                        ) : ref.type === "skill" ? (
+                          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                            <polyline points="14 2 14 8 20 8" />
+                            <line x1="16" y1="13" x2="8" y2="13" />
+                            <line x1="16" y1="17" x2="8" y2="17" />
                           </svg>
                         ) : (
                           <svg className="file-icon-small" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -614,8 +709,30 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           </div>
         )}
 
+        {/* Skill ref chips */}
+        {skillRefs.length > 0 && (
+          <div className="file-ref-chips">
+            <div className="file-ref-chips-list">
+              {skillRefs.map((ref) => (
+                <div key={ref.path} className="skill-ref-chip">
+                  <span className="skill-ref-icon">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="16" y1="13" x2="8" y2="13" />
+                      <line x1="16" y1="17" x2="8" y2="17" />
+                    </svg>
+                  </span>
+                  <span className="file-ref-name">/{ref.name}</span>
+                  <span className="file-ref-remove" onClick={() => removeSkillRef(ref.path)}>&times;</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Actions bar (when chips are present) */}
-        {(fileRefs.length > 0 || agentRefs.length > 0) && (
+        {(fileRefs.length > 0 || agentRefs.length > 0 || skillRefs.length > 0) && (
           <div className="file-ref-chips-actions" style={{ marginBottom: 6 }}>
             {loading && (
               <button className="stop-generation-btn" onClick={stopGeneration} title="Stop generation">
@@ -643,7 +760,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         )}
 
         {/* Persistent context indicator — shown when there are messages or accumulated context */}
-        {fileRefs.length === 0 && agentRefs.length === 0 && (accumulatedContextTokens > 0 || messages.length > 0) && (
+        {fileRefs.length === 0 && agentRefs.length === 0 && skillRefs.length === 0 && (accumulatedContextTokens > 0 || messages.length > 0) && (
           <div className="context-persistent-bar">
             <div className="context-bar-actions">
               {/* Stop button — only visible while the model is generating */}
@@ -671,8 +788,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             </div>
           </div>
         )}
-        {/* Inline autocomplete panel — appears between messages and input when @mention is active */}
-        {mentionQuery !== null && rootPath && (
+        {/* Inline autocomplete panel — appears between messages and input when @mention or /mention is active */}
+        {mentionQuery !== null && rootPath && mentionType === "file" && (
           <div className="chat-autocomplete-panel">
             <FileAutocomplete
               query={mentionQuery}
@@ -682,6 +799,21 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
               onClose={() => {
                 setMentionQuery(null);
                 setMentionIndex(-1);
+                setMentionType(null);
+              }}
+            />
+          </div>
+        )}
+        {mentionQuery !== null && rootPath && mentionType === "skill" && (
+          <div className="chat-autocomplete-panel">
+            <SkillAutocomplete
+              query={mentionQuery}
+              rootPath={rootPath}
+              onSelect={handleSkillSelect}
+              onClose={() => {
+                setMentionQuery(null);
+                setMentionIndex(-1);
+                setMentionType(null);
               }}
             />
           </div>
@@ -692,7 +824,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             ref={textareaRef}
             className="chat-input"
             rows={2}
-            placeholder="Type @ to reference a file or agent... Ask the AI..."
+            placeholder="Type @ to reference a file or agent, / to run a skill... Ask the AI..."
             value={input}
             onChange={handleInputChange}
             onKeyDown={(e) => {

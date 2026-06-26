@@ -151,6 +151,11 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
       const apiKey = (await getSecret("apiKey")) ?? localStorage.getItem("nolock.apiKey") ?? "";
 
+      // Read FITM model parameters from localStorage
+      const fitmTemperature = localStorage.getItem("nolock.fitmTemperature");
+      const fitmMaxTokens = localStorage.getItem("nolock.fitmMaxTokens");
+      const fitmSystemPrompt = localStorage.getItem("nolock.fitmSystemPrompt");
+
       if (!completionModel) {
         return { items: [] };
       }
@@ -166,6 +171,9 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
           prompt: fimPrompt,
           suffix: suffix || null,
           apiKey: apiKey || null,
+          temperature: fitmTemperature ? parseFloat(fitmTemperature) : undefined,
+          max_tokens: fitmMaxTokens ? parseInt(fitmMaxTokens, 10) : undefined,
+          system_prompt: fitmSystemPrompt || undefined,
         },
       });
 

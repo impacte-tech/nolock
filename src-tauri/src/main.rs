@@ -121,6 +121,8 @@ struct AgentEntry {
 
 /// List all agent files in the `.agents/` directory under root_path.
 /// Creates `.agents/` if it does not exist. Returns agent entries sorted by name.
+/// Supports both `.json` (legacy) and `.md` files. When both exist for the same name,
+/// the `.md` version takes precedence.
 #[tauri::command]
 fn list_agents(root_path: String) -> Result<Vec<AgentEntry>, String> {
     let agents_dir = std::path::Path::new(&root_path).join(".agents");
@@ -134,15 +136,37 @@ fn list_agents(root_path: String) -> Result<Vec<AgentEntry>, String> {
     let read_dir = std::fs::read_dir(&agents_dir)
         .map_err(|e| format!("Failed to read .agents directory: {}", e))?;
 
-    let mut entries = Vec::new();
+    let mut entries: Vec<AgentEntry> = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+
     for entry in read_dir {
         let entry = entry.map_err(|e| e.to_string())?;
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
         if metadata.is_file() {
             let file_name = entry.file_name().to_string_lossy().to_string();
-            // Only include .json files
-            if file_name.ends_with(".json") {
-                let stem = file_name.strip_suffix(".json").unwrap_or(&file_name).to_string();
+            // Support both .json (legacy) and .md files
+            let stem = if file_name.ends_with(".json") {
+                file_name.strip_suffix(".json").unwrap_or(&file_name).to_string()
+            } else if file_name.ends_with(".md") {
+                file_name.strip_suffix(".md").unwrap_or(&file_name).to_string()
+            } else {
+                continue;
+            };
+            // If we already have this name, prefer .md over .json
+            if seen_names.contains(&stem) {
+                let is_md = file_name.ends_with(".md");
+                let existing_is_json = entries.iter().any(|e| e.name == stem && e.path.ends_with(".json"));
+                if is_md && existing_is_json {
+                    // Replace the .json entry with the .md entry
+                    if let Some(pos) = entries.iter().position(|e| e.name == stem) {
+                        entries[pos] = AgentEntry {
+                            name: stem.clone(),
+                            path: entry.path().to_string_lossy().to_string(),
+                        };
+                    }
+                }
+            } else {
+                seen_names.insert(stem.clone());
                 entries.push(AgentEntry {
                     name: stem,
                     path: entry.path().to_string_lossy().to_string(),
@@ -155,14 +179,206 @@ fn list_agents(root_path: String) -> Result<Vec<AgentEntry>, String> {
     Ok(entries)
 }
 
-/// Read and parse an agent JSON file by its full path.
+/// Read and parse an agent file by its full path.
+/// Supports both `.json` (legacy) and `.md` (markdown with YAML-like frontmatter) formats.
+/// For `.md` files, the format is:
+/// ```markdown
+/// ---
+/// name: agent-name
+/// description: Short description
+/// model: 
+/// temperature: 0.7
+/// ---
+///
+/// The system prompt content...
+/// ```
 #[tauri::command]
 fn read_agent(path: String) -> Result<serde_json::Value, String> {
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read agent file {}: {}", path, e))?;
-    let parsed: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse agent file {}: {}", path, e))?;
-    Ok(parsed)
+
+    if path.ends_with(".json") {
+        // Legacy JSON format
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse agent file {}: {}", path, e))?;
+        return Ok(parsed);
+    }
+
+    // Parse markdown with YAML-like frontmatter
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut model = String::new();
+    let mut temperature = 0.7_f64;
+    let prompt;
+
+    // Extract frontmatter between --- markers
+    let trimmed = content.trim_start();
+    if trimmed.starts_with("---") {
+        // Find the closing ---
+        let after_first = &trimmed[3..]; // skip opening ---
+        if let Some(end) = after_first.find("\n---") {
+            let frontmatter_str = &after_first[..end];
+            for line in frontmatter_str.lines() {
+                let line = line.trim();
+                if let Some((key, value)) = line.split_once(':') {
+                    let key = key.trim().to_lowercase();
+                    let value = value.trim().to_string();
+                    match key.as_str() {
+                        "name" => name = value,
+                        "description" => description = value,
+                        "model" => model = value,
+                        "temperature" => {
+                            temperature = value.parse().unwrap_or(0.7);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Everything after the closing --- (skip "\n---" and any leading whitespace)
+            let after_fm = &after_first[end + 4..]; // skip "\n---"
+            prompt = after_fm.trim().to_string();
+        } else {
+            // No closing --- found, treat entire content as prompt
+            prompt = trimmed.to_string();
+        }
+    } else {
+        // No frontmatter at all, treat entire content as prompt
+        prompt = trimmed.to_string();
+    }
+
+    Ok(serde_json::json!({
+        "name": name,
+        "description": description,
+        "prompt": prompt,
+        "model": model,
+        "temperature": temperature,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Skill management commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct SkillEntry {
+    name: String,       // file stem (e.g. "code-review" from "code-review.md")
+    path: String,       // full path to the file
+}
+
+/// List all skill files in the `.skills/` directory under root_path.
+/// Creates `.skills/` if it does not exist. Returns skill entries sorted by name.
+#[tauri::command]
+fn list_skills(root_path: String) -> Result<Vec<SkillEntry>, String> {
+    let skills_dir = std::path::Path::new(&root_path).join(".skills");
+    if !skills_dir.exists() {
+        std::fs::create_dir_all(&skills_dir)
+            .map_err(|e| format!("Failed to create .skills directory: {}", e))?;
+        return Ok(Vec::new());
+    }
+
+    let read_dir = std::fs::read_dir(&skills_dir)
+        .map_err(|e| format!("Failed to read .skills directory: {}", e))?;
+
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+        if metadata.is_file() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.ends_with(".md") {
+                let stem = file_name.strip_suffix(".md").unwrap_or(&file_name).to_string();
+                entries.push(SkillEntry {
+                    name: stem,
+                    path: entry.path().to_string_lossy().to_string(),
+                });
+            }
+        }
+    }
+
+    entries.sort_by_key(|a| a.name.to_lowercase());
+    Ok(entries)
+}
+
+#[derive(serde::Serialize)]
+struct SkillCommandResult {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    /// The full skill markdown content (for context inclusion).
+    content: String,
+}
+
+/// Read a skill file, parse any fenced code block tagged with `command`/`sh`/`bash`/`shell`,
+/// execute the command in the project root, and return the output along with the skill content.
+/// If no command block is found, returns just the content with empty output.
+#[tauri::command]
+fn run_skill_command(root_path: String, skill_name: String) -> Result<SkillCommandResult, String> {
+    let skill_path = std::path::Path::new(&root_path)
+        .join(".skills")
+        .join(format!("{}.md", skill_name));
+
+    let content = std::fs::read_to_string(&skill_path)
+        .map_err(|e| format!("Failed to read skill '{}': {}", skill_name, e))?;
+
+    // Parse for fenced code blocks tagged with command/sh/bash/shell
+    let re = regex::Regex::new(r"(?s)```(?:command|sh|bash|shell)\s*\n(.*?)```").unwrap();
+    let cmd = re.captures(&content)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_string());
+
+    let output = if let Some(ref command_str) = cmd {
+        if command_str.is_empty() {
+            SkillCommandResult {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                content,
+            }
+        } else {
+            // Split the command string into program and args
+            let parts: Vec<&str> = command_str.split_whitespace().collect();
+            if parts.is_empty() {
+                SkillCommandResult {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    content,
+                }
+            } else {
+                let program = parts[0];
+                let args = &parts[1..];
+
+                match std::process::Command::new(program)
+                    .args(args)
+                    .current_dir(&root_path)
+                    .output()
+                {
+                    Ok(out) => SkillCommandResult {
+                        stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+                        stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+                        exit_code: out.status.code().unwrap_or(-1),
+                        content,
+                    },
+                    Err(e) => SkillCommandResult {
+                        stdout: String::new(),
+                        stderr: format!("Failed to execute command: {}", e),
+                        exit_code: -1,
+                        content,
+                    },
+                }
+            }
+        }
+    } else {
+        // No command block found, return just the content
+        SkillCommandResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            content,
+        }
+    };
+
+    Ok(output)
 }
 
 // ---------------------------------------------------------------------------
@@ -671,9 +887,15 @@ struct CompletionRequest {
     #[serde(default)]
     suffix: Option<String>,
     api_key: Option<String>,
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct ChatMessage {
     role: String,
     content: String,
@@ -694,6 +916,12 @@ struct ChatRequest {
     /// Stored in localStorage on the frontend as `nolock.toolConfig`.
     #[serde(default)]
     tool_configs: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1155,6 +1383,8 @@ async fn ollama_chat_with_tools(
     messages: &[ChatMessage],
     tools: &[serde_json::Value],
     max_iterations: usize,
+    temperature: f64,
+    max_tokens: u32,
 ) -> Result<ChatResult, String> {
     let mut ollama_msgs = build_initial_messages(messages, tools);
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
@@ -1162,7 +1392,7 @@ async fn ollama_chat_with_tools(
 
     for iteration in 0..max_iterations {
         // --- Build and send request ---
-        let body = build_ollama_chat_body(ctx.model, &ollama_msgs, tools);
+        let body = build_ollama_chat_body(ctx.model, &ollama_msgs, tools, temperature, max_tokens);
 
         eprintln!(
             "[nolock] ollama tool loop iteration={}, POST {}/api/chat (streaming)",
@@ -1286,12 +1516,14 @@ fn build_ollama_chat_body(
     model: &str,
     ollama_msgs: &[serde_json::Value],
     tools: &[serde_json::Value],
+    temperature: f64,
+    max_tokens: u32,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": model,
         "messages": ollama_msgs,
         "stream": true,
-        "options": { "num_predict": 2048, "temperature": 0.7 }
+        "options": { "num_predict": max_tokens, "temperature": temperature }
     });
     if !tools.is_empty() {
         body["tools"] = serde_json::json!(tools);
@@ -1302,12 +1534,22 @@ fn build_ollama_chat_body(
 #[tauri::command]
 async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     eprintln!(
-        "[nolock] ai_complete backend={} url={} model={} prompt_len={} suffix={}",
+        "[nolock] ai_complete backend={} url={} model={} prompt_len={} suffix={} temp={:?} max_tokens={:?} system_prompt={:?}",
         req.backend,
         req.url,
         req.model,
         req.prompt.len(),
-        req.suffix.as_deref().unwrap_or("(none)")
+        req.suffix.as_deref().unwrap_or("(none)"),
+        req.temperature,
+        req.max_tokens,
+        req.system_prompt.as_deref().unwrap_or("(none)"),
+    );
+
+    // Resolve configurable values with defaults
+    let temperature = req.temperature.unwrap_or(0.2);
+    let max_tokens = req.max_tokens.unwrap_or(64);
+    let system_prompt = req.system_prompt.as_deref().unwrap_or(
+        "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
     );
 
     let client = reqwest::Client::new();
@@ -1320,12 +1562,12 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
             let body = |with_suffix: bool| {
                 let mut b = serde_json::json!({
                     "model": req.model,
-                    "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+                    "system": system_prompt,
                     "prompt": req.prompt,
                     "stream": false,
                     "options": {
-                        "num_predict": 64,
-                        "temperature": 0.2,
+                        "num_predict": max_tokens,
+                        "temperature": temperature,
                         "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
                     }
                 });
@@ -1380,11 +1622,11 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
             // FITM: llama.cpp /completion supports `suffix` for fill-in-the-middle
             let mut body = serde_json::json!({
                 "prompt": req.prompt,
-                "n_predict": 64,
-                "temperature": 0.2,
+                "n_predict": max_tokens,
+                "temperature": temperature,
                 "stream": false,
                 "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
-                "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else."
+                "system": system_prompt
             });
             if let Some(ref suffix) = req.suffix {
                 if !suffix.is_empty() {
@@ -1445,12 +1687,12 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text."
+                        "content": system_prompt
                     },
                     { "role": "user", "content": user_content }
                 ],
-                "max_tokens": 64,
-                "temperature": 0.2,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
                 "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"]
             });
             eprintln!("[nolock] openrouter POST https://openrouter.ai/api/v1/chat/completions model={}", req.model);
@@ -1479,12 +1721,12 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
         "opencode" => {
             let body = serde_json::json!({
                 "model": req.model,
-                "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+                "system": system_prompt,
                 "prompt": req.prompt,
                 "stream": false,
                 "options": {
-                    "num_predict": 64,
-                    "temperature": 0.2,
+                    "num_predict": max_tokens,
+                    "temperature": temperature,
                     "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
                 }
             });
@@ -1513,13 +1755,40 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
 #[tauri::command]
 async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatResult, String> {
     eprintln!(
-        "[nolock] ai_chat backend={} url={} model={} messages={} tools={:?}",
+        "[nolock] ai_chat backend={} url={} model={} messages={} tools={:?} temp={:?} max_tokens={:?} system_prompt={:?}",
         req.backend,
         req.url,
         req.model,
         req.messages.len(),
-        req.tools_enabled
+        req.tools_enabled,
+        req.temperature,
+        req.max_tokens,
+        req.system_prompt.as_deref().unwrap_or("(none)"),
     );
+
+    // Resolve configurable values with defaults
+    let temperature = req.temperature.unwrap_or(0.7);
+    let max_tokens = req.max_tokens.unwrap_or(2048);
+
+    // Prepend global system prompt if provided and not already present
+    let messages = if let Some(ref system_prompt) = req.system_prompt {
+        if !system_prompt.is_empty() {
+            let mut msgs = req.messages.clone();
+            // Check if a system message already exists
+            let has_system = msgs.iter().any(|m| m.role == "system");
+            if !has_system {
+                msgs.insert(0, ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt.clone(),
+                });
+            }
+            msgs
+        } else {
+            req.messages
+        }
+    } else {
+        req.messages
+    };
 
     let client = reqwest::Client::new();
     let tools = build_tool_schemas(&req.tools_enabled);
@@ -1535,12 +1804,11 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     model: &req.model,
                     tool_configs: &req.tool_configs,
                 };
-                ollama_chat_with_tools(&ollama_ctx, &req.messages, &tools, 10)
+                ollama_chat_with_tools(&ollama_ctx, &messages, &tools, 10, temperature, max_tokens)
                     .await
             } else {
                 // No tools — simple single-turn chat (streaming)
-                let ollama_msgs: Vec<serde_json::Value> = req
-                    .messages
+                let ollama_msgs: Vec<serde_json::Value> = messages
                     .iter()
                     .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
                     .collect();
@@ -1549,7 +1817,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     "model": req.model,
                     "messages": ollama_msgs,
                     "stream": true,
-                    "options": { "num_predict": 2048, "temperature": 0.7 }
+                    "options": { "num_predict": max_tokens, "temperature": temperature }
                 });
                 eprintln!("[nolock] ollama POST {}/api/chat (no tools, streaming)", req.url);
                     let mut resp = client
@@ -1609,8 +1877,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             }
         }
         "llamacpp" => {
-            let prompt = req
-                .messages
+            let prompt = messages
                 .iter()
                 .map(|m| format!("{}: {}", m.role, m.content))
                 .collect::<Vec<_>>()
@@ -1619,8 +1886,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
             let body = serde_json::json!({
                 "prompt": prompt,
-                "n_predict": 2048,
-                "temperature": 0.7,
+                "n_predict": max_tokens,
+                "temperature": temperature,
                 "stream": true
             });
             eprintln!("[nolock] llamacpp POST {}/completion (streaming)", req.url);
@@ -1683,8 +1950,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
         }
         "openrouter" => {
             let api_key = req.api_key.clone().unwrap_or_default();
-            let mut or_msgs: Vec<serde_json::Value> = req
-                .messages
+            let mut or_msgs: Vec<serde_json::Value> = messages
                 .iter()
                 .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
                 .collect();
@@ -1709,8 +1975,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             let mut body = serde_json::json!({
                 "model": req.model,
                 "messages": or_msgs,
-                "max_tokens": 2048,
-                "temperature": 0.7,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
                 "stream": true
             });
             if has_tools {
@@ -1782,8 +2048,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             })
         }
         "opencode" => {
-            let prompt = req
-                .messages
+            let prompt = messages
                 .iter()
                 .map(|m| format!("{}: {}", m.role, m.content))
                 .collect::<Vec<_>>()
@@ -1794,7 +2059,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 "model": req.model,
                 "prompt": prompt,
                 "stream": true,
-                "options": { "num_predict": 2048, "temperature": 0.7 }
+                "options": { "num_predict": max_tokens, "temperature": temperature }
             });
             eprintln!("[nolock] opencode POST {}/api/generate (streaming)", req.url);
             let mut resp = client
@@ -1887,6 +2152,8 @@ pub fn run() {
             create_file,
             list_agents,
             read_agent,
+            list_skills,
+            run_skill_command,
             search_in_files,
             replace_in_files,
             get_model_info,

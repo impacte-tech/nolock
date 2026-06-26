@@ -7,7 +7,10 @@ import { TerminalPanel, type TerminalInstance } from "./components/Terminal";
 import ChatPanel from "./components/ChatPanel";
 import BrowserPanel from "./components/BrowserPanel";
 import MenuBar from "./components/MenuBar";
-import AISettings from "./components/AISettings";
+import ModelProvidersPanel from "./components/ModelProvidersPanel";
+import ChatModelPanel from "./components/ChatModelPanel";
+import FITMModelPanel from "./components/FITMModelPanel";
+import ToolsPanel from "./components/ToolsPanel";
 import EditorSettings from "./components/EditorSettings";
 import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import AgentManager from "./components/AgentManager";
@@ -78,11 +81,15 @@ export default function App() {
   // --- Panels ---
   const [showExplorer, setShowExplorer] = useState(true);
   const [showChat, setShowChat] = useState(false);
-  const [showAISettings, setShowAISettings] = useState(false);
+  const [showModelProviders, setShowModelProviders] = useState(false);
+  const [showChatModel, setShowChatModel] = useState(false);
+  const [showFITMModel, setShowFITMModel] = useState(false);
+  const [showTools, setShowTools] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   // --- Agent Manager ---
   const [showAgentManager, setShowAgentManager] = useState(false);
+  const [agentManagerInitialTab, setAgentManagerInitialTab] = useState<"agents" | "skills" | undefined>(undefined);
   const [agentRefreshKey, setAgentRefreshKey] = useState(0);
 
   // --- Search ---
@@ -325,13 +332,39 @@ export default function App() {
           if (e.key === "g") {
             e.preventDefault();
             setChordPrefix(null);
+            setAgentManagerInitialTab("agents");
             setShowAgentManager(true);
             return;
           }
-          if (e.key === "i") {
+          if (e.key === "p") {
             e.preventDefault();
             setChordPrefix(null);
-            setShowAISettings(true);
+            setShowModelProviders(true);
+            return;
+          }
+          if (e.key === "m") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowChatModel(true);
+            return;
+          }
+          if (e.key === "f") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowFITMModel(true);
+            return;
+          }
+          if (e.key === "t") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowTools(true);
+            return;
+          }
+          if (e.key === "k") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setAgentManagerInitialTab("skills");
+            setShowAgentManager(true);
             return;
           }
         }
@@ -482,10 +515,10 @@ export default function App() {
         return;
       }
 
-      // Ctrl+Shift+I — Direct AI Settings access
-      if (e.ctrlKey && e.shiftKey && e.key === "I") {
+      // Ctrl+Shift+P — Direct Model Providers access
+      if (e.ctrlKey && e.shiftKey && e.key === "P") {
         e.preventDefault();
-        setShowAISettings(true);
+        setShowModelProviders(true);
         return;
       }
 
@@ -509,7 +542,10 @@ export default function App() {
           return;
         }
         if (showAgentManager) setShowAgentManager(false);
-        if (showAISettings) setShowAISettings(false);
+        if (showModelProviders) setShowModelProviders(false);
+        if (showChatModel) setShowChatModel(false);
+        if (showFITMModel) setShowFITMModel(false);
+        if (showTools) setShowTools(false);
         if (showSettings) setShowSettings(false);
         if (showTermMemory) {
           setShowTermMemory(false);
@@ -524,7 +560,7 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, showAISettings, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
+  }, [openFolder, refreshFolder, createTerminal, showModelProviders, showChatModel, showFITMModel, showTools, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
 
   // --- Menu ---
   const menus = [
@@ -561,8 +597,12 @@ export default function App() {
       label: "AI Integrations",
       items: [
         { label: "Toggle Agent Chat", action: () => setShowChat((v) => !v), shortcut: "Ctrl+A, C" },
-        { label: "Manage Agents...", action: () => setShowAgentManager(true), shortcut: "Ctrl+A, G" },
-        { label: "Settings...", action: () => setShowAISettings(true), shortcut: "Ctrl+A, I" },
+        { label: "Model Providers...", action: () => setShowModelProviders(true), shortcut: "Ctrl+A, P" },
+        { label: "Chat Model...", action: () => setShowChatModel(true), shortcut: "Ctrl+A, M" },
+        { label: "FITM Model...", action: () => setShowFITMModel(true), shortcut: "Ctrl+A, F" },
+        { label: "Tools...", action: () => setShowTools(true), shortcut: "Ctrl+A, T" },
+        { label: "Agents...", action: () => { setAgentManagerInitialTab("agents"); setShowAgentManager(true); }, shortcut: "Ctrl+A, G" },
+        { label: "Skills...", action: () => { setAgentManagerInitialTab("skills"); setShowAgentManager(true); }, shortcut: "Ctrl+A, K" },
       ],
     },
     {
@@ -737,14 +777,22 @@ export default function App() {
 
       <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} />
 
-      <AISettings visible={showAISettings} onClose={() => setShowAISettings(false)} />
+      <ModelProvidersPanel visible={showModelProviders} onClose={() => setShowModelProviders(false)} />
+      <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />
+      <FITMModelPanel visible={showFITMModel} onClose={() => setShowFITMModel(false)} />
+      <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} />
       <EditorSettings visible={showSettings} onClose={() => setShowSettings(false)} />
 
       <AgentManager
         visible={showAgentManager}
-        onClose={() => setShowAgentManager(false)}
+        onClose={() => {
+          setShowAgentManager(false);
+          setAgentManagerInitialTab(undefined);
+        }}
         rootPath={rootPath}
         onAgentsChanged={() => setAgentRefreshKey((k) => k + 1)}
+        onOpenFile={openFile}
+        initialTab={agentManagerInitialTab}
       />
 
       {showTermMemory && (
