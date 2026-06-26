@@ -132,6 +132,17 @@ npm install
 npm run tauri build
 ```
 
+### Size Comparison
+
+| Application | Package Type | Size | vs. nolock |
+|---|---|---|---|
+| **nolock** | `.deb` | **8.3 MB** | — |
+| **VS Code** | `.deb` | ~100 MB | ~12× larger |
+| **OpenCode Desktop** | `.deb` | ~107 MB | ~13× larger |
+| **OpenCode CLI** | `.tar.gz` | ~49 MB | ~6× larger |
+
+nolock is **significantly smaller** than comparable development tools. The `.deb` package is only **8.3 MB** — roughly the size of a single high-resolution photo — while the uncompressed binary is **21 MB**. This tiny footprint is achieved through a lean technology stack (Tauri + Rust + webview) that avoids bundling an entire browser runtime, unlike Electron-based editors.
+
 ### Ubuntu (Debian-based Linux)
 
 After building, install the `.deb` package:
