@@ -151,7 +151,7 @@ fn list_agents(root_path: String) -> Result<Vec<AgentEntry>, String> {
         }
     }
 
-    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.sort_by_key(|a| a.name.to_lowercase());
     Ok(entries)
 }
 
@@ -199,7 +199,7 @@ fn should_skip_entry(entry: &std::path::Path, is_dir: bool) -> bool {
         }
         if is_dir {
             let lower = name.to_lowercase();
-            if SKIP_DIRS.iter().any(|d| *d == &lower) {
+            if SKIP_DIRS.iter().any(|d| *d == lower) {
                 return true;
             }
         }
@@ -1031,23 +1031,25 @@ async fn execute_tool(
 }
 
 // ---------------------------------------------------------------------------
-// Ollama tool-calling loop (streaming)
+// Helpers for ollama_chat_with_tools
 // ---------------------------------------------------------------------------
 
-async fn ollama_chat_with_tools(
-    app_handle: &tauri::AppHandle,
-    client: &reqwest::Client,
-    url: &str,
-    model: &str,
+/// Result from streaming a single Ollama response.
+struct StreamResult {
+    /// Content emitted by the model in this iteration (for the assistant message).
+    iter_content: String,
+    /// Tool calls detected, if any.
+    tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+/// Build the initial messages array, optionally prepending a system prompt
+/// that describes the available tools.
+fn build_initial_messages(
     messages: &[ChatMessage],
     tools: &[serde_json::Value],
-    max_iterations: usize,
-    tool_configs: &HashMap<String, serde_json::Value>,
-) -> Result<ChatResult, String> {
-    // Build initial messages array — inject system prompt about tools
+) -> Vec<serde_json::Value> {
     let mut ollama_msgs: Vec<serde_json::Value> = Vec::new();
 
-    // System message describing the tools
     let tool_names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t["function"]["name"].as_str())
@@ -1070,34 +1072,115 @@ async fn ollama_chat_with_tools(
         ollama_msgs.push(serde_json::json!({ "role": m.role, "content": m.content }));
     }
 
+    ollama_msgs
+}
+
+/// Stream an Ollama NDJSON response line by line, emitting tokens to the
+/// frontend via `app_handle` and accumulating content into `full_content`.
+/// Returns the iteration-scoped content and any tool calls found.
+async fn stream_ollama_response(
+    mut resp: reqwest::Response,
+    app_handle: &tauri::AppHandle,
+    full_content: &mut String,
+) -> Result<StreamResult, String> {
+    let mut iter_content = String::new();
+    let mut tool_calls: Option<Vec<serde_json::Value>> = None;
+    let mut buf = String::new();
+
+    loop {
+        match resp.chunk().await.map_err(|e| e.to_string())? {
+            None => break,
+            Some(chunk) => {
+                let s = String::from_utf8_lossy(&chunk);
+                buf.push_str(&s);
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].trim().to_string();
+                    buf = buf[pos + 1..].to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if let Some(content) = data["message"]["content"].as_str() {
+                            if !content.is_empty() {
+                                iter_content.push_str(content);
+                                full_content.push_str(content);
+                                app_handle
+                                    .emit(
+                                        "stream-token",
+                                        StreamPayload {
+                                            token: content.to_string(),
+                                        },
+                                    )
+                                    .ok();
+                            }
+                        }
+                        // Detect tool calls in ANY chunk — not just the done:true chunk.
+                        // Some Ollama versions/streaming modes may emit tool_calls
+                        // in a separate chunk before the done marker.
+                        if let Some(calls) = data["message"]["tool_calls"].as_array() {
+                            if !calls.is_empty() {
+                                tool_calls = Some(calls.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(StreamResult {
+        iter_content,
+        tool_calls,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Ollama tool-calling loop (streaming)
+// ---------------------------------------------------------------------------
+
+/// Shared context for the Ollama tool-calling loop — bundles parameters that
+/// are stable across iterations so the function signature stays under the
+/// clippy default argument limit (7).
+struct OllamaChatContext<'a> {
+    app_handle: &'a tauri::AppHandle,
+    client: &'a reqwest::Client,
+    url: &'a str,
+    model: &'a str,
+    tool_configs: &'a HashMap<String, serde_json::Value>,
+}
+
+async fn ollama_chat_with_tools(
+    ctx: &OllamaChatContext<'_>,
+    messages: &[ChatMessage],
+    tools: &[serde_json::Value],
+    max_iterations: usize,
+) -> Result<ChatResult, String> {
+    let mut ollama_msgs = build_initial_messages(messages, tools);
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
 
     for iteration in 0..max_iterations {
-        let mut body = serde_json::json!({
-            "model": model,
-            "messages": ollama_msgs,
-            "stream": true,
-            "options": { "num_predict": 2048, "temperature": 0.7 }
-        });
-        if !tools.is_empty() {
-            body["tools"] = serde_json::json!(tools);
-        }
+        // --- Build and send request ---
+        let body = build_ollama_chat_body(ctx.model, &ollama_msgs, tools);
 
         eprintln!(
             "[nolock] ollama tool loop iteration={}, POST {}/api/chat (streaming)",
-            iteration, url
+            iteration, ctx.url
         );
-        let mut resp = client
-            .post(format!("{}/api/chat", url))
+
+        let resp = ctx
+            .client
+            .post(format!("{}/api/chat", ctx.url))
             .json(&body)
             .timeout(std::time::Duration::from_secs(120))
             .send()
             .await
             .map_err(|e| {
-                eprintln!("[nolock] ollama tool loop error: {}", e);
+                eprintln!("[nolock] ollama tool loop network error: {}", e);
                 e.to_string()
             })?;
+
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.map_err(|e| e.to_string())?;
@@ -1113,64 +1196,21 @@ async fn ollama_chat_with_tools(
             if !tools.is_empty() && error_detail.contains("tool") {
                 return Err(format!(
                     "Model '{}' does not support tool calling (HTTP {}). Try disabling Agent Tools in AI Settings.",
-                    model, status
+                    ctx.model, status
                 ));
             }
             return Err(format!("Ollama API error ({}): {}", status, error_detail));
         }
 
-        // Stream the NDJSON response line by line, emitting tokens
-        let mut iter_content = String::new();
-        let mut tool_calls_in_iter: Option<Vec<serde_json::Value>> = None;
-        let mut buf = String::new();
+        // --- Stream the response ---
+        let stream = stream_ollama_response(resp, ctx.app_handle, &mut full_content).await?;
 
-        loop {
-            match resp.chunk().await.map_err(|e| e.to_string())? {
-                None => break,
-                Some(chunk) => {
-                    let s = String::from_utf8_lossy(&chunk);
-                    buf.push_str(&s);
-                    while let Some(pos) = buf.find('\n') {
-                        let line = buf[..pos].trim().to_string();
-                        buf = buf[pos + 1..].to_string();
-                        if line.is_empty() {
-                            continue;
-                        }
-
-                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
-                            if let Some(content) = data["message"]["content"].as_str() {
-                                if !content.is_empty() {
-                                    iter_content.push_str(content);
-                                    full_content.push_str(content);
-                                    app_handle
-                                        .emit(
-                                            "stream-token",
-                                            StreamPayload {
-                                                token: content.to_string(),
-                                            },
-                                        )
-                                        .ok();
-                                }
-                            }
-                            // Detect tool calls in ANY chunk — not just the done:true chunk.
-                            // Some Ollama versions/streaming modes may emit tool_calls
-                            // in a separate chunk before the done marker.
-                            if let Some(calls) = data["message"]["tool_calls"].as_array() {
-                                if !calls.is_empty() {
-                                    tool_calls_in_iter = Some(calls.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(calls) = tool_calls_in_iter {
+        // --- Handle tool calls or return final response ---
+        if let Some(calls) = stream.tool_calls {
             // Push the assistant message so Ollama knows the context
             ollama_msgs.push(serde_json::json!({
                 "role": "assistant",
-                "content": iter_content,
+                "content": stream.iter_content,
                 "tool_calls": calls
             }));
 
@@ -1179,7 +1219,7 @@ async fn ollama_chat_with_tools(
                 let name = call["function"]["name"].as_str().unwrap_or("unknown");
                 let args = &call["function"]["arguments"];
 
-                let result = execute_tool(name, args, client, tool_configs)
+                let result = execute_tool(name, args, ctx.client, ctx.tool_configs)
                     .await
                     .unwrap_or_else(|e| format!("Tool error: {}", e));
 
@@ -1239,6 +1279,24 @@ async fn ollama_chat_with_tools(
         },
         tool_calls: all_tool_calls,
     })
+}
+
+/// Build the JSON body for an Ollama `/api/chat` request.
+fn build_ollama_chat_body(
+    model: &str,
+    ollama_msgs: &[serde_json::Value],
+    tools: &[serde_json::Value],
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": ollama_msgs,
+        "stream": true,
+        "options": { "num_predict": 2048, "temperature": 0.7 }
+    });
+    if !tools.is_empty() {
+        body["tools"] = serde_json::json!(tools);
+    }
+    body
 }
 
 #[tauri::command]
@@ -1470,7 +1528,14 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     match req.backend.as_str() {
         "ollama" => {
             if has_tools {
-                ollama_chat_with_tools(&app_handle, &client, &req.url, &req.model, &req.messages, &tools, 10, &req.tool_configs)
+                let ollama_ctx = OllamaChatContext {
+                    app_handle: &app_handle,
+                    client: &client,
+                    url: &req.url,
+                    model: &req.model,
+                    tool_configs: &req.tool_configs,
+                };
+                ollama_chat_with_tools(&ollama_ctx, &req.messages, &tools, 10)
                     .await
             } else {
                 // No tools — simple single-turn chat (streaming)
@@ -1487,8 +1552,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     "options": { "num_predict": 2048, "temperature": 0.7 }
                 });
                 eprintln!("[nolock] ollama POST {}/api/chat (no tools, streaming)", req.url);
-                let mut resp = client
-                    .post(format!("{}/api/chat", req.url))
+                    let mut resp = client
+                        .post(format!("{}/api/chat", req.url))
                     .json(&body)
                     .timeout(std::time::Duration::from_secs(60))
                     .send()
