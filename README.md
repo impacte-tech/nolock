@@ -81,6 +81,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **AI Inline Completions** — Fill-In-The-Middle (FITM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
 - **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing), and context token tracking.
 - **AI Agent Manager** — Create and manage specialized AI agents (e.g., code-reviewer, doc-writer) stored as `.json` files in the `.agents/` directory with custom system prompts.
+- **Human Feedback (RLHF)** — Collect thumbs-up/thumbs-down (KTO) and pairwise preference (DPO) feedback on AI chat responses. All data is saved as JSONL lines partitioned by model configuration under a configurable `dpo/` parent directory, ready for downstream RLHF training. Enable/disable via <kbd>Ctrl+A, R</kbd>.
 - **Integrated Terminal** — Real PTY-based shell sessions with multiple tabs, resize support, and command history tracking.
 - **Terminal Memory** — Automatically records commands, tracks frequency, and lets you organize commands into categories for quick recall.
 - **File Explorer** — Tree-based file browser with directory expansion, refresh, file-type color coding, and file/directory CRUD operations (create, rename, delete, copy).
@@ -88,6 +89,107 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **Resizable Panels** — All panels (explorer, editor, terminal, browser, chat) are fully resizable with drag handles.
 - **Multi-Backend AI** — Switch between Ollama, llama.cpp, OpenRouter, and OpenCode Zen for completions and chat.
 - **Privacy-First** — No telemetry, no accounts, no cloud dependency. Everything runs on your machine.
+
+---
+
+## Human Feedback (RLHF) — KTO & DPO
+
+### The Problem
+
+Large language models are typically fine-tuned on general internet text, not on *your* coding preferences. Out of the box, an AI assistant might be too verbose, too terse, too eager to generate boilerplate, or simply wrong in domain-specific ways. The most effective way to align a model to *your* standards is to show it what *you* consider good and bad — but collecting that feedback is usually the bottleneck.
+
+nolock's RLHF system solves this by instrumenting the AI chat panel with two lightweight feedback mechanisms that integrate directly into your natural coding workflow. The collected data is stored in a structured, portable format that can be used to fine-tune any compatible model.
+
+### Key Concepts
+
+#### Reinforcement Learning from Human Feedback (RLHF)
+
+RLHF is a family of techniques that use human preference data to align language model outputs with human values, style, and correctness. The core idea is simple: instead of trying to write a perfect system prompt that covers every edge case, you let the model generate responses and then tell it which ones are better. Over enough examples, the model learns to prefer the patterns you reward.
+
+nolock's RLHF system collects training data in two complementary formats:
+
+#### KTO — Kahneman-Tversky Optimization
+
+KTO (named after psychologists Daniel Kahneman and Amos Tversky) is a **binary preference** method. For each AI response, you give a simple thumbs-up or thumbs-down:
+
+- **Thumbs-up** → saved as a "good" example (label: `true`)
+- **Thumbs-down** → saved as a "bad" example with an optional correction describing what was wrong (label: `false`)
+
+KTO is lightweight and requires no extra AI calls — it piggybacks on your normal chat usage. Every rating you give becomes a training example. The optional correction text serves as a natural-language signal for what a better response would look like.
+
+#### DPO — Direct Preference Optimization
+
+DPO (Direct Preference Optimization) is a **pairwise preference** method that captures more nuanced judgements. Instead of rating a single response, you compare two alternative responses and pick the better one:
+
+- **What happens**: Every N user messages (configurable in RLHF settings), the AI generates *two* responses instead of one. The second response uses a slightly higher temperature (+0.2) to produce meaningful diversity.
+- **You choose**: A side-by-side comparison UI lets you pick which response is better (Response A or Response B). The pair (chosen + rejected) is saved as a DPO training example.
+- **Why it matters**: Pairwise comparisons are statistically more reliable than absolute ratings. DPO also avoids the complexity of training a separate reward model (as used in traditional RLHF with PPO), making it practical for individual developers and small teams.
+
+### Storage Format
+
+All feedback is stored as **JSONL** (one JSON object per line) under the project's `.rlhf/` directory, which mirrors the structure used by popular training frameworks:
+
+```
+<project>/.rlhf/
+  dpo/
+    good/
+      <provider>_<model>/data.jsonl    ← KTO thumbs-up examples
+    bad/
+      <provider>_<model>/data.jsonl    ← KTO thumbs-down examples
+    pairwise/
+      <provider>_<model>/data.jsonl    ← DPO chosen/rejected pairs
+```
+
+Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), making it easy to train on data from specific models. The JSONL schemas follow the standard formats expected by KTO and DPO training scripts:
+
+**KTO entry:**
+```json
+{
+  "prompt": "What is Rust?",
+  "response": "Rust is a systems language.",
+  "label": true,
+  "model_provider": "ollama",
+  "model_name": "qwen3:8b",
+  "model_configurations": { "temperature": 0.7, "max_tokens": 2048, "system_prompt": "" },
+  "timestamp": "2026-06-26T12:00:00.000Z"
+}
+```
+
+**DPO entry:**
+```json
+{
+  "prompt": "What is Rust?",
+  "chosen": "Rust is a systems language focused on safety.",
+  "rejected": "Rust is a programming language.",
+  "model_provider": "ollama",
+  "model_name": "qwen3:8b",
+  "model_configurations": { "temperature": 0.7, "max_tokens": 2048, "system_prompt": "" },
+  "timestamp": "2026-06-26T12:00:00.000Z"
+}
+```
+
+### Why This Matters for nolock
+
+1. **Privacy-first, always**: All feedback data stays on your machine — in your project's `.rlhf/` directory. There is no telemetry, no cloud upload, and no third-party access. You own your preference data completely.
+
+2. **No extra workflow burden**: Thumbs-up/down buttons appear naturally on every AI response. DPO prompts happen at configurable intervals. Feedback collection is woven into the chat experience, not a separate chore.
+
+3. **Portable and framework-ready**: The JSONL format is the standard input for popular RLHF training libraries (e.g., Hugging Face TRL, Axolotl, LLaMA Factory). Export your `.rlhf/` directory to any training pipeline — no conversion needed.
+
+4. **Model-configuration aware**: Because data is partitioned by provider + model (e.g., `ollama_qwen3_8b` vs `openrouter_gpt-4o`), you can train separate adapters for different models or analyze which backends produce the most preferred responses.
+
+5. **Aligned with nolock's philosophy**: nolock is designed to keep you in the driver's seat. RLHF isn't about automating away your judgement — it's about amplifying it. The AI learns from *your* preferences, not from generic alignment data collected by a corporation.
+
+### Getting Started
+
+Press **`Ctrl+A, R`** to open the RLHF settings panel. There you can:
+
+- Toggle feedback collection on/off
+- Configure the root directory and category subdirectories
+- Enable DPO pairwise mode and set the prompt interval
+- Review the expected file structure for your settings
+
+Every AI chat response will then show thumbs-up and thumbs-down buttons. If DPO is enabled, the system will automatically generate two responses at the configured interval for you to compare.
 
 ---
 
@@ -258,7 +360,13 @@ Within the search panel (`Ctrl+F, S`):
 | Shortcut | Action |
 |---|---|
 | `Ctrl+A, C` | Toggle agent chat panel |
+| `Ctrl+A, P` | Model providers |
+| `Ctrl+A, M` | Chat model settings |
+| `Ctrl+A, F` | FITM model settings |
+| `Ctrl+A, T` | Agent tools |
 | `Ctrl+A, G` | Manage AI agents |
+| `Ctrl+A, K` | Manage skills |
+| `Ctrl+A, R` | Human feedback (RLHF) |
 | `Ctrl+A, I` | Open AI settings |
 | `Ctrl+Shift+I` | Direct AI settings |
 

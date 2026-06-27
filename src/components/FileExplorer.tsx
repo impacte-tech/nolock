@@ -64,9 +64,11 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   const [renaming, setRenaming] = useState<{ path: string; currentName: string } | null>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
-  // ---- New-file state ----
+  // ---- New-file / new-folder state ----
   const [newFileName, setNewFileName] = useState<{ parentPath: string } | null>(null);
   const newFileInputRef = useRef<HTMLInputElement>(null);
+  const [newFolderName, setNewFolderName] = useState<{ parentPath: string } | null>(null);
+  const newFolderInputRef = useRef<HTMLInputElement>(null);
 
   // ---- Copy/paste clipboard ----
   const copiedPathRef = useRef<string | null>(null);
@@ -75,7 +77,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   const loadDir = useCallback(async (dirPath: string) => {
     setLoading(true);
     try {
-      const items: DirEntry[] = await invoke("list_directory", { path: dirPath });
+      const items: DirEntry[] = await invoke("list_directory", { path: dirPath, showHidden: true });
       setEntries(items.map((e) => ({
         ...e,
         children: undefined,
@@ -108,10 +110,13 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     if (renaming) renameInputRef.current?.focus();
   }, [renaming]);
 
-  // ---- Focus new-file input when it appears ----
+  // ---- Focus new-file / new-folder input when it appears ----
   useEffect(() => {
     if (newFileName) newFileInputRef.current?.focus();
   }, [newFileName]);
+  useEffect(() => {
+    if (newFolderName) newFolderInputRef.current?.focus();
+  }, [newFolderName]);
 
   // ---- Helpers ----
   const updateEntries = (path: string, updater: (e: TreeDirEntry) => TreeDirEntry): void => {
@@ -130,7 +135,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
 
     if (willExpand && !entry.loaded) {
       try {
-        const children: DirEntry[] = await invoke("list_directory", { path: entry.path });
+        const children: DirEntry[] = await invoke("list_directory", { path: entry.path, showHidden: true });
         const treeChildren: TreeDirEntry[] = children.map((c) => ({
           ...c,
           children: undefined,
@@ -266,9 +271,39 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     setNewFileName(null);
   }, []);
 
+  const doNewFolder = useCallback((parentPath: string) => {
+    closeCtx();
+    setNewFolderName({ parentPath });
+  }, [closeCtx]);
+
+  const submitNewFolder = useCallback(async () => {
+    if (!newFolderName) return;
+    const input = newFolderInputRef.current;
+    const name = input?.value.trim();
+    if (!name) {
+      setNewFolderName(null);
+      return;
+    }
+    const fullPath = `${newFolderName.parentPath}/${name}`;
+    try {
+      await invoke("create_directory", { path: fullPath });
+      setNewFolderName(null);
+      loadDir(rootPath);
+    } catch (e) {
+      console.error("Create folder failed:", e);
+      alert(`Create folder failed: ${e}`);
+      setNewFolderName(null);
+    }
+  }, [newFolderName, loadDir, rootPath]);
+
+  const cancelNewFolder = useCallback(() => {
+    setNewFolderName(null);
+  }, []);
+
   // ---- Tree rendering ----
   const renderItem = (entry: TreeDirEntry, depth: number) => {
     const isActive = entry.path === activePath;
+    const isHidden = entry.name.startsWith('.');
     const chevron = entry.is_dir
       ? entry.expanded ? "\u25BC" : "\u25B6"
       : null;
@@ -280,7 +315,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     return (
       <div key={entry.path}>
         <div
-          className={`tree-item ${isActive ? "active" : ""}`}
+          className={`tree-item ${isActive ? "active" : ""} ${isHidden ? "tree-item--hidden" : ""}`}
           style={{ paddingLeft: `${8 + depth * 14}px` } as React.CSSProperties}
           onClick={() => {
             if (entry.is_dir) {
@@ -340,6 +375,27 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
                 />
               </div>
             )}
+            {/* Inline "new folder" input at the bottom of the folder */}
+            {newFolderName && newFolderName.parentPath === entry.path && (
+              <div
+                className="tree-item"
+                style={{ paddingLeft: `${8 + (depth + 1) * 14}px` } as React.CSSProperties}
+              >
+                <span className="chevron-spacer" />
+                <input
+                  ref={newFolderInputRef}
+                  className="tree-rename-input"
+                  placeholder="folder_name"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitNewFolder();
+                    else if (e.key === "Escape") cancelNewFolder();
+                    e.stopPropagation();
+                  }}
+                  onBlur={submitNewFolder}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -393,6 +449,28 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
           </div>
         )}
 
+        {/* Inline "new folder" input at root level */}
+        {newFolderName && newFolderName.parentPath === rootPath && (
+          <div
+            className="tree-item"
+            style={{ paddingLeft: `${8 + 1 * 14}px` } as React.CSSProperties}
+          >
+            <span className="chevron-spacer" />
+            <input
+              ref={newFolderInputRef}
+              className="tree-rename-input"
+              placeholder="folder_name"
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitNewFolder();
+                else if (e.key === "Escape") cancelNewFolder();
+                e.stopPropagation();
+              }}
+              onBlur={submitNewFolder}
+            />
+          </div>
+        )}
+
         {loading && (
           <div className="tree-item" style={{ paddingLeft: "8px", color: "var(--text-muted)" } as React.CSSProperties}>
             <span className="file-name">Loading...</span>
@@ -413,13 +491,21 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
           onClick={(e) => e.stopPropagation()}
         >
           {ctxMenu.isWhitespace ? (
-            // Right-click on empty folder space → New File
-            <div
-              className="ctx-menu-item"
-              onClick={() => doNewFile(ctxMenu.whitespaceDir)}
-            >
-              New File
-            </div>
+            // Right-click on empty folder space → New File / New Folder
+            <>
+              <div
+                className="ctx-menu-item"
+                onClick={() => doNewFile(ctxMenu.whitespaceDir)}
+              >
+                New File
+              </div>
+              <div
+                className="ctx-menu-item"
+                onClick={() => doNewFolder(ctxMenu.whitespaceDir)}
+              >
+                New Folder
+              </div>
+            </>
           ) : ctxMenu.target ? (
             // Right-click on file or folder
             <>
@@ -436,7 +522,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
                 Delete
               </div>
               {ctxMenu.target.is_dir ? (
-                // Folder: Copy (not needed) + Paste + New File
+                // Folder: Copy + Paste + New File + New Folder
                 <>
                   <div
                     className="ctx-menu-item"
@@ -458,6 +544,12 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
                     onClick={() => ctxMenu.target && doNewFile(ctxMenu.target.path)}
                   >
                     New File
+                  </div>
+                  <div
+                    className="ctx-menu-item"
+                    onClick={() => ctxMenu.target && doNewFolder(ctxMenu.target.path)}
+                  >
+                    New Folder
                   </div>
                 </>
               ) : (

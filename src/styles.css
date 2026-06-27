@@ -291,6 +291,11 @@ html, body, #root {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.tree-item--hidden {
+  opacity: 0.5;
+  font-style: italic;
+}
+
 /* ===== Inline rename / new-file input in tree ===== */
 .tree-rename-input {
   background: var(--bg-surface);
@@ -2450,4 +2455,301 @@ html, body, #root {
   color: var(--text-primary);
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* ===== RLHF Feedback Buttons ===== */
+.rlhf-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  opacity: 0.4;
+  transition: opacity 0.15s ease;
+}
+
+.assistant-content:hover .rlhf-actions,
+.rlhf-actions:focus-within {
+  opacity: 1;
+}
+
+.rlhf-btn {
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px;
+  transition: background 0.15s, opacity 0.15s;
+  opacity: 0.5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+}
+
+.rlhf-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.rlhf-btn-up:hover {
+  color: #98c379;
+}
+
+.rlhf-btn-down:hover {
+  color: #e06c75;
+}
+
+/* RLHF badge — shown after a rating has been submitted */
+.rlhf-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+
+.rlhf-badge-saved {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-muted);
+  padding: 2px 5px;
+}
+
+/* ===== RLHF Correction Input (Thumbs Down) ===== */
+.rlhf-correction-area {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.rlhf-correction-header {
+  margin-bottom: 4px;
+}
+
+.rlhf-correction-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.rlhf-correction-input-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rlhf-correction-input {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 8px 10px;
+  resize: vertical;
+  font-family: inherit;
+  outline: none;
+  min-height: 60px;
+}
+
+.rlhf-correction-input:focus {
+  border-color: var(--accent);
+}
+
+.rlhf-correction-input::placeholder {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rlhf-correction-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rlhf-cancel-btn {
+  background: var(--hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.rlhf-cancel-btn:hover {
+  background: var(--border);
+  color: var(--text-primary);
+}
+
+.rlhf-submit-btn {
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  color: var(--bg-primary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.rlhf-submit-btn:hover {
+  opacity: 0.9;
+}
+
+.rlhf-submit-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.rlhf-correction-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* ===== DPO Choice Component ===== */
+.dpo-choice {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.dpo-choice-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.dpo-choice-sub {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.dpo-choice-responses {
+  display: flex;
+  flex-direction: row;
+  gap: 0;
+  overflow-x: auto;
+}
+
+.dpo-choice-card {
+  flex: 1;
+  min-width: 200px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  transition: background 0.15s ease;
+}
+
+.dpo-choice-card:last-child {
+  border-right: none;
+}
+
+.dpo-choice-card.selected {
+  background: rgba(255, 255, 255, 0.04);
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.dpo-choice-card-header {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+
+.dpo-radio-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.dpo-radio-label input[type="radio"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.dpo-radio-text {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.dpo-choice-card-content {
+  padding: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  max-height: 300px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.dpo-choice-card-content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.dpo-choice-card-content::-webkit-scrollbar-thumb {
+  background: var(--hover);
+  border-radius: 2px;
+}
+
+.dpo-choice-footer {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-surface);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.dpo-confirm-btn {
+  background: var(--accent);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 4px;
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.dpo-confirm-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.dpo-confirm-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dpo-confirmed {
+  padding: 8px 12px;
+  background: rgba(152, 195, 121, 0.1);
+  border: 1px solid rgba(152, 195, 121, 0.3);
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.dpo-confirmed-label {
+  font-size: 12px;
+  color: #98c379;
+  font-weight: 500;
 }

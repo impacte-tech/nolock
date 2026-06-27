@@ -275,10 +275,24 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
       noSuggestionDiagnostics: true,
     });
 
+    // Define a custom dark theme with white-on-dark-grey suggest widget
+    monaco.editor.defineTheme("nolock-dark", {
+      base: "vs-dark",
+      inherit: true,
+      rules: [],
+      colors: {
+        "editorSuggestWidget.background": "#1e1e1e",
+        "editorSuggestWidget.border": "#333333",
+        "editorSuggestWidget.foreground": "#ffffff",
+        "editorSuggestWidget.selectedBackground": "#2a2d2e",
+        "editorSuggestWidget.highlightForeground": "#569cd6",
+      },
+    });
+
     const model = monaco.editor.createModel(content, getLanguage(filePath));
     const editor = monaco.editor.create(containerRef.current, {
       model,
-      theme: "vs-dark",
+      theme: "nolock-dark",
       fontSize: 14,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
       minimap: { enabled: false },

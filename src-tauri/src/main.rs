@@ -25,7 +25,8 @@ fn write_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
+fn list_directory(path: String, show_hidden: Option<bool>) -> Result<Vec<DirEntry>, String> {
+    let show_hidden = show_hidden.unwrap_or(false);
     let mut entries = Vec::new();
     let read_dir =
         std::fs::read_dir(&path).map_err(|e| format!("Failed to read dir {}: {}", path, e))?;
@@ -35,7 +36,7 @@ fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
         let metadata = entry.metadata().map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().to_string();
 
-        if name.starts_with('.') {
+        if !show_hidden && name.starts_with('.') {
             continue;
         }
 
@@ -49,6 +50,12 @@ fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
+            .then_with(|| {
+                // Within same directory status, put hidden items after non-hidden
+                let a_hidden = a.name.starts_with('.');
+                let b_hidden = b.name.starts_with('.');
+                a_hidden.cmp(&b_hidden)
+            })
             .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
@@ -100,6 +107,29 @@ fn create_file(path: String) -> Result<(), String> {
     }
     std::fs::write(&path, "")
         .map_err(|e| format!("Failed to create file {}: {}", path, e))
+}
+
+#[tauri::command]
+fn create_directory(path: String) -> Result<(), String> {
+    std::fs::create_dir_all(&path)
+        .map_err(|e| format!("Failed to create directory {}: {}", path, e))
+}
+
+#[tauri::command]
+fn append_to_file(path: String, content: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open {} for append: {}", path, e))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("Failed to append to {}: {}", path, e))?;
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -780,6 +810,26 @@ fn pty_kill(app: tauri::AppHandle, id: String) -> Result<(), String> {
         drop(instance);
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// RLHF directory command — returns a writable fallback directory
+// ---------------------------------------------------------------------------
+
+/// Return the path to a writable `.rlhf` directory in the app's local data
+/// folder. Used as a fallback when no project folder is open.
+/// Creates the directory if it doesn't exist.
+#[tauri::command]
+fn get_rlhf_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let base = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    // Store .rlhf inside the app data dir (e.g. ~/.local/share/nolock/.rlhf/)
+    let rlhf_dir = base.join(".rlhf");
+    std::fs::create_dir_all(&rlhf_dir)
+        .map_err(|e| format!("Failed to create RLHF directory: {}", e))?;
+    Ok(rlhf_dir.to_string_lossy().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -2156,6 +2206,9 @@ pub fn run() {
             run_skill_command,
             search_in_files,
             replace_in_files,
+            create_directory,
+            append_to_file,
+            get_rlhf_dir,
             get_model_info,
             ai_complete,
             ai_chat,
@@ -2846,11 +2899,11 @@ mod tests {
         std::fs::write(dir.join(".hidden"), "secret").unwrap();
         std::fs::create_dir(dir.join("z_dir")).unwrap();
 
-        let result = list_directory(dir.to_string_lossy().to_string());
+        let result = list_directory(dir.to_string_lossy().to_string(), None);
         assert!(result.is_ok());
         let entries = result.unwrap();
 
-        // .hidden should be filtered out
+        // .hidden should be filtered out (show_hidden defaults to false)
         assert_eq!(entries.len(), 3);
 
         // z_dir should be first (dirs before files)
@@ -2886,6 +2939,9 @@ mod tests {
             prompt: "fn main() {".into(),
             suffix: Some("}".into()),
             api_key: None,
+            temperature: None,
+            max_tokens: None,
+            system_prompt: None,
         };
 
         let with_suffix = req.suffix.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
@@ -2927,6 +2983,9 @@ mod tests {
             prompt: "def hello():".into(),
             suffix: None,
             api_key: None,
+            temperature: None,
+            max_tokens: None,
+            system_prompt: None,
         };
 
         let mut b = serde_json::json!({
@@ -2957,6 +3016,9 @@ mod tests {
             prompt: "const x = ".into(),
             suffix: Some(";".into()),
             api_key: Some("sk-test".into()),
+            temperature: None,
+            max_tokens: None,
+            system_prompt: None,
         };
 
         let user_content = format!(
@@ -3005,6 +3067,9 @@ mod tests {
             prompt: "const x = 42;".into(),
             suffix: None,
             api_key: Some("sk-test".into()),
+            temperature: None,
+            max_tokens: None,
+            system_prompt: None,
         };
 
         let user_content = format!(
@@ -3044,6 +3109,9 @@ mod tests {
             prompt: "import".into(),
             suffix: None,
             api_key: None,
+            temperature: None,
+            max_tokens: None,
+            system_prompt: None,
         };
 
         let body = serde_json::json!({
@@ -3095,6 +3163,9 @@ mod tests {
             prompt: "fn main() {".into(),
             suffix: Some("}".into()),
             api_key: None,
+            temperature: None,
+            max_tokens: None,
+            system_prompt: None,
         };
 
         let body = serde_json::json!({
