@@ -149,7 +149,7 @@ function MentionHighlight({ text }: { text: string }) {
 }
 
 /** DPO choice component — shows two AI responses side-by-side for pairwise comparison. */
-function DpoChoice({
+export function DpoChoice({
   responseA,
   responseB,
   onChoose,
@@ -159,23 +159,11 @@ function DpoChoice({
   onChoose: (choice: "A" | "B") => void;
 }) {
   const [selected, setSelected] = useState<"A" | "B" | null>(null);
-  const [confirmed, setConfirmed] = useState(false);
 
   const handleConfirm = () => {
     if (!selected) return;
-    setConfirmed(true);
     onChoose(selected);
   };
-
-  if (confirmed) {
-    return (
-      <div className="dpo-confirmed">
-        <span className="dpo-confirmed-label">
-          Preference saved — chose response {selected === "A" ? "A" : "B"}
-        </span>
-      </div>
-    );
-  }
 
   const renderContent = (text: string) => {
     // Render markdown-like content inline (simplified)
@@ -321,6 +309,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   /** Counter for DPO prompt interval — increments on each user message. */
   const messageCountRef = useRef(0);
+
+  /** True while a DPO response is awaiting user choice — disables chat input. */
+  const dpoPending = messages.some((m) => m.dpoResponses !== undefined);
 
   /** Detect @mention (files/agents) or /mention (skills) patterns as the user types. */
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -675,6 +666,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     try {
       await saveDpoFeedback(rootPath, dpoEntry);
+      // Reset the counter so the next DPO triggers after dpoInterval messages from now
+      messageCountRef.current = 0;
     } catch (e) {
       console.error("[rlhf] Failed to save DPO feedback:", e);
     }
@@ -683,6 +676,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
     if (!trimmed || loading || sendingRef.current) return;
+
+    // Prevent sending while a DPO response choice is pending
+    if (messages.some((m) => m.dpoResponses !== undefined)) return;
+
     sendingRef.current = true;
 
     // ---- /clear command ----
@@ -1261,10 +1258,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             ref={textareaRef}
             className="chat-input"
             rows={2}
-            placeholder="Type @ to reference a file or agent, / to run a skill... Ask the AI..."
+            placeholder={dpoPending ? "Please choose a response above to continue..." : "Type @ to reference a file or agent, / to run a skill... Ask the AI..."}
             value={input}
             onChange={handleInputChange}
             onKeyDown={(e) => {
+              if (dpoPending) {
+                e.preventDefault();
+                return;
+              }
               if (mentionQuery !== null) {
                 // Autocomplete is open — prevent these keys from affecting the textarea
                 if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Tab", "Escape"].includes(e.key)) {
@@ -1277,10 +1278,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 sendMessage();
               }
             }}
+            disabled={dpoPending}
           />
         </div>
-        <button className="chat-send" onClick={sendMessage} disabled={loading}>
-          {loading ? "Thinking..." : "Send"}
+        <button className="chat-send" onClick={sendMessage} disabled={loading || dpoPending}>
+          {loading ? "Thinking..." : dpoPending ? "Choose response..." : "Send"}
         </button>
       </div>
     </div>
