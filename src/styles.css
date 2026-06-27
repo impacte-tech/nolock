@@ -291,6 +291,11 @@ html, body, #root {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.tree-item--hidden {
+  opacity: 0.5;
+  font-style: italic;
+}
+
 /* ===== Inline rename / new-file input in tree ===== */
 .tree-rename-input {
   background: var(--bg-surface);
@@ -2450,4 +2455,161 @@ html, body, #root {
   color: var(--text-primary);
   border-radius: 2px;
   padding: 0 1px;
+}
+
+/* ===== RLHF Feedback Buttons ===== */
+.rlhf-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  opacity: 0.4;
+  transition: opacity 0.15s ease;
+}
+
+.assistant-content:hover .rlhf-actions,
+.rlhf-actions:focus-within {
+  opacity: 1;
+}
+
+.rlhf-btn {
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1;
+  padding: 4px;
+  transition: background 0.15s, opacity 0.15s;
+  opacity: 0.5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+}
+
+.rlhf-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.rlhf-btn-up:hover {
+  color: #98c379;
+}
+
+.rlhf-btn-down:hover {
+  color: #e06c75;
+}
+
+/* RLHF badge — shown after a rating has been submitted */
+.rlhf-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: default;
+}
+
+.rlhf-badge-saved {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text-muted);
+  padding: 2px 5px;
+}
+
+/* ===== RLHF Correction Input (Thumbs Down) ===== */
+.rlhf-correction-area {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.rlhf-correction-header {
+  margin-bottom: 4px;
+}
+
+.rlhf-correction-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.rlhf-correction-input-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rlhf-correction-input {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 8px 10px;
+  resize: vertical;
+  font-family: inherit;
+  outline: none;
+  min-height: 60px;
+}
+
+.rlhf-correction-input:focus {
+  border-color: var(--accent);
+}
+
+.rlhf-correction-input::placeholder {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.rlhf-correction-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rlhf-cancel-btn {
+  background: var(--hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.rlhf-cancel-btn:hover {
+  background: var(--border);
+  color: var(--text-primary);
+}
+
+.rlhf-submit-btn {
+  background: var(--accent);
+  border: none;
+  border-radius: 4px;
+  color: var(--bg-primary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.rlhf-submit-btn:hover {
+  opacity: 0.9;
+}
+
+.rlhf-submit-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.rlhf-correction-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
 }

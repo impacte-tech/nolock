@@ -6,6 +6,13 @@ import FileAutocomplete, { type AgentRef } from "./FileAutocomplete";
 import SkillAutocomplete from "./SkillAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
+import {
+  saveRlhfFeedback,
+  getModelContext,
+  getModelConfigurations,
+  type RlhfData,
+  type FeedbackType,
+} from "../lib/rlhf";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -27,6 +34,12 @@ interface Message {
   toolCalls?: ToolCallLog[];
   /** File, agent, and skill mentions referenced in this message (for context badges). */
   contextRefs?: { type: "file" | "agent" | "skill"; name: string }[];
+  /** RLHF feedback: "good" (thumbs up), "bad" (thumbs down), or undefined (not rated). */
+  feedback?: FeedbackType;
+  /** User's correction text for a "bad" rating. */
+  feedbackCorrection?: string;
+  /** True while waiting for the user to type a correction after clicking thumbs down. */
+  feedbackPending?: boolean;
 }
 
 export interface FileRef {
@@ -125,6 +138,56 @@ function MentionHighlight({ text }: { text: string }) {
         )
       )}
     </>
+  );
+}
+
+/** Inline correction input for thumbs-down feedback. */
+function CorrectionInput({ onSubmit, onCancel }: { onSubmit: (text: string) => void; onCancel: () => void }) {
+  const [value, setValue] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const handleSubmit = () => {
+    onSubmit(value);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      handleSubmit();
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onCancel();
+    }
+  };
+
+  return (
+    <div className="rlhf-correction-input-wrapper">
+      <textarea
+        ref={inputRef}
+        className="rlhf-correction-input"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Describe what was wrong or how the answer could be improved..."
+        rows={3}
+      />
+      <div className="rlhf-correction-actions">
+        <button className="rlhf-cancel-btn" onClick={onCancel}>Cancel</button>
+        <button
+          className="rlhf-submit-btn"
+          onClick={handleSubmit}
+          disabled={!value.trim()}
+        >
+          Submit Feedback
+        </button>
+        <span className="rlhf-correction-hint">Ctrl+Enter to submit</span>
+      </div>
+    </div>
   );
 }
 
@@ -358,6 +421,116 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     sendingRef.current = false;
     setLoading(false);
   }, []);
+
+  /** Find the question (user message) that precedes an assistant message at a given index. */
+  const findQuestionForAssistant = useCallback((assistantIndex: number): string => {
+    // Walk backwards from the assistant message to find the preceding user message
+    for (let i = assistantIndex - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        // Prefer displayContent (what the user saw) over full API content
+        return messages[i].displayContent || messages[i].content;
+      }
+    }
+    return "(unknown question)";
+  }, [messages]);
+  /** Handle thumbs up — save as a good example immediately. */
+  const handleThumbsUp = useCallback(async (msgIndex: number) => {
+    const msg = messages[msgIndex];
+    if (!msg || msg.role !== "assistant") return;
+
+    const question = findQuestionForAssistant(msgIndex);
+    const modelCtx = getModelContext();
+    const configs = getModelConfigurations();
+
+    const data: RlhfData = {
+      feedback_type: "good",
+      model_provider: modelCtx.provider,
+      model_name: modelCtx.model,
+      model_configurations: configs,
+      timestamp: new Date().toISOString(),
+      question,
+      answer: msg.content,
+      user_correction: "",
+    };
+
+    try {
+      await saveRlhfFeedback(rootPath, data);
+    } catch (e) {
+      console.error("[rlhf] Failed to save good feedback:", e);
+    }
+
+    // Mark as rated thumbs up
+    setMessages((prev) => {
+      const msgs = [...prev];
+      if (msgs[msgIndex]) {
+        msgs[msgIndex] = { ...msgs[msgIndex], feedback: "good", feedbackPending: false };
+      }
+      return msgs;
+    });
+  }, [messages, rootPath, findQuestionForAssistant]);
+
+  /** Handle thumbs down — open the correction input. */
+  const handleThumbsDown = useCallback((msgIndex: number) => {
+    setMessages((prev) => {
+      const msgs = [...prev];
+      if (msgs[msgIndex]) {
+        msgs[msgIndex] = { ...msgs[msgIndex], feedbackPending: true };
+      }
+      return msgs;
+    });
+  }, []);
+
+  /** Cancel a pending thumbs-down correction. */
+  const cancelCorrection = useCallback((msgIndex: number) => {
+    setMessages((prev) => {
+      const msgs = [...prev];
+      if (msgs[msgIndex]) {
+        msgs[msgIndex] = { ...msgs[msgIndex], feedbackPending: false };
+      }
+      return msgs;
+    });
+  }, []);
+
+  /** Submit a correction for a thumbs-down rating and save. */
+  const submitCorrection = useCallback(async (msgIndex: number, correction: string) => {
+    const msg = messages[msgIndex];
+    if (!msg || msg.role !== "assistant") return;
+
+    const question = findQuestionForAssistant(msgIndex);
+    const modelCtx = getModelContext();
+    const configs = getModelConfigurations();
+
+    const data: RlhfData = {
+      feedback_type: "bad",
+      model_provider: modelCtx.provider,
+      model_name: modelCtx.model,
+      model_configurations: configs,
+      timestamp: new Date().toISOString(),
+      question,
+      answer: msg.content,
+      user_correction: correction.trim() || "(no correction provided)",
+    };
+
+    try {
+      await saveRlhfFeedback(rootPath, data);
+    } catch (e) {
+      console.error("[rlhf] Failed to save bad feedback:", e);
+    }
+
+    // Mark as rated thumbs down with the correction
+    setMessages((prev) => {
+      const msgs = [...prev];
+      if (msgs[msgIndex]) {
+        msgs[msgIndex] = {
+          ...msgs[msgIndex],
+          feedback: "bad",
+          feedbackPending: false,
+          feedbackCorrection: correction.trim() || undefined,
+        };
+      }
+      return msgs;
+    });
+  }, [messages, rootPath, findQuestionForAssistant]);
 
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
@@ -627,6 +800,67 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                     <span>.</span><span>.</span><span>.</span>
                   </span>
                 ) : null}
+
+                {/* RLHF feedback buttons — shown after assistant messages are complete (not while streaming) */}
+                {m.content && !(i === messages.length - 1 && loading) && m.role === "assistant" && (
+                  <div className="rlhf-actions">
+                    {m.feedback === "good" ? (
+                      <span className="rlhf-badge rlhf-badge-saved" title="You marked this as helpful">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                          <polyline points="17 21 17 13 7 13 7 21" />
+                          <polyline points="7 3 7 8 15 8" />
+                        </svg>
+                        Saved
+                      </span>
+                    ) : m.feedback === "bad" ? (
+                      <span className="rlhf-badge rlhf-badge-saved" title="You marked this as needing improvement">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                          <polyline points="17 21 17 13 7 13 7 21" />
+                          <polyline points="7 3 7 8 15 8" />
+                        </svg>
+                        Saved
+                      </span>
+                    ) : m.feedbackPending ? (
+                      /* Correction input for thumbs down */
+                      <div className="rlhf-correction-area">
+                        <div className="rlhf-correction-header">
+                          <span className="rlhf-correction-label">What could be improved? (optional but helpful)</span>
+                        </div>
+                        <CorrectionInput
+                          onSubmit={(correction) => submitCorrection(i, correction)}
+                          onCancel={() => cancelCorrection(i)}
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        <button
+                          className="rlhf-btn rlhf-btn-up"
+                          onClick={() => handleThumbsUp(i)}
+                          title="Mark as helpful"
+                          aria-label="Thumbs up"
+                        >
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M7 10v12" />
+                            <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z" />
+                          </svg>
+                        </button>
+                        <button
+                          className="rlhf-btn rlhf-btn-down"
+                          onClick={() => handleThumbsDown(i)}
+                          title="Report as incorrect or unhelpful"
+                          aria-label="Thumbs down"
+                        >
+                          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M17 14V2" />
+                            <path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z" />
+                          </svg>
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <>
