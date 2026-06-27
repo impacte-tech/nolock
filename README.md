@@ -81,6 +81,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **AI Inline Completions** — Fill-In-The-Middle (FITM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
 - **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing), and context token tracking.
 - **AI Agent Manager** — Create and manage specialized AI agents (e.g., code-reviewer, doc-writer) stored as `.json` files in the `.agents/` directory with custom system prompts.
+- **Human Feedback (RLHF)** — Collect thumbs-up/thumbs-down feedback on AI chat responses, saved as structured JSON files in configurable `.rlhf/good/` and `.rlhf/bad/` directories. Enable/disable via <kbd>Ctrl+A, R</kbd>.
 - **Integrated Terminal** — Real PTY-based shell sessions with multiple tabs, resize support, and command history tracking.
 - **Terminal Memory** — Automatically records commands, tracks frequency, and lets you organize commands into categories for quick recall.
 - **File Explorer** — Tree-based file browser with directory expansion, refresh, file-type color coding, and file/directory CRUD operations (create, rename, delete, copy).
@@ -258,7 +259,13 @@ Within the search panel (`Ctrl+F, S`):
 | Shortcut | Action |
 |---|---|
 | `Ctrl+A, C` | Toggle agent chat panel |
+| `Ctrl+A, P` | Model providers |
+| `Ctrl+A, M` | Chat model settings |
+| `Ctrl+A, F` | FITM model settings |
+| `Ctrl+A, T` | Agent tools |
 | `Ctrl+A, G` | Manage AI agents |
+| `Ctrl+A, K` | Manage skills |
+| `Ctrl+A, R` | Human feedback (RLHF) |
 | `Ctrl+A, I` | Open AI settings |
 | `Ctrl+Shift+I` | Direct AI settings |
 

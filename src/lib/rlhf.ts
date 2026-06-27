@@ -1,11 +1,18 @@
 /**
  * RLHF (Reinforcement Learning from Human Feedback) storage utilities.
  *
- * Stores user feedback on AI chat responses as JSON files in the `.rlhf/`
- * directory within the project root, partitioned by feedback type:
+ * Stores user feedback on AI chat responses as JSON files in a configurable
+ * directory within the project root, partitioned by feedback type.
  *
+ * Default directories:
  *   .rlhf/good/   ← thumbs up (good examples)
  *   .rlhf/bad/    ← thumbs down (bad examples with user corrections)
+ *
+ * Directories can be customized via localStorage settings:
+ *   nolock.rlhf.enabled  - "true" | "false" (default "true")
+ *   nolock.rlhf.root     - root folder name (default ".rlhf")
+ *   nolock.rlhf.goodDir  - good subdirectory (default "good")
+ *   nolock.rlhf.badDir   - bad subdirectory (default "bad")
  *
  * Each file is named with a timestamp and a random suffix to avoid collisions:
  *   YYYY-MM-DD_HHmmss_XXXX.json
@@ -148,29 +155,57 @@ async function getRlhfFallbackDir(): Promise<string> {
 }
 
 /**
- * Save an RLHF feedback entry to disk as a JSON file inside `.rlhf/`.
+ * Read RLHF directory settings from localStorage.
+ * Falls back to defaults when settings are not present.
+ */
+export function readRlhfSettings(): {
+  enabled: boolean;
+  root: string;
+  goodDir: string;
+  badDir: string;
+} {
+  return {
+    enabled: localStorage.getItem("nolock.rlhf.enabled") !== "false",
+    root: localStorage.getItem("nolock.rlhf.root") || ".rlhf",
+    goodDir: localStorage.getItem("nolock.rlhf.goodDir") || "good",
+    badDir: localStorage.getItem("nolock.rlhf.badDir") || "bad",
+  };
+}
+
+/**
+ * Save an RLHF feedback entry to disk as a JSON file inside the configured
+ * feedback directory (default `.rlhf/`).
  *
  * When a `rootPath` (project folder) is provided, data is saved to
- * `<rootPath>/.rlhf/good/` or `<rootPath>/.rlhf/bad/`.
+ * `<rootPath>/<root>/<goodDir>/` or `<rootPath>/<root>/<badDir>/`.
  *
  * When `rootPath` is empty, data is saved to the application's local data
  * directory (e.g. `~/.local/share/nolock/.rlhf/` on Linux).
  *
+ * If RLHF is disabled via settings, this function does nothing and returns
+ * an empty string.
+ *
  * @param rootPath  The project root path, or empty string to use fallback.
  * @param feedback  The feedback data to persist.
- * @returns         The path to the saved file.
+ * @returns         The path to the saved file, or empty string if disabled.
  */
 export async function saveRlhfFeedback(
   rootPath: string,
   feedback: RlhfData,
 ): Promise<string> {
-  const subDir = feedback.feedback_type === "good" ? "good" : "bad";
+  const settings = readRlhfSettings();
+  if (!settings.enabled) {
+    console.log("[rlhf] RLHF is disabled, skipping save");
+    return "";
+  }
+
+  const subDir = feedback.feedback_type === "good" ? settings.goodDir : settings.badDir;
   const fileName = generateFilename();
 
   // Resolve base directory: use project root if available, otherwise fallback
   let baseDir: string;
   if (rootPath) {
-    baseDir = `${rootPath}/.rlhf`;
+    baseDir = `${rootPath}/${settings.root}`;
   } else {
     baseDir = await getRlhfFallbackDir();
   }

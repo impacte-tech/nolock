@@ -11,6 +11,7 @@ import ModelProvidersPanel from "./components/ModelProvidersPanel";
 import ChatModelPanel from "./components/ChatModelPanel";
 import FITMModelPanel from "./components/FITMModelPanel";
 import ToolsPanel from "./components/ToolsPanel";
+import RlhfPanel from "./components/RlhfPanel";
 import EditorSettings from "./components/EditorSettings";
 import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import AgentManager from "./components/AgentManager";
@@ -85,6 +86,7 @@ export default function App() {
   const [showChatModel, setShowChatModel] = useState(false);
   const [showFITMModel, setShowFITMModel] = useState(false);
   const [showTools, setShowTools] = useState(false);
+  const [showRlhf, setShowRlhf] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   // --- Agent Manager ---
@@ -367,6 +369,12 @@ export default function App() {
             setShowAgentManager(true);
             return;
           }
+          if (e.key === "r") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowRlhf(true);
+            return;
+          }
         }
 
         if (chordPrefix === "T") {
@@ -603,6 +611,7 @@ export default function App() {
         { label: "Tools...", action: () => setShowTools(true), shortcut: "Ctrl+A, T" },
         { label: "Agents...", action: () => { setAgentManagerInitialTab("agents"); setShowAgentManager(true); }, shortcut: "Ctrl+A, G" },
         { label: "Skills...", action: () => { setAgentManagerInitialTab("skills"); setShowAgentManager(true); }, shortcut: "Ctrl+A, K" },
+        { label: "Human Feedback (RLHF)...", action: () => setShowRlhf(true), shortcut: "Ctrl+A, R" },
       ],
     },
     {
@@ -635,7 +644,7 @@ export default function App() {
       {chordPrefix && (
         <div className="chord-hint">
           {chordPrefix === "A" ? (
-            <>Waiting for second key... (press <strong>C</strong> for Chat, <strong>G</strong> for Agents, <strong>I</strong> for AI Settings)</>
+            <>Waiting for second key... (press <strong>C</strong> for Chat, <strong>G</strong> for Agents, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF)</>
           ) : chordPrefix === "T" ? (
             <>Waiting for second key... (press <strong>T</strong> for Terminal, <strong>M</strong> for Memory)</>
           ) : chordPrefix === "E" ? (
@@ -781,6 +790,7 @@ export default function App() {
       <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />
       <FITMModelPanel visible={showFITMModel} onClose={() => setShowFITMModel(false)} />
       <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} />
+      <RlhfPanel visible={showRlhf} onClose={() => setShowRlhf(false)} />
       <EditorSettings visible={showSettings} onClose={() => setShowSettings(false)} />
 
       <AgentManager
