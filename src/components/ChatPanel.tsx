@@ -8,9 +8,12 @@ import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
 import {
   saveRlhfFeedback,
+  saveDpoFeedback,
   getModelContext,
   getModelConfigurations,
+  readRlhfSettings,
   type RlhfData,
+  type DpoEntry,
   type FeedbackType,
 } from "../lib/rlhf";
 
@@ -40,6 +43,10 @@ interface Message {
   feedbackCorrection?: string;
   /** True while waiting for the user to type a correction after clicking thumbs down. */
   feedbackPending?: boolean;
+  /** DPO mode: two alternative responses for pairwise comparison. */
+  dpoResponses?: { responseA: string; responseB: string };
+  /** DPO mode: which response was chosen ('A' or 'B'), or null if pending. */
+  dpoChoice?: "A" | "B";
 }
 
 export interface FileRef {
@@ -141,6 +148,100 @@ function MentionHighlight({ text }: { text: string }) {
   );
 }
 
+/** DPO choice component — shows two AI responses side-by-side for pairwise comparison. */
+function DpoChoice({
+  responseA,
+  responseB,
+  onChoose,
+}: {
+  responseA: string;
+  responseB: string;
+  onChoose: (choice: "A" | "B") => void;
+}) {
+  const [selected, setSelected] = useState<"A" | "B" | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+
+  const handleConfirm = () => {
+    if (!selected) return;
+    setConfirmed(true);
+    onChoose(selected);
+  };
+
+  if (confirmed) {
+    return (
+      <div className="dpo-confirmed">
+        <span className="dpo-confirmed-label">
+          Preference saved — chose response {selected === "A" ? "A" : "B"}
+        </span>
+      </div>
+    );
+  }
+
+  const renderContent = (text: string) => {
+    // Render markdown-like content inline (simplified)
+    return <MarkdownContent text={text} />;
+  };
+
+  return (
+    <div className="dpo-choice">
+      <div className="dpo-choice-header">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10" />
+          <path d="M12 16v-4" />
+          <path d="M12 8h.01" />
+        </svg>
+        Which response is better? <span className="dpo-choice-sub">(you must choose one to continue)</span>
+      </div>
+      <div className="dpo-choice-responses">
+        {/* Response A */}
+        <div className={`dpo-choice-card ${selected === "A" ? "selected" : ""}`}>
+          <div className="dpo-choice-card-header">
+            <label className="dpo-radio-label">
+              <input
+                type="radio"
+                name="dpo-choice"
+                checked={selected === "A"}
+                onChange={() => setSelected("A")}
+              />
+              <span className="dpo-radio-text">Response A</span>
+            </label>
+          </div>
+          <div className="dpo-choice-card-content">
+            {renderContent(responseA)}
+          </div>
+        </div>
+
+        {/* Response B */}
+        <div className={`dpo-choice-card ${selected === "B" ? "selected" : ""}`}>
+          <div className="dpo-choice-card-header">
+            <label className="dpo-radio-label">
+              <input
+                type="radio"
+                name="dpo-choice"
+                checked={selected === "B"}
+                onChange={() => setSelected("B")}
+              />
+              <span className="dpo-radio-text">Response B</span>
+            </label>
+          </div>
+          <div className="dpo-choice-card-content">
+            {renderContent(responseB)}
+          </div>
+        </div>
+      </div>
+      <div className="dpo-choice-footer">
+        <button
+          className="dpo-confirm-btn"
+          disabled={!selected}
+          onClick={handleConfirm}
+        >
+          Confirm Choice
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /** Inline correction input for thumbs-down feedback. */
 function CorrectionInput({ onSubmit, onCancel }: { onSubmit: (text: string) => void; onCancel: () => void }) {
   const [value, setValue] = useState("");
@@ -217,6 +318,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   /** Tracks total context tokens sent across the conversation (persists after fileRefs are cleared). */
   const [accumulatedContextTokens, setAccumulatedContextTokens] = useState(0);
+
+  /** Counter for DPO prompt interval — increments on each user message. */
+  const messageCountRef = useRef(0);
 
   /** Detect @mention (files/agents) or /mention (skills) patterns as the user types. */
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -532,6 +636,50 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     });
   }, [messages, rootPath, findQuestionForAssistant]);
 
+  /** Handle DPO choice — user picked one of two alternative responses. */
+  const handleDpoChoose = useCallback(async (msgIndex: number, choice: "A" | "B") => {
+    const msg = messages[msgIndex];
+    if (!msg || !msg.dpoResponses) return;
+
+    const { responseA, responseB } = msg.dpoResponses;
+    const chosen = choice === "A" ? responseA : responseB;
+    const rejected = choice === "A" ? responseB : responseA;
+    const question = findQuestionForAssistant(msgIndex);
+    const modelCtx = getModelContext();
+    const configs = getModelConfigurations();
+
+    // Update the message: show only the chosen response as content
+    setMessages((prev) => {
+      const msgs = [...prev];
+      if (msgs[msgIndex]) {
+        msgs[msgIndex] = {
+          ...msgs[msgIndex],
+          content: chosen,
+          dpoChoice: choice,
+          dpoResponses: undefined, // clear DPO mode
+        };
+      }
+      return msgs;
+    });
+
+    // Save as DPO JSONL entry
+    const dpoEntry: DpoEntry = {
+      prompt: question,
+      chosen,
+      rejected,
+      model_provider: modelCtx.provider,
+      model_name: modelCtx.model,
+      model_configurations: configs,
+      timestamp: new Date().toISOString(),
+    };
+
+    try {
+      await saveDpoFeedback(rootPath, dpoEntry);
+    } catch (e) {
+      console.error("[rlhf] Failed to save DPO feedback:", e);
+    }
+  }, [messages, rootPath, findQuestionForAssistant]);
+
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
     if (!trimmed || loading || sendingRef.current) return;
@@ -665,73 +813,121 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
 
-      // ---- Set up streaming event listener ----
-      unlisten = await listen<{ token: string }>("stream-token", (event) => {
-        // If the user clicked Stop, ignore all subsequent tokens
-        if (stopRequestedRef.current) return;
-        setMessages((prev) => {
-          const msgs = [...prev];
-          const last = msgs[msgs.length - 1];
-          if (last && last.role === "assistant") {
-            msgs[msgs.length - 1] = { ...last, content: last.content + event.payload.token };
-          }
-          return msgs;
-        });
-      });
-      unlistenRef.current = unlisten;
+      // ---- Check DPO trigger ----
+      const dpoSettings = readRlhfSettings();
+      let dpoTriggered = false;
+      if (dpoSettings.dpoEnabled) {
+        messageCountRef.current += 1;
+        dpoTriggered = messageCountRef.current % dpoSettings.dpoInterval === 0;
+      }
 
-      // Add a placeholder assistant message that streaming tokens will fill
-      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
-
-      // Prepend agent system messages before user messages
+      // Build common API messages
       const apiMessages = [
         ...agentSystemMessages,
         ...allMessages.map((m) => ({ role: m.role, content: m.content })),
       ];
 
-      const result: { content: string; tool_calls: ToolCallLog[] } = await invoke("ai_chat", {
-        req: {
-          backend,
-          url,
-          model: chatModel,
-          messages: apiMessages,
-          apiKey: apiKey || null,
-          toolsEnabled,
-          toolConfigs,
-          temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
-          maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
-          systemPrompt: chatSystemPrompt || undefined,
-        },
-      });
+      // Shared request base
+      const reqBase = {
+        backend,
+        url,
+        model: chatModel,
+        messages: apiMessages,
+        apiKey: apiKey || null,
+        toolsEnabled,
+        toolConfigs,
+        temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
+        maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
+        systemPrompt: chatSystemPrompt || undefined,
+      };
 
-      // If the user clicked Stop while waiting for the full response, discard the result
-      if (stopRequestedRef.current) {
-        // unlisten is already cleaned up by stopGeneration; just skip processing
-        return;
-      }
+      if (dpoTriggered) {
+        // ---- DPO mode: generate TWO responses without streaming ----
+        let respA = "";
+        let respB = "";
 
-      // Accumulate assistant response tokens
-      const responseText = result.content || "";
-      if (responseText) {
-        const respTokens = countTokens(responseText);
-        if (respTokens > 0) {
-          setAccumulatedContextTokens((prev) => prev + respTokens);
+        try {
+          // First call: normal parameters
+          const resultA: { content: string } = await invoke("ai_chat", { req: reqBase });
+          respA = resultA.content || "(no response)";
+
+          // Second call: slightly higher temperature for diversity
+          const baseTemp = chatTemperature ? parseFloat(chatTemperature) : 0.7;
+          const altTemp = Math.min(1, baseTemp + 0.2);
+          const resultB: { content: string } = await invoke("ai_chat", {
+            req: { ...reqBase, temperature: altTemp },
+          });
+          respB = resultB.content || "(no response)";
+        } catch (e: any) {
+          // Fall back to a single error message
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `DPO generation failed: ${e}` },
+          ]);
+          sendingRef.current = false;
+          setLoading(false);
+          return;
         }
-      }
 
-      // Finalise the assistant message with the complete result
-      setMessages((prev) => {
-        const msgs = [...prev];
-        const last = msgs[msgs.length - 1];
-        if (last && last.role === "assistant") {
-          msgs[msgs.length - 1] = {
-            ...last,
-            content: responseText || "(no response)",
-            toolCalls: result.tool_calls?.length > 0 ? result.tool_calls : undefined,
-          };
+        // Add a DPO choice message (no placeholder was created, so push a new message)
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "",
+            dpoResponses: { responseA: respA, responseB: respB },
+          },
+        ]);
+      } else {
+        // ---- Normal mode: stream a single response ----
+        unlisten = await listen<{ token: string }>("stream-token", (event) => {
+          if (stopRequestedRef.current) return;
+          setMessages((prev) => {
+            const msgs = [...prev];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === "assistant") {
+              msgs[msgs.length - 1] = { ...last, content: last.content + event.payload.token };
+            }
+            return msgs;
+          });
+        });
+        unlistenRef.current = unlisten;
+
+        // Add a placeholder assistant message that streaming tokens will fill
+        setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+        const result: { content: string; tool_calls: ToolCallLog[] } = await invoke("ai_chat", {
+          req: reqBase,
+        });
+
+        // If the user clicked Stop while waiting, discard
+        if (stopRequestedRef.current) {
+          return;
         }
-        return msgs;
-      });
+
+        // Accumulate assistant response tokens
+        const responseText = result.content || "";
+        if (responseText) {
+          const respTokens = countTokens(responseText);
+          if (respTokens > 0) {
+            setAccumulatedContextTokens((prev) => prev + respTokens);
+          }
+        }
+
+        // Finalise the assistant message with the complete result
+        setMessages((prev) => {
+          const msgs = [...prev];
+          const last = msgs[msgs.length - 1];
+          if (last && last.role === "assistant") {
+            msgs[msgs.length - 1] = {
+              ...last,
+              content: responseText || "(no response)",
+              toolCalls: result.tool_calls?.length > 0 ? result.tool_calls : undefined,
+            };
+          }
+          return msgs;
+        });
+      }
     } catch (e: any) {
       // On error, replace the empty placeholder with the error message
       setMessages((prev) => {
@@ -788,7 +984,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             )}
             {m.role === "assistant" ? (
               <div className="assistant-content">
-                {m.content ? (
+                {/* DPO choice component — show two responses side by side */}
+                {m.dpoResponses ? (
+                  <DpoChoice
+                    responseA={m.dpoResponses.responseA}
+                    responseB={m.dpoResponses.responseB}
+                    onChoose={(choice) => handleDpoChoose(i, choice)}
+                  />
+                ) : m.content ? (
                   <>
                     <MarkdownContent text={m.content} />
                     {i === messages.length - 1 && loading && (

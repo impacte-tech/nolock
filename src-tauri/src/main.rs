@@ -115,6 +115,23 @@ fn create_directory(path: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to create directory {}: {}", path, e))
 }
 
+#[tauri::command]
+fn append_to_file(path: String, content: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("Failed to open {} for append: {}", path, e))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("Failed to append to {}: {}", path, e))?;
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 struct DirEntry {
     name: String,
@@ -2190,6 +2207,7 @@ pub fn run() {
             search_in_files,
             replace_in_files,
             create_directory,
+            append_to_file,
             get_rlhf_dir,
             get_model_info,
             ai_complete,

@@ -1,40 +1,42 @@
 /**
  * RLHF (Reinforcement Learning from Human Feedback) storage utilities.
  *
- * Stores user feedback on AI chat responses as JSON files in a configurable
- * directory within the project root, partitioned by feedback type.
+ * Stores user feedback in JSONL format, partitioned by model configuration.
+ * All feedback is consolidated under a `dpoDir` parent folder for clarity.
  *
- * Default directories:
- *   .rlhf/good/   ← thumbs up (good examples)
- *   .rlhf/bad/    ← thumbs down (bad examples with user corrections)
+ * ## KTO format (thumbs up / thumbs down)
  *
- * Directories can be customized via localStorage settings:
- *   nolock.rlhf.enabled  - "true" | "false" (default "true")
- *   nolock.rlhf.root     - root folder name (default ".rlhf")
- *   nolock.rlhf.goodDir  - good subdirectory (default "good")
- *   nolock.rlhf.badDir   - bad subdirectory (default "bad")
+ * Each entry is appended as one JSON line to:
+ *   <root>/<dpoDir>/<goodDir>/<modelKey>/data.jsonl   (thumbs up, label: true)
+ *   <root>/<dpoDir>/<badDir>/<modelKey>/data.jsonl    (thumbs down, label: false)
  *
- * Each file is named with a timestamp and a random suffix to avoid collisions:
- *   YYYY-MM-DD_HHmmss_XXXX.json
+ * JSONL line schema (KTO-compatible):
+ *   { "prompt": "...", "response": "...", "label": true|false,
+ *     "model_provider": "...", "model_name": "...",
+ *     "model_configurations": { "temperature": ..., "max_tokens": ..., "system_prompt": "..." },
+ *     "timestamp": "ISO 8601", "user_correction": "..." }
  *
- * JSON schema for stored feedback:
+ * ## DPO format (pairwise preference)
  *
- * ```json
- * {
- *   "feedback_type": "good" | "bad",
- *   "model_provider": "ollama",
- *   "model_name": "qwen3:8b",
- *   "model_configurations": {
- *     "temperature": 0.7,
- *     "max_tokens": 2048,
- *     "system_prompt": "..."
- *   },
- *   "timestamp": "2026-06-26T14:30:22.123Z",
- *   "question": "User's question text",
- *   "answer": "AI's answer text",
- *   "user_correction": ""  // only populated for bad examples
- * }
- * ```
+ * Every Nth message, the user is asked to choose between two AI responses.
+ * The chosen/rejected pair is appended as one JSON line to:
+ *   <root>/<dpoDir>/<pairwiseDir>/<modelKey>/data.jsonl
+ *
+ * JSONL line schema (DPO-compatible):
+ *   { "prompt": "...", "chosen": "...", "rejected": "...",
+ *     "model_provider": "...", "model_name": "...",
+ *     "model_configurations": { ... },
+ *     "timestamp": "ISO 8601" }
+ *
+ * ## localStorage settings
+ *   nolock.rlhf.enabled       - "true" | "false" (default "true")
+ *   nolock.rlhf.root          - root folder name (default ".rlhf")
+ *   nolock.rlhf.dpoDir        - parent container for all feedback (default "dpo")
+ *   nolock.rlhf.goodDir       - good subdirectory inside dpoDir (default "good")
+ *   nolock.rlhf.badDir        - bad subdirectory inside dpoDir (default "bad")
+ *   nolock.rlhf.pairwiseDir   - pairwise subdirectory inside dpoDir (default "pairwise")
+ *   nolock.rlhf.dpoEnabled    - "true" | "false" (default "false")
+ *   nolock.rlhf.dpoInterval   - number of messages between DPO prompts (default 10)
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -43,94 +45,105 @@ import { invoke } from "@tauri-apps/api/core";
 // Types
 // ---------------------------------------------------------------------------
 
-export interface RlhfData {
-  feedback_type: "good" | "bad";
+export interface ModelConfig {
+  temperature: number;
+  max_tokens: number;
+  system_prompt: string;
+}
+
+/** Settings read from localStorage */
+export interface RlhfSettings {
+  enabled: boolean;
+  root: string;
+  /** Parent container directory for all feedback data (e.g. "dpo"). */
+  dpoDir: string;
+  /** Subdirectory inside dpoDir for good (thumbs-up) examples. */
+  goodDir: string;
+  /** Subdirectory inside dpoDir for bad (thumbs-down) examples. */
+  badDir: string;
+  /** Subdirectory inside dpoDir for DPO pairwise (chosen/rejected) examples. */
+  pairwiseDir: string;
+  dpoEnabled: boolean;
+  dpoInterval: number;
+}
+
+/** Default directory name for the RLHF parent container. */
+export const DEFAULT_DPO_DIR = "dpo";
+/** Default subdirectory for pairwise preference data. */
+export const DEFAULT_PAIRWISE_DIR = "pairwise";
+
+/** A KTO-format entry — maps one prompt+response with a binary label */
+export interface KtoEntry {
+  prompt: string;
+  response: string;
+  label: boolean;
   model_provider: string;
   model_name: string;
-  model_configurations: {
-    temperature: number;
-    max_tokens: number;
-    system_prompt: string;
-  };
+  model_configurations: ModelConfig;
   timestamp: string;
-  question: string;
-  answer: string;
-  user_correction: string | "";
+  user_correction?: string;
+}
+
+/** A DPO-format entry — pairs a prompt with a chosen and a rejected response */
+export interface DpoEntry {
+  prompt: string;
+  chosen: string;
+  rejected: string;
+  model_provider: string;
+  model_name: string;
+  model_configurations: ModelConfig;
+  timestamp: string;
 }
 
 export type FeedbackType = "good" | "bad";
+
+/**
+ * @deprecated Use `KtoEntry` instead. Kept for backward compatibility.
+ */
+export interface RlhfData {
+  feedback_type: FeedbackType;
+  model_provider: string;
+  model_name: string;
+  model_configurations: ModelConfig;
+  timestamp: string;
+  question: string;
+  answer: string;
+  user_correction: string;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a unique filename for an RLHF entry using the current timestamp
- * and a short random suffix to prevent collisions.
+ * Sanitise a provider+model pair for use as a filesystem directory name.
+ * Replaces anything that isn't alphanumeric, underscore, or hyphen with '_'.
+ */
+function sanitiseModelKey(provider: string, model: string): string {
+  const raw = `${provider}_${model}`;
+  return raw.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+/**
+ * Build the JSONL path for a given feedback type and model.
  *
- * Format: `YYYY-MM-DD_HHmmss_XXXX.json`
- * Example: `2026-06-26_143022_a3f8.json`
+ * Produces: <baseDir>/<parentDir>/<subDir>/<modelKey>/data.jsonl
+ *
+ * @param baseDir   The feedback root directory (e.g. "/project/.rlhf")
+ * @param parentDir The parent container (e.g. "dpo")
+ * @param subDir    The feedback type subdirectory (e.g. "good", "bad", "pairwise")
+ * @param provider  The AI model provider
+ * @param model     The AI model name
  */
-function generateFilename(): string {
-  const now = new Date();
-  const pad = (n: number, len = 2) => String(n).padStart(len, "0");
-
-  const datePart = [
-    now.getFullYear(),
-    pad(now.getMonth() + 1),
-    pad(now.getDate()),
-  ].join("-");
-
-  const timePart = [
-    pad(now.getHours()),
-    pad(now.getMinutes()),
-    pad(now.getSeconds()),
-  ].join("");
-
-  const rand = Math.random().toString(16).slice(2, 6);
-
-  return `${datePart}_${timePart}_${rand}.json`;
-}
-
-/**
- * Read model configuration from localStorage.
- * These are the same keys used by ChatModelPanel.tsx and AISettings.tsx.
- */
-export function getModelConfigurations(): {
-  temperature: number;
-  max_tokens: number;
-  system_prompt: string;
-} {
-  const savedTemp = localStorage.getItem("nolock.chatTemperature");
-  const savedTokens = localStorage.getItem("nolock.chatMaxTokens");
-  const systemPrompt = localStorage.getItem("nolock.chatSystemPrompt") || "";
-
-  return {
-    temperature: savedTemp ? parseFloat(savedTemp) : 0.7,
-    max_tokens: savedTokens ? parseInt(savedTokens, 10) : 2048,
-    system_prompt: systemPrompt,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * Build the model context for RLHF storage by reading current settings from
- * localStorage. This captures what model/configuration was active when the
- * feedback was given.
- */
-export function getModelContext(): {
-  provider: string;
-  model: string;
-} {
-  const backend = localStorage.getItem("nolock.backend") || "ollama";
-  const chatModel = localStorage.getItem("nolock.chatModel") || "";
-  return {
-    provider: backend,
-    model: chatModel,
-  };
+function jsonlPath(
+  baseDir: string,
+  parentDir: string,
+  subDir: string,
+  provider: string,
+  model: string,
+): string {
+  const modelKey = sanitiseModelKey(provider, model);
+  return `${baseDir}/${parentDir}/${subDir}/${modelKey}/data.jsonl`;
 }
 
 /**
@@ -139,10 +152,8 @@ export function getModelContext(): {
  */
 async function getRlhfFallbackDir(): Promise<string> {
   try {
-    const dir = await invoke<string>("get_rlhf_dir");
-    return dir;
+    return await invoke<string>("get_rlhf_dir");
   } catch (e) {
-    // Last-resort fallback if the Tauri command is unavailable (e.g. in tests)
     console.warn("[rlhf] Failed to get fallback directory, using temp:", e);
     const tmpDir = "/tmp/nolock/rlhf";
     try {
@@ -155,43 +166,63 @@ async function getRlhfFallbackDir(): Promise<string> {
 }
 
 /**
- * Read RLHF directory settings from localStorage.
- * Falls back to defaults when settings are not present.
+ * Read model configuration from localStorage.
  */
-export function readRlhfSettings(): {
-  enabled: boolean;
-  root: string;
-  goodDir: string;
-  badDir: string;
-} {
+export function getModelConfigurations(): ModelConfig {
+  const savedTemp = localStorage.getItem("nolock.chatTemperature");
+  const savedTokens = localStorage.getItem("nolock.chatMaxTokens");
+  const systemPrompt = localStorage.getItem("nolock.chatSystemPrompt") || "";
   return {
-    enabled: localStorage.getItem("nolock.rlhf.enabled") !== "false",
-    root: localStorage.getItem("nolock.rlhf.root") || ".rlhf",
-    goodDir: localStorage.getItem("nolock.rlhf.goodDir") || "good",
-    badDir: localStorage.getItem("nolock.rlhf.badDir") || "bad",
+    temperature: savedTemp ? parseFloat(savedTemp) : 0.7,
+    max_tokens: savedTokens ? parseInt(savedTokens, 10) : 2048,
+    system_prompt: systemPrompt,
   };
 }
 
 /**
- * Save an RLHF feedback entry to disk as a JSON file inside the configured
- * feedback directory (default `.rlhf/`).
- *
- * When a `rootPath` (project folder) is provided, data is saved to
- * `<rootPath>/<root>/<goodDir>/` or `<rootPath>/<root>/<badDir>/`.
- *
- * When `rootPath` is empty, data is saved to the application's local data
- * directory (e.g. `~/.local/share/nolock/.rlhf/` on Linux).
- *
- * If RLHF is disabled via settings, this function does nothing and returns
- * an empty string.
- *
- * @param rootPath  The project root path, or empty string to use fallback.
- * @param feedback  The feedback data to persist.
- * @returns         The path to the saved file, or empty string if disabled.
+ * Build the model context by reading current settings from localStorage.
  */
-export async function saveRlhfFeedback(
+export function getModelContext(): { provider: string; model: string } {
+  const backend = localStorage.getItem("nolock.backend") || "ollama";
+  const chatModel = localStorage.getItem("nolock.chatModel") || "";
+  return { provider: backend, model: chatModel };
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/**
+ * Read all RLHF settings (including DPO settings) from localStorage.
+ */
+export function readRlhfSettings(): RlhfSettings {
+  const dpoIntervalRaw = localStorage.getItem("nolock.rlhf.dpoInterval");
+  return {
+    enabled: localStorage.getItem("nolock.rlhf.enabled") !== "false",
+    root: localStorage.getItem("nolock.rlhf.root") || ".rlhf",
+    dpoDir: localStorage.getItem("nolock.rlhf.dpoDir") || DEFAULT_DPO_DIR,
+    goodDir: localStorage.getItem("nolock.rlhf.goodDir") || "good",
+    badDir: localStorage.getItem("nolock.rlhf.badDir") || "bad",
+    pairwiseDir: localStorage.getItem("nolock.rlhf.pairwiseDir") || DEFAULT_PAIRWISE_DIR,
+    dpoEnabled: localStorage.getItem("nolock.rlhf.dpoEnabled") === "true",
+    dpoInterval: dpoIntervalRaw ? parseInt(dpoIntervalRaw, 10) : 10,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// KTO save (thumbs up / thumbs down)
+// ---------------------------------------------------------------------------
+
+/**
+ * Append a KTO-format JSONL line to the appropriate model-partitioned file.
+ *
+ * @param rootPath  The project root path, or empty to use fallback dir.
+ * @param entry     The KTO data to persist. `label: true` → good, `false` → bad.
+ * @returns         The path to the JSONL file (or "" if disabled).
+ */
+export async function saveKtoFeedback(
   rootPath: string,
-  feedback: RlhfData,
+  entry: KtoEntry,
 ): Promise<string> {
   const settings = readRlhfSettings();
   if (!settings.enabled) {
@@ -199,36 +230,91 @@ export async function saveRlhfFeedback(
     return "";
   }
 
-  const subDir = feedback.feedback_type === "good" ? settings.goodDir : settings.badDir;
-  const fileName = generateFilename();
+  const subDir = entry.label ? settings.goodDir : settings.badDir;
 
-  // Resolve base directory: use project root if available, otherwise fallback
-  let baseDir: string;
-  if (rootPath) {
-    baseDir = `${rootPath}/${settings.root}`;
-  } else {
-    baseDir = await getRlhfFallbackDir();
-  }
+  // Resolve base directory
+  const baseDir = rootPath
+    ? `${rootPath}/${settings.root}`
+    : await getRlhfFallbackDir();
 
-  const filePath = `${baseDir}/${subDir}/${fileName}`;
+  const filePath = jsonlPath(baseDir, settings.dpoDir, subDir, entry.model_provider, entry.model_name);
+  const jsonlLine = JSON.stringify(entry) + "\n";
 
-  const jsonContent = JSON.stringify(feedback, null, 2);
-
-  // Use `create_file` first to ensure the parent directory structure exists
-  // (the Rust `create_file` command calls `create_dir_all` on the parent).
-  // Then overwrite with the actual JSON content via `write_file`.
   try {
-    await invoke("create_file", { path: filePath });
-  } catch {
-    // If create_file fails (e.g. path already exists), that's fine
-  }
-
-  // Step 2: Write the actual JSON content
-  try {
-    await invoke("write_file", { path: filePath, content: jsonContent });
+    await invoke("append_to_file", { path: filePath, content: jsonlLine });
   } catch (e) {
-    throw new Error(`Failed to save RLHF feedback to ${filePath}: ${e}`);
+    throw new Error(`Failed to save KTO feedback to ${filePath}: ${e}`);
   }
 
   return filePath;
+}
+
+// ---------------------------------------------------------------------------
+// DPO save (pairwise preference)
+// ---------------------------------------------------------------------------
+
+/**
+ * Append a DPO-format JSONL line to the dpo/<modelKey>/data.jsonl file.
+ *
+ * @param rootPath  The project root path, or empty to use fallback dir.
+ * @param entry     The DPO data with prompt, chosen, and rejected responses.
+ * @returns         The path to the JSONL file (or "" if disabled or DPO disabled).
+ */
+export async function saveDpoFeedback(
+  rootPath: string,
+  entry: DpoEntry,
+): Promise<string> {
+  const settings = readRlhfSettings();
+  if (!settings.enabled || !settings.dpoEnabled) {
+    console.log("[rlhf] DPO is disabled, skipping save");
+    return "";
+  }
+
+  const baseDir = rootPath
+    ? `${rootPath}/${settings.root}`
+    : await getRlhfFallbackDir();
+
+  const filePath = jsonlPath(baseDir, settings.dpoDir, settings.pairwiseDir, entry.model_provider, entry.model_name);
+  const jsonlLine = JSON.stringify(entry) + "\n";
+
+  try {
+    await invoke("append_to_file", { path: filePath, content: jsonlLine });
+  } catch (e) {
+    throw new Error(`Failed to save DPO feedback to ${filePath}: ${e}`);
+  }
+
+  return filePath;
+}
+
+// ---------------------------------------------------------------------------
+// Legacy helper (kept for backward compat, delegates to KTO)
+// ---------------------------------------------------------------------------
+
+/**
+ * @deprecated Use `saveKtoFeedback` instead. This function wraps the old
+ *             `RlhfData` interface into the new KTO JSONL format.
+ */
+export async function saveRlhfFeedback(
+  rootPath: string,
+  feedback: {
+    feedback_type: FeedbackType;
+    model_provider: string;
+    model_name: string;
+    model_configurations: ModelConfig;
+    timestamp: string;
+    question: string;
+    answer: string;
+    user_correction: string;
+  },
+): Promise<string> {
+  return saveKtoFeedback(rootPath, {
+    prompt: feedback.question,
+    response: feedback.answer,
+    label: feedback.feedback_type === "good",
+    model_provider: feedback.model_provider,
+    model_name: feedback.model_name,
+    model_configurations: feedback.model_configurations,
+    timestamp: feedback.timestamp,
+    user_correction: feedback.user_correction || undefined,
+  });
 }
