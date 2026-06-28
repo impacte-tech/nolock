@@ -10,7 +10,7 @@ const BACKENDS = [
   { value: "ollama", label: "Ollama", defaultUrl: "http://localhost:11434" },
   { value: "llamacpp", label: "llama.cpp", defaultUrl: "http://localhost:8080" },
   { value: "openrouter", label: "OpenRouter", defaultUrl: "https://openrouter.ai/api/v1" },
-  { value: "opencode", label: "OpenCode Zen", defaultUrl: "http://localhost:11435" },
+  { value: "opencode", label: "OpenCode Zen", defaultUrl: "https://opencode.ai/zen/v1" },
 ];
 
 export default function ModelProvidersPanel({ visible, onClose }: Props) {
@@ -21,13 +21,16 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
   useEffect(() => {
     if (!visible) return;
 
-    setBackend(localStorage.getItem("nolock.backend") || "ollama");
+    const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
+    setBackend(currentBackend);
     setUrl(localStorage.getItem("nolock.url") || "http://localhost:11434");
-    setApiKey(localStorage.getItem("nolock.apiKey") || "");
+
+    // Load the current backend's API key
+    setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
 
     // Upgrade from OS keychain if available
     (async () => {
-      const storedApiKey = await getSecret("apiKey");
+      const storedApiKey = await getSecret(`apiKey.${currentBackend}`);
       if (storedApiKey != null) {
         setApiKey(storedApiKey);
       }
@@ -39,13 +42,15 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     if (found) {
       setBackend(value);
       setUrl(found.defaultUrl);
+      // Load the new backend's API key
+      setApiKey(localStorage.getItem(`nolock.apiKey.${value}`) || "");
     }
   };
 
   const save = () => {
     localStorage.setItem("nolock.backend", backend);
     localStorage.setItem("nolock.url", url);
-    setSecret("apiKey", apiKey);
+    setSecret(`apiKey.${backend}`, apiKey);
     onClose();
   };
 
@@ -81,7 +86,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
             placeholder="http://localhost:11434"
           />
 
-          {backend === "openrouter" && (
+          {(backend === "openrouter" || backend === "opencode") && (
             <>
               <label className="field-label" htmlFor="mp-api-key">API Key</label>
               <input
@@ -90,8 +95,13 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
                 type="password"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-or-..."
+                placeholder={backend === "openrouter" ? "sk-or-..." : "sk-oc-..."}
               />
+              <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                {backend === "openrouter"
+                  ? "Required for OpenRouter API."
+                  : "Required for the remote OpenCode Zen API. Leave blank for local servers."}
+              </span>
             </>
           )}
         </div>

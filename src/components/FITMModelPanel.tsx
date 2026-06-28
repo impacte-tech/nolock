@@ -1,12 +1,22 @@
 import { useState, useEffect } from "react";
+import ModelSelector from "./ModelSelector";
 
 interface Props {
   visible: boolean;
   onClose: () => void;
 }
 
+const BACKEND_DEFAULTS: Record<string, { url: string }> = {
+  ollama: { url: "http://localhost:11434" },
+  llamacpp: { url: "http://localhost:8080" },
+  openrouter: { url: "https://openrouter.ai/api/v1" },
+  opencode: { url: "https://opencode.ai/zen/v1" },
+};
+
 export default function FITMModelPanel({ visible, onClose }: Props) {
   const [completionModel, setCompletionModel] = useState("");
+  const [backend, setBackend] = useState("ollama");
+  const [apiKey, setApiKey] = useState("");
   const [systemPrompt, setSystemPrompt] = useState(
     "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
   );
@@ -25,6 +35,9 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.2);
     const savedTokens = localStorage.getItem("nolock.fitmMaxTokens");
     setMaxTokens(savedTokens ? parseInt(savedTokens, 10) : 64);
+    setBackend(localStorage.getItem("nolock.backend") || "ollama");
+    const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
+    setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
   }, [visible]);
 
   const save = () => {
@@ -46,12 +59,14 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
           <button onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
-          <label className="field-label">Code Completion Model (FITM)</label>
-          <input
-            className="field-input"
+          <ModelSelector
+            provider={backend}
+            url={localStorage.getItem("nolock.url") || BACKEND_DEFAULTS[backend]?.url || "http://localhost:11434"}
+            apiKey={apiKey}
             value={completionModel}
-            onChange={(e) => setCompletionModel(e.target.value)}
+            onChange={setCompletionModel}
             placeholder="e.g. qwen2.5-coder:1.5b"
+            label="Code Completion Model (FITM)"
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
             Smaller/faster model for inline code suggestions. Uses Fill-In-The-Middle (prefix+suffix).

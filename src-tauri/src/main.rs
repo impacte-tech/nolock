@@ -925,6 +925,197 @@ async fn get_model_info(req: ModelInfoRequest) -> Result<ModelInfoResult, String
 }
 
 // ---------------------------------------------------------------------------
+// Model listing (proxied through Rust to avoid CORS issues)
+// ---------------------------------------------------------------------------
+
+/// Heuristic: is this OpenCode Zen model free?
+///
+/// Based on https://opencode.ai/docs/zen/#pricing
+/// Free models are those with "-free" suffix, or "big-pickle".
+fn opencode_is_free_model(id: &str) -> bool {
+    let lower = id.to_lowercase();
+    lower.ends_with("-free") || lower == "big-pickle"
+}
+
+/// Heuristic: does this OpenCode Zen model have zero data retention?
+///
+/// Based on https://opencode.ai/docs/zen/#privacy
+/// - Default: zero-retention, no training
+/// - EXCEPTION: OpenAI models (gpt-*) → retained 30 days
+/// - EXCEPTION: Anthropic models (claude-*) → retained 30 days
+/// - EXCEPTION: Free models (*-free, big-pickle) → data may be used for training
+fn opencode_has_zdr(id: &str) -> bool {
+    let lower = id.to_lowercase();
+    // Free models: data may be used for training → NOT ZDR
+    if lower.ends_with("-free") || lower == "big-pickle" {
+        return false;
+    }
+    // OpenAI models: retained 30 days → NOT ZDR
+    if lower.starts_with("gpt") {
+        return false;
+    }
+    // Anthropic models: retained 30 days → NOT ZDR
+    if lower.starts_with("claude") {
+        return false;
+    }
+    // Everything else (Gemini, DeepSeek, GLM, Kimi, Qwen, Grok, MiniMax paid, etc.)
+    // → zero retention
+    true
+}
+
+#[derive(serde::Deserialize)]
+struct FetchModelsRequest {
+    backend: String,
+    url: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    zdr: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ModelListItem {
+    id: String,
+    name: String,
+    is_free: bool,
+    zero_data_retention: bool,
+}
+
+#[tauri::command]
+async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, String> {
+    let client = reqwest::Client::new();
+
+    match req.backend.as_str() {
+        "openrouter" => {
+            let base = req.url.trim_end_matches('/');
+            let mut url = format!("{}/models", base);
+            if req.zdr {
+                url = format!("{}?zdr=true", url);
+            }
+
+            eprintln!("[nolock] fetch_models openrouter GET {}", url);
+            let mut builder = client
+                .get(&url)
+                .header("Accept", "application/json");
+            if let Some(ref key) = req.api_key {
+                if !key.is_empty() {
+                    builder = builder.header("Authorization", format!("Bearer {}", key));
+                }
+            }
+            let resp = builder
+                .timeout(std::time::Duration::from_secs(15))
+                .send()
+                .await
+                .map_err(|e| format!("OpenRouter request failed: {}", e))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(format!("OpenRouter API error ({}): {}", status, &text[..text.len().min(200)]));
+            }
+
+            let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let data = body["data"].as_array().cloned().unwrap_or_default();
+
+            Ok(data.iter().map(|m| {
+                let pricing = &m["pricing"];
+                let prompt_price = pricing["prompt"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let completion_price = pricing["completion"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let request_price = pricing["request"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let image_price = pricing["image"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+
+                let is_free = prompt_price == 0.0 && completion_price == 0.0 && request_price == 0.0 && image_price == 0.0;
+                let id = m["id"].as_str().unwrap_or("");
+                let name = m["name"].as_str().unwrap_or(id);
+
+                ModelListItem {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    is_free,
+                    zero_data_retention: req.zdr,
+                }
+            }).collect())
+        }
+        "opencode" => {
+            let normalized = req.url.trim_end_matches('/');
+            let is_remote = normalized.contains("/v1");
+
+            if is_remote {
+                // Remote OpenAI-compatible API
+                let endpoint = format!("{}/models", normalized);
+                eprintln!("[nolock] fetch_models opencode(remote) GET {}", endpoint);
+                let mut builder = client.get(&endpoint);
+                if let Some(ref key) = req.api_key {
+                    if !key.is_empty() {
+                        builder = builder.header("Authorization", format!("Bearer {}", key));
+                    }
+                }
+                let resp = builder
+                    .timeout(std::time::Duration::from_secs(15))
+                    .send()
+                    .await
+                    .map_err(|e| format!("OpenCode Zen request failed: {}", e))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(format!("OpenCode Zen API error ({}): {}", status, &text[..text.len().min(200)]));
+                }
+
+                let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+                let data = body["data"].as_array().cloned().unwrap_or_default();
+
+                Ok(data.iter().map(|m| {
+                    let id = m["id"].as_str().unwrap_or("");
+                    let is_free = opencode_is_free_model(id);
+                    let has_zdr = opencode_has_zdr(id);
+                    ModelListItem {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                        is_free,
+                        zero_data_retention: has_zdr,
+                    }
+                }).collect())
+            } else {
+                // Local Ollama-compatible API
+                let endpoint = format!("{}/api/tags", normalized);
+                eprintln!("[nolock] fetch_models opencode(local) GET {}", endpoint);
+                let resp = client
+                    .get(&endpoint)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await
+                    .map_err(|e| format!("OpenCode Zen local request failed: {}", e))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(format!("OpenCode Zen local API error ({}): {}", status, &text[..text.len().min(200)]));
+                }
+
+                let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+                let models = body["models"].as_array().cloned().unwrap_or_default();
+
+                Ok(models.iter().map(|m| {
+                    let name = m["name"].as_str().unwrap_or("");
+                    // Strip ":latest" suffix for matching
+                    let base_id = name.split(':').next().unwrap_or(name);
+                    let is_free = opencode_is_free_model(base_id);
+                    let has_zdr = opencode_has_zdr(base_id);
+                    ModelListItem {
+                        id: name.to_string(),
+                        name: name.to_string(),
+                        is_free,
+                        zero_data_retention: has_zdr,
+                    }
+                }).collect())
+            }
+        }
+        _ => Ok(vec![]),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AI backend commands
 // ---------------------------------------------------------------------------
 
@@ -945,7 +1136,7 @@ struct CompletionRequest {
     system_prompt: Option<String>,
 }
 
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct ChatMessage {
     role: String,
     content: String,
@@ -1769,34 +1960,76 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 .to_string())
         }
         "opencode" => {
-            let body = serde_json::json!({
-                "model": req.model,
-                "system": system_prompt,
-                "prompt": req.prompt,
-                "stream": false,
-                "options": {
-                    "num_predict": max_tokens,
+            let api_key = req.api_key.clone().unwrap_or_default();
+            let is_remote = req.url.contains("/v1");
+
+            if is_remote {
+                // Remote OpenCode Zen API — OpenAI-compatible format
+                let body = serde_json::json!({
+                    "model": req.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": req.prompt}
+                    ],
+                    "stream": false,
+                    "max_tokens": max_tokens,
                     "temperature": temperature,
-                    "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
-                }
-            });
-            eprintln!("[nolock] opencode POST {}/api/generate", req.url);
-            let resp = client
-                .post(format!("{}/api/generate", req.url))
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| {
-                    eprintln!("[nolock] opencode error: {}", e);
-                    e.to_string()
-                })?;
-            let status = resp.status();
-            let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
-            let data: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
-            Ok(data["response"].as_str().unwrap_or("").to_string())
+                });
+                let full_url = format!("{}/chat/completions", req.url.trim_end_matches('/'));
+                eprintln!("[nolock] opencode POST {full_url}");
+                let resp = client
+                    .post(&full_url)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        eprintln!("[nolock] opencode error: {}", e);
+                        e.to_string()
+                    })?;
+                let status = resp.status();
+                let text = resp.text().await.map_err(|e| e.to_string())?;
+                eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
+                let data: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+                Ok(data["choices"][0]["message"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string())
+            } else {
+                // Local OpenCode Zen — Ollama-compatible format
+                let body = serde_json::json!({
+                    "model": req.model,
+                    "system": system_prompt,
+                    "prompt": req.prompt,
+                    "stream": false,
+                    "options": {
+                        "num_predict": max_tokens,
+                        "temperature": temperature,
+                        "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+                    }
+                });
+                let full_url = format!("{}/api/generate", req.url.trim_end_matches('/'));
+                eprintln!("[nolock] opencode POST {full_url}");
+                let resp = client
+                    .post(&full_url)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        eprintln!("[nolock] opencode error: {}", e);
+                        e.to_string()
+                    })?;
+                let status = resp.status();
+                let text = resp.text().await.map_err(|e| e.to_string())?;
+                eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
+                let data: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+                Ok(data["response"].as_str().unwrap_or("").to_string())
+            }
         }
         _ => Err(format!("Unknown backend: {}", req.backend)),
     }
@@ -2098,70 +2331,145 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             })
         }
         "opencode" => {
-            let prompt = messages
-                .iter()
-                .map(|m| format!("{}: {}", m.role, m.content))
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\nassistant:";
+            let api_key = req.api_key.clone().unwrap_or_default();
+            let is_remote = req.url.contains("/v1");
 
-            let body = serde_json::json!({
-                "model": req.model,
-                "prompt": prompt,
-                "stream": true,
-                "options": { "num_predict": max_tokens, "temperature": temperature }
-            });
-            eprintln!("[nolock] opencode POST {}/api/generate (streaming)", req.url);
-            let mut resp = client
-                .post(format!("{}/api/generate", req.url))
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(60))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
+            if is_remote {
+                // Remote OpenCode Zen API — OpenAI-compatible SSE streaming
+                let body = serde_json::json!({
+                    "model": req.model,
+                    "messages": messages,
+                    "stream": true,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                });
+                let full_url = format!("{}/chat/completions", req.url.trim_end_matches('/'));
+                eprintln!("[nolock] opencode POST {full_url} (streaming)");
+                let mut resp = client
+                    .post(&full_url)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
-                let error_detail = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| v["error"].as_str().map(String::from))
-                    .unwrap_or_else(|| text.clone());
-                return Err(format!("OpenCode API error ({}): {}", status, error_detail));
-            }
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.map_err(|e| e.to_string())?;
+                    eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
+                    let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| v["error"].as_str().map(String::from))
+                        .unwrap_or_else(|| text.clone());
+                    return Err(format!("OpenCode API error ({}): {}", status, error_detail));
+                }
 
-            // NDJSON streaming — {"response":"...","done":false}
-            let mut full_content = String::new();
-            let mut buf = String::new();
-            loop {
-                match resp.chunk().await.map_err(|e| e.to_string())? {
-                    None => break,
-                    Some(chunk) => {
-                        let s = String::from_utf8_lossy(&chunk);
-                        buf.push_str(&s);
-                        while let Some(pos) = buf.find('\n') {
-                            let line = buf[..pos].trim().to_string();
-                            buf = buf[pos + 1..].to_string();
-                            if line.is_empty() { continue; }
-                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
-                                if let Some(content) = data["response"].as_str() {
-                                    if !content.is_empty() {
-                                        full_content.push_str(content);
-                                        app_handle.emit("stream-token", StreamPayload {
-                                            token: content.to_string(),
-                                        }).ok();
+                // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
+                let mut full_content = String::new();
+                let mut buf = String::new();
+                loop {
+                    match resp.chunk().await.map_err(|e| e.to_string())? {
+                        None => break,
+                        Some(chunk) => {
+                            let s = String::from_utf8_lossy(&chunk);
+                            buf.push_str(&s);
+                            while let Some(pos) = buf.find("\n\n") {
+                                let event = buf[..pos].to_string();
+                                buf = buf[pos + 2..].to_string();
+                                for line in event.lines() {
+                                    if let Some(data) = line.strip_prefix("data: ") {
+                                        let data = data.trim();
+                                        if data == "[DONE]" { continue; }
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                                if !content.is_empty() {
+                                                    full_content.push_str(content);
+                                                    app_handle.emit("stream-token", StreamPayload {
+                                                        token: content.to_string(),
+                                                    }).ok();
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+                Ok(ChatResult {
+                    content: full_content,
+                    tool_calls: vec![],
+                })
+            } else {
+                // Local OpenCode Zen — Ollama-compatible NDJSON streaming
+                let prompt = messages
+                    .iter()
+                    .map(|m| format!("{}: {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\nassistant:";
+
+                let body = serde_json::json!({
+                    "model": req.model,
+                    "prompt": prompt,
+                    "stream": true,
+                    "options": { "num_predict": max_tokens, "temperature": temperature }
+                });
+                let full_url = format!("{}/api/generate", req.url.trim_end_matches('/'));
+                eprintln!("[nolock] opencode POST {full_url} (streaming)");
+                let mut resp = client
+                    .post(&full_url)
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.map_err(|e| e.to_string())?;
+                    eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
+                    let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| v["error"].as_str().map(String::from))
+                        .unwrap_or_else(|| text.clone());
+                    return Err(format!("OpenCode API error ({}): {}", status, error_detail));
+                }
+
+                // NDJSON streaming — {"response":"...","done":false}
+                let mut full_content = String::new();
+                let mut buf = String::new();
+                loop {
+                    match resp.chunk().await.map_err(|e| e.to_string())? {
+                        None => break,
+                        Some(chunk) => {
+                            let s = String::from_utf8_lossy(&chunk);
+                            buf.push_str(&s);
+                            while let Some(pos) = buf.find('\n') {
+                                let line = buf[..pos].trim().to_string();
+                                buf = buf[pos + 1..].to_string();
+                                if line.is_empty() { continue; }
+                                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                                    if let Some(content) = data["response"].as_str() {
+                                        if !content.is_empty() {
+                                            full_content.push_str(content);
+                                            app_handle.emit("stream-token", StreamPayload {
+                                                token: content.to_string(),
+                                            }).ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(ChatResult {
+                    content: full_content,
+                    tool_calls: vec![],
+                })
             }
-            Ok(ChatResult {
-                content: full_content,
-                tool_calls: vec![],
-            })
         }
         _ => Err(format!("Unknown backend: {}", req.backend)),
     }
@@ -2210,6 +2518,7 @@ pub fn run() {
             append_to_file,
             get_rlhf_dir,
             get_model_info,
+            fetch_models,
             ai_complete,
             ai_chat,
             pty_spawn,

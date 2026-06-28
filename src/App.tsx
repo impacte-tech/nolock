@@ -41,6 +41,17 @@ import nolockLogo from "./assets/nolocklogo-white.svg";
       localStorage.removeItem(oldKey);
     }
   }
+
+  // Migrate old single API key to per-backend keys.
+  // If the old key exists but the current backend's slot is empty,
+  // copy it to the active backend only (we can't know which backend it was for).
+  const oldApiKey = localStorage.getItem("nolock.apiKey") || "";
+  if (oldApiKey) {
+    const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
+    if (!localStorage.getItem(`nolock.apiKey.${currentBackend}`)) {
+      localStorage.setItem(`nolock.apiKey.${currentBackend}`, oldApiKey);
+    }
+  }
 })();
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { getSecret, setSecret } from "../lib/secrets";
+import ModelSelector from "./ModelSelector";
 
 interface Props {
   visible: boolean;
@@ -11,7 +12,8 @@ interface AIConfig {
   url: string;
   completionModel: string;
   chatModel: string;
-  apiKey: string;
+  /** Per-backend API keys: { openrouter: "sk-or-...", opencode: "sk-oc-..." } */
+  apiKeys: Record<string, string>;
   toolsEnabled: string[];
 }
 
@@ -27,7 +29,7 @@ const BACKENDS = [
   { value: "ollama", label: "Ollama", defaultUrl: "http://localhost:11434" },
   { value: "llamacpp", label: "llama.cpp", defaultUrl: "http://localhost:8080" },
   { value: "openrouter", label: "OpenRouter", defaultUrl: "https://openrouter.ai/api/v1" },
-  { value: "opencode", label: "OpenCode Zen", defaultUrl: "http://localhost:11435" },
+  { value: "opencode", label: "OpenCode Zen", defaultUrl: "https://opencode.ai/zen/v1" },
 ];
 
 const WEB_SEARCH_PROVIDERS = [
@@ -48,7 +50,7 @@ export default function AISettings({ visible, onClose }: Props) {
     url: "http://localhost:11434",
     completionModel: "",
     chatModel: "",
-    apiKey: "",
+    apiKeys: {},
     toolsEnabled: [],
   });
   const [toolConfig, setToolConfig] = useState<ToolConfig>({});
@@ -61,21 +63,42 @@ export default function AISettings({ visible, onClose }: Props) {
     const toolConfigRaw = localStorage.getItem("nolock.toolConfig");
 
     // Set state synchronously from localStorage first (for immediate render)
+    const backend = localStorage.getItem("nolock.backend") || "ollama";
+    const apiKeys: Record<string, string> = {};
+    // Load per-backend API keys
+    for (const b of ["openrouter", "opencode"]) {
+      apiKeys[b] = localStorage.getItem(`nolock.apiKey.${b}`) || "";
+    }
+    // Migration: if old single key exists, copy to current backend if that slot is empty
+    if (!apiKeys[backend]) {
+      const oldKey = localStorage.getItem("nolock.apiKey") || "";
+      if (oldKey) apiKeys[backend] = oldKey;
+    }
+
     setConfig({
-      backend: localStorage.getItem("nolock.backend") || "ollama",
+      backend,
       url: localStorage.getItem("nolock.url") || "http://localhost:11434",
       completionModel: localStorage.getItem("nolock.completionModel") || oldModel || "",
       chatModel: localStorage.getItem("nolock.chatModel") || oldModel || "",
-      apiKey: localStorage.getItem("nolock.apiKey") || "",
+      apiKeys,
       toolsEnabled: toolsRaw ? JSON.parse(toolsRaw) : [],
     });
     setToolConfig(toolConfigRaw ? JSON.parse(toolConfigRaw) : {});
 
     // Then asynchronously upgrade from OS keychain if available
     (async () => {
-      const storedApiKey = await getSecret("apiKey");
-      if (storedApiKey != null) {
-        setConfig((prev) => ({ ...prev, apiKey: storedApiKey }));
+      const keychainUpdates: Record<string, string> = {};
+      for (const b of ["openrouter", "opencode"]) {
+        const storedKey = await getSecret(`apiKey.${b}`);
+        if (storedKey != null) {
+          keychainUpdates[b] = storedKey;
+        }
+      }
+      if (Object.keys(keychainUpdates).length > 0) {
+        setConfig((prev) => ({
+          ...prev,
+          apiKeys: { ...prev.apiKeys, ...keychainUpdates },
+        }));
       }
       const storedToolConfig = await getSecret("toolConfig");
       if (storedToolConfig != null) {
@@ -100,9 +123,11 @@ export default function AISettings({ visible, onClose }: Props) {
     localStorage.setItem("nolock.toolsEnabled", JSON.stringify(config.toolsEnabled));
     localStorage.setItem("nolock.model", config.completionModel);
 
-    // Store secrets in OS keychain + localStorage (dual-write)
+    // Store per-backend API keys in OS keychain + localStorage (dual-write)
     // Fire-and-forget: close modal immediately, keychain writes happen async
-    setSecret("apiKey", config.apiKey);
+    for (const [backend, key] of Object.entries(config.apiKeys)) {
+      setSecret(`apiKey.${backend}`, key);
+    }
     setSecret("toolConfig", JSON.stringify(toolConfig));
 
     onClose();
@@ -125,6 +150,7 @@ export default function AISettings({ visible, onClose }: Props) {
   };
 
   const supportsTools = config.backend === "ollama" || config.backend === "openrouter";
+  const needsApiKey = config.backend === "openrouter" || config.backend === "opencode";
 
   if (!visible) return null;
 
@@ -159,12 +185,14 @@ export default function AISettings({ visible, onClose }: Props) {
           />
 
           <div style={{ borderTop: "1px solid var(--border)", margin: "12px 0", paddingTop: "12px" }}>
-            <label className="field-label">Code Completion Model (FITM)</label>
-            <input
-              className="field-input"
+            <ModelSelector
+              provider={config.backend}
+              url={config.url}
+              apiKey={config.apiKeys[config.backend] || ""}
               value={config.completionModel}
-              onChange={(e) => setConfig({ ...config, completionModel: e.target.value })}
+              onChange={(v) => setConfig({ ...config, completionModel: v })}
               placeholder="e.g. qwen2.5-coder:1.5b"
+              label="Code Completion Model (FITM)"
             />
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
               Smaller/faster model for inline code suggestions. Uses Fill-In-The-Middle (prefix+suffix).
@@ -172,29 +200,36 @@ export default function AISettings({ visible, onClose }: Props) {
           </div>
 
           <div>
-            <label className="field-label">Chat Model</label>
-            <input
-              className="field-input"
+            <ModelSelector
+              provider={config.backend}
+              url={config.url}
+              apiKey={config.apiKeys[config.backend] || ""}
               value={config.chatModel}
-              onChange={(e) => setConfig({ ...config, chatModel: e.target.value })}
+              onChange={(v) => setConfig({ ...config, chatModel: v })}
               placeholder="e.g. qwen3:8b"
+              label="Chat Model"
             />
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
               Larger model for the Agent Chat panel. Uses multi-turn conversations.
             </span>
           </div>
 
-          {config.backend === "openrouter" && (
+          {needsApiKey && (
             <>
               <label className="field-label" htmlFor="ai-api-key">API Key</label>
               <input
                 id="ai-api-key"
                 className="field-input"
                 type="password"
-                value={config.apiKey}
-                onChange={(e) => setConfig({ ...config, apiKey: e.target.value })}
-                placeholder="sk-or-..."
+                value={config.apiKeys[config.backend] || ""}
+                onChange={(e) => setConfig({ ...config, apiKeys: { ...config.apiKeys, [config.backend]: e.target.value } })}
+                placeholder={config.backend === "openrouter" ? "sk-or-..." : "sk-oc-..."}
               />
+              <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                {config.backend === "openrouter"
+                  ? "Required for OpenRouter API."
+                  : "Required for the remote OpenCode Zen API. Leave blank for local servers."}
+              </span>
             </>
           )}
 
