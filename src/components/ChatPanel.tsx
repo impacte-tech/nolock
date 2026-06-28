@@ -793,8 +793,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         return;
       }
 
-      // Read API key from keychain (fallback: localStorage)
-      const apiKey = (await getSecret("apiKey")) ?? localStorage.getItem("nolock.apiKey") ?? "";
+      // Read per-backend API key from keychain (fallback: localStorage)
+      const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
 
       // Read enabled tools from localStorage
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";

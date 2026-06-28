@@ -1,12 +1,22 @@
 import { useState, useEffect } from "react";
+import ModelSelector from "./ModelSelector";
 
 interface Props {
   visible: boolean;
   onClose: () => void;
 }
 
+const BACKEND_DEFAULTS: Record<string, { url: string }> = {
+  ollama: { url: "http://localhost:11434" },
+  llamacpp: { url: "http://localhost:8080" },
+  openrouter: { url: "https://openrouter.ai/api/v1" },
+  opencode: { url: "https://opencode.ai/zen/v1" },
+};
+
 export default function ChatModelPanel({ visible, onClose }: Props) {
   const [chatModel, setChatModel] = useState("");
+  const [backend, setBackend] = useState("ollama");
+  const [apiKey, setApiKey] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(2048);
@@ -20,6 +30,9 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.7);
     const savedTokens = localStorage.getItem("nolock.chatMaxTokens");
     setMaxTokens(savedTokens ? parseInt(savedTokens, 10) : 2048);
+    setBackend(localStorage.getItem("nolock.backend") || "ollama");
+    const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
+    setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
   }, [visible]);
 
   const save = () => {
@@ -40,12 +53,14 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           <button onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
-          <label className="field-label">Chat Model</label>
-          <input
-            className="field-input"
+          <ModelSelector
+            provider={backend}
+            url={localStorage.getItem("nolock.url") || BACKEND_DEFAULTS[backend]?.url || "http://localhost:11434"}
+            apiKey={apiKey}
             value={chatModel}
-            onChange={(e) => setChatModel(e.target.value)}
+            onChange={setChatModel}
             placeholder="e.g. qwen3:8b"
+            label="Chat Model"
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
             Larger model for the Agent Chat panel. Uses multi-turn conversations.
