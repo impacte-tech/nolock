@@ -17,6 +17,7 @@ const AVAILABLE_TOOLS = [
   { id: "web_search", label: "Web Search", description: "Search the internet to discover relevant URLs before fetching them" },
   { id: "web_fetch", label: "Web Fetch", description: "Fetch and read web page content from a specific URL" },
   { id: "read_file", label: "Read File", description: "Read file contents from disk" },
+  { id: "write_file", label: "Write File", description: "Create and modify files on disk" },
   { id: "list_directory", label: "List Directory", description: "Explore project structure" },
 ];
 

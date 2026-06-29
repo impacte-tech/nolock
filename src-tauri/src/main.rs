@@ -1163,6 +1163,10 @@ struct ChatRequest {
     max_tokens: Option<u32>,
     #[serde(default)]
     system_prompt: Option<String>,
+    /// The root folder path currently open in the editor.
+    /// Used by file-system tools (e.g. write_file) to scope paths.
+    #[serde(default)]
+    root_path: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1188,7 +1192,7 @@ struct StreamPayload {
 // Tool definitions & execution
 // ---------------------------------------------------------------------------
 
-fn build_tool_schemas(enabled: &[String]) -> Vec<serde_json::Value> {
+fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
     if enabled.contains(&"web_fetch".to_string()) {
         tools.push(serde_json::json!({
@@ -1224,6 +1228,43 @@ fn build_tool_schemas(enabled: &[String]) -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["path"]
+                }
+            }
+        }));
+    }
+    if enabled.contains(&"write_file".to_string()) {
+        let write_desc = match root_path {
+            Some(rp) => format!(
+                "Write content to a file on disk. Creates parent directories if they don't exist. \
+                 Use this to create new files, modify existing files, or save generated code and text. \
+                 The open project folder is: {}. All file paths must be within this folder. \
+                 You may use paths relative to this folder (e.g. 'src/main.ts' resolves to '{}/src/main.ts').",
+                rp, rp
+            ),
+            None => format!(
+                "Write content to a file on disk. Creates parent directories if they don't exist. \
+                 Use this to create new files, modify existing files, or save generated code and text. \
+                 NOTE: No folder is currently open in the editor."
+            ),
+        };
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": write_desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path, either absolute or relative to the open project folder"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content to write to the file"
+                        }
+                    },
+                    "required": ["path", "content"]
                 }
             }
         }));
@@ -1274,6 +1315,7 @@ async fn execute_tool(
     args: &serde_json::Value,
     client: &reqwest::Client,
     tool_configs: &HashMap<String, serde_json::Value>,
+    root_path: Option<&str>,
 ) -> Result<String, String> {
     match name {
         "web_fetch" => {
@@ -1495,6 +1537,67 @@ async fn execute_tool(
                 }
             }
         }
+        "write_file" => {
+            let path_str = args["path"]
+                .as_str()
+                .ok_or("Missing required parameter: path")?;
+            let content = args["content"]
+                .as_str()
+                .ok_or("Missing required parameter: content")?;
+            eprintln!("[nolock] tool write_file path={} ({} bytes)", path_str, content.len());
+
+            // Require a root folder to be open in the editor
+            let root = root_path.ok_or(
+                "No folder is open in the editor. Please open a folder before using write_file."
+            )?;
+            let root_path_obj = std::path::Path::new(root);
+
+            // Resolve the file path: if relative, join it with the root folder
+            let path_obj = std::path::Path::new(path_str);
+            let resolved = if path_obj.is_relative() {
+                root_path_obj.join(path_str)
+            } else {
+                path_obj.to_path_buf()
+            };
+
+            // Canonicalize root path to prevent directory traversal attacks
+            let root_canonical = root_path_obj
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve root path '{}': {}", root, e))?;
+
+            // Validate that the resolved file path is within the root folder.
+            // Since the file (or its parent dirs) may not exist yet, we walk up
+            // the directory tree until we find an existing ancestor to canonicalize.
+            let mut check_path = &resolved as &std::path::Path;
+            let target_canonical = loop {
+                if check_path.exists() {
+                    break check_path.canonicalize()
+                        .map_err(|e| format!("Failed to resolve path '{}': {}", check_path.display(), e))?;
+                }
+                match check_path.parent() {
+                    Some(parent) => check_path = parent,
+                    None => return Err("File path has no existing ancestor directory to validate against the open folder".to_string()),
+                }
+            };
+
+            if !target_canonical.starts_with(&root_canonical) {
+                return Err(format!(
+                    "Cannot write file outside the open folder. Path '{}' is not under '{}'.",
+                    resolved.display(),
+                    root
+                ));
+            }
+
+            // Create parent directories if they don't exist
+            if let Some(parent) = resolved.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create parent directories for {}: {}", resolved.display(), e))?;
+            }
+            let resolved_str = resolved.to_string_lossy().to_string();
+            std::fs::write(&resolved, content)
+                .map_err(|e| format!("Failed to write {}: {}", resolved.display(), e))?;
+            Ok(format!("Successfully wrote {} bytes to {}", content.len(), resolved_str))
+        }
         _ => Err(format!("Unknown tool: {}", name)),
     }
 }
@@ -1617,6 +1720,7 @@ struct OllamaChatContext<'a> {
     url: &'a str,
     model: &'a str,
     tool_configs: &'a HashMap<String, serde_json::Value>,
+    root_path: Option<&'a str>,
 }
 
 async fn ollama_chat_with_tools(
@@ -1690,7 +1794,7 @@ async fn ollama_chat_with_tools(
                 let name = call["function"]["name"].as_str().unwrap_or("unknown");
                 let args = &call["function"]["arguments"];
 
-                let result = execute_tool(name, args, ctx.client, ctx.tool_configs)
+                let result = execute_tool(name, args, ctx.client, ctx.tool_configs, ctx.root_path)
                     .await
                     .unwrap_or_else(|e| format!("Tool error: {}", e));
 
@@ -2074,7 +2178,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     };
 
     let client = reqwest::Client::new();
-    let tools = build_tool_schemas(&req.tools_enabled);
+    let tools = build_tool_schemas(&req.tools_enabled, req.root_path.as_deref());
     let has_tools = !tools.is_empty();
 
     match req.backend.as_str() {
@@ -2086,6 +2190,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     url: &req.url,
                     model: &req.model,
                     tool_configs: &req.tool_configs,
+                    root_path: req.root_path.as_deref(),
                 };
                 ollama_chat_with_tools(&ollama_ctx, &messages, &tools, 10, temperature, max_tokens)
                     .await
@@ -2590,13 +2695,13 @@ mod tests {
     // ---- build_tool_schemas ----------------------------------------------
     #[test]
     fn test_build_tool_schemas_empty() {
-        let schemas = build_tool_schemas(&[]);
+        let schemas = build_tool_schemas(&[], None);
         assert!(schemas.is_empty());
     }
 
     #[test]
     fn test_build_tool_schemas_single() {
-        let schemas = build_tool_schemas(&["web_fetch".into()]);
+        let schemas = build_tool_schemas(&["web_fetch".into()], None);
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0]["function"]["name"], "web_fetch");
         assert!(schemas[0]["function"]["parameters"]["properties"]["url"].is_object());
@@ -2607,10 +2712,11 @@ mod tests {
         let schemas = build_tool_schemas(&[
             "web_fetch".into(),
             "read_file".into(),
+            "write_file".into(),
             "list_directory".into(),
             "web_search".into(),
-        ]);
-        assert_eq!(schemas.len(), 4);
+        ], None);
+        assert_eq!(schemas.len(), 5);
 
         let names: Vec<&str> = schemas
             .iter()
@@ -2618,13 +2724,14 @@ mod tests {
             .collect();
         assert!(names.contains(&"web_fetch"));
         assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
         assert!(names.contains(&"list_directory"));
         assert!(names.contains(&"web_search"));
     }
 
     #[test]
     fn test_web_search_schema_has_required_query() {
-        let schemas = build_tool_schemas(&["web_search".into()]);
+        let schemas = build_tool_schemas(&["web_search".into()], None);
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0]["function"]["name"], "web_search");
         let required = schemas[0]["function"]["parameters"]["required"]
@@ -2635,17 +2742,30 @@ mod tests {
 
     #[test]
     fn test_build_tool_schemas_unknown_tool_ignored() {
-        let schemas = build_tool_schemas(&["nonexistent_tool".into()]);
+        let schemas = build_tool_schemas(&["nonexistent_tool".into()], None);
         assert!(schemas.is_empty());
     }
 
     #[test]
     fn test_tool_schema_has_required_url() {
-        let schemas = build_tool_schemas(&["web_fetch".into()]);
+        let schemas = build_tool_schemas(&["web_fetch".into()], None);
         let required = schemas[0]["function"]["parameters"]["required"]
             .as_array()
             .unwrap();
         assert!(required.iter().any(|v| v == "url"));
+    }
+
+    #[test]
+    fn test_write_file_schema_has_required_path_and_content() {
+        let schemas = build_tool_schemas(&["write_file".into()], None);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "write_file");
+        let required = schemas[0]["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|v| v == "path"));
+        assert!(required.iter().any(|v| v == "content"));
+        assert_eq!(required.len(), 2);
     }
 
     // ---- execute_tool error paths (without network / fs) -----------------
@@ -2653,7 +2773,7 @@ mod tests {
     async fn test_execute_tool_unknown_name() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("unknown_tool", &args, &client, &HashMap::new()).await;
+        let result = execute_tool("unknown_tool", &args, &client, &HashMap::new(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown tool"));
     }
@@ -2662,7 +2782,7 @@ mod tests {
     async fn test_execute_tool_web_fetch_missing_url() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("web_fetch", &args, &client, &HashMap::new()).await;
+        let result = execute_tool("web_fetch", &args, &client, &HashMap::new(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
@@ -2671,7 +2791,7 @@ mod tests {
     async fn test_execute_tool_read_file_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_file_xyzzy_123.test" });
-        let result = execute_tool("read_file", &args, &client, &HashMap::new()).await;
+        let result = execute_tool("read_file", &args, &client, &HashMap::new(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read"));
     }
@@ -2680,9 +2800,37 @@ mod tests {
     async fn test_execute_tool_list_directory_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_dir_xyzzy_123" });
-        let result = execute_tool("list_directory", &args, &client, &HashMap::new()).await;
+        let result = execute_tool("list_directory", &args, &client, &HashMap::new(), None).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read dir"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_requires_root_path() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "path": "/tmp/test.txt", "content": "hello" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No folder is open"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_rejects_path_outside_root() {
+        let client = reqwest::Client::new();
+        let tmp_root = std::env::temp_dir().join("nolock_test_write_root");
+        let _ = std::fs::create_dir_all(&tmp_root);
+        let root_str = tmp_root.to_string_lossy().to_string();
+
+        // Try to write outside the root
+        let outside_path = std::env::temp_dir().join("outside_test.txt");
+        let outside_str = outside_path.to_string_lossy().to_string();
+        let args = serde_json::json!({ "path": outside_str, "content": "should fail" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some(&root_str)).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside the open folder"));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp_root);
     }
 
     // ---- read_file / write_file with temp dirs ---------------------------
@@ -2712,6 +2860,135 @@ mod tests {
         let result = read_file("/tmp/definitely_not_a_real_file_nolock.test".into());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_success_within_root() {
+        let root = std::env::temp_dir().join("nolock_test_execute_write_root");
+        let dir = root.join("subdir");
+        let path = dir.join("test_write.txt");
+        let path_str = path.to_string_lossy().to_string();
+        let root_str = root.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&root);
+        // Create the root directory so canonicalization works
+        std::fs::create_dir_all(&root).expect("create root dir");
+
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "path": path_str, "content": "written by tool" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some(&root_str)).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("Successfully wrote"));
+
+        // Verify content was written correctly
+        let content = std::fs::read_to_string(&path).expect("file should exist");
+        assert_eq!(content, "written by tool");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_write_file_schema_with_root_path_includes_it_in_description() {
+        let schemas = build_tool_schemas(&["write_file".into()], Some("/my/project"));
+        assert_eq!(schemas.len(), 1);
+        let desc = schemas[0]["function"]["description"].as_str().unwrap();
+        assert!(desc.contains("/my/project"), "description should include the root path");
+        assert!(desc.contains("open project folder"), "description should mention the open folder");
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_relative_path() {
+        let root = std::env::temp_dir().join("nolock_test_relative_write");
+        let path = root.join("relative_output.txt");
+        let root_str = root.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create root dir");
+
+        let client = reqwest::Client::new();
+        // Use a relative path — should be resolved against root
+        let args = serde_json::json!({ "path": "relative_output.txt", "content": "relative path test" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some(&root_str)).await;
+        assert!(result.is_ok(), "relative path should succeed: {:?}", result);
+        assert!(result.unwrap().contains("Successfully wrote"));
+
+        // Verify content was written to the correct location within root
+        let content = std::fs::read_to_string(&path).expect("file should exist at resolved path");
+        assert_eq!(content, "relative path test");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_missing_path() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "content": "hello" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some("/tmp")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter: path"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_missing_content() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "path": "/tmp/test.txt" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some("/tmp")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter: content"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_rejects_relative_path_traversal() {
+        let root = std::env::temp_dir().join("nolock_test_traversal_root");
+        let root_str = root.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create root dir");
+
+        let client = reqwest::Client::new();
+        // Relative path with ../ tries to escape the root
+        let args = serde_json::json!({ "path": "../outside.txt", "content": "should fail" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some(&root_str)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("outside the open folder"),
+            "expected 'outside the open folder' error, got: {}",
+            err
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_root_path_does_not_exist() {
+        let root = std::env::temp_dir().join("nolock_test_nonexistent_root_xyzzy");
+        let root_str = root.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&root);
+        // NOTE: root is NOT created, so canonicalization will fail
+
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "path": "test.txt", "content": "should fail" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some(&root_str)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to resolve root path"),
+            "expected 'Failed to resolve root path' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_write_file_schema_description_when_no_root() {
+        let schemas = build_tool_schemas(&["write_file".into()], None);
+        assert_eq!(schemas.len(), 1);
+        let desc = schemas[0]["function"]["description"].as_str().unwrap();
+        assert!(
+            desc.contains("No folder is currently open"),
+            "description should mention no folder is open when root_path is None, got: {}",
+            desc
+        );
     }
 
     // ---- tool_call_id fix: reproducing the bug and confirming the fix ----
