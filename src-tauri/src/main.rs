@@ -2919,6 +2919,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[tokio::test]
+    async fn test_execute_tool_write_file_missing_path() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "content": "hello" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some("/tmp")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter: path"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_missing_content() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "path": "/tmp/test.txt" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some("/tmp")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter: content"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_rejects_relative_path_traversal() {
+        let root = std::env::temp_dir().join("nolock_test_traversal_root");
+        let root_str = root.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create root dir");
+
+        let client = reqwest::Client::new();
+        // Relative path with ../ tries to escape the root
+        let args = serde_json::json!({ "path": "../outside.txt", "content": "should fail" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some(&root_str)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("outside the open folder"),
+            "expected 'outside the open folder' error, got: {}",
+            err
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_write_file_root_path_does_not_exist() {
+        let root = std::env::temp_dir().join("nolock_test_nonexistent_root_xyzzy");
+        let root_str = root.to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&root);
+        // NOTE: root is NOT created, so canonicalization will fail
+
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "path": "test.txt", "content": "should fail" });
+        let result = execute_tool("write_file", &args, &client, &HashMap::new(), Some(&root_str)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to resolve root path"),
+            "expected 'Failed to resolve root path' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_write_file_schema_description_when_no_root() {
+        let schemas = build_tool_schemas(&["write_file".into()], None);
+        assert_eq!(schemas.len(), 1);
+        let desc = schemas[0]["function"]["description"].as_str().unwrap();
+        assert!(
+            desc.contains("No folder is currently open"),
+            "description should mention no folder is open when root_path is None, got: {}",
+            desc
+        );
+    }
+
     // ---- tool_call_id fix: reproducing the bug and confirming the fix ----
     //
     // The Ollama tool-calling API expects tool result messages to include
