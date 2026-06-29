@@ -836,6 +836,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
         maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
         systemPrompt: chatSystemPrompt || undefined,
+        rootPath: rootPath || undefined,
       };
 
       if (dpoTriggered) {
