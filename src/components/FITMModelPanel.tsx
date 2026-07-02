@@ -18,7 +18,7 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
   const [backend, setBackend] = useState("ollama");
   const [apiKey, setApiKey] = useState("");
   const [systemPrompt, setSystemPrompt] = useState(
-    "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+    "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
   );
   const [temperature, setTemperature] = useState(0.2);
   const [maxTokens, setMaxTokens] = useState(64);
@@ -29,7 +29,7 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
     setCompletionModel(localStorage.getItem("nolock.completionModel") || oldModel || "");
     setSystemPrompt(
       localStorage.getItem("nolock.fitmSystemPrompt") ||
-      "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+      "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
     );
     const savedTemp = localStorage.getItem("nolock.fitmTemperature");
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.2);
