@@ -1894,7 +1894,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     let temperature = req.temperature.unwrap_or(0.2);
     let max_tokens = req.max_tokens.unwrap_or(64);
     let system_prompt = req.system_prompt.as_deref().unwrap_or(
-        "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+        "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
     );
 
     let client = reqwest::Client::new();
@@ -3533,7 +3533,7 @@ mod tests {
         let with_suffix = req.suffix.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
         let mut b = serde_json::json!({
             "model": req.model,
-            "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+            "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
             "prompt": req.prompt,
             "stream": false,
             "options": {
@@ -3552,7 +3552,7 @@ mod tests {
 
         assert_eq!(b["model"], "qwen2.5-coder:1.5b");
         assert!(b["system"].as_str().unwrap().contains("code completion engine"));
-        assert!(b["system"].as_str().unwrap().contains("Output ONLY valid code"));
+        assert!(b["system"].as_str().unwrap().contains("Output ONLY"));
         assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("\n\n")));
         assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("Here is")));
         assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("Explanation")));
@@ -3580,7 +3580,7 @@ mod tests {
             "temperature": 0.2,
             "stream": false,
             "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
-            "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else."
+            "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code."
         });
         if let Some(ref suffix) = req.suffix {
             if !suffix.is_empty() {
@@ -3622,7 +3622,7 @@ mod tests {
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text."
+                    "content": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code."
                 },
                 { "role": "user", "content": user_content }
             ],
@@ -3669,7 +3669,7 @@ mod tests {
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text."
+                    "content": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code."
                 },
                 { "role": "user", "content": user_content }
             ],
@@ -3702,7 +3702,7 @@ mod tests {
 
         let body = serde_json::json!({
             "model": req.model,
-            "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+            "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
             "prompt": req.prompt,
             "stream": false,
             "options": {
@@ -3756,7 +3756,7 @@ mod tests {
 
         let body = serde_json::json!({
             "model": req.model,
-            "system": "You are a code completion engine. Output ONLY valid code. No explanations, no markdown formatting, no conversational text. Complete the code at the cursor position and nothing else.",
+            "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
             "prompt": req.prompt,
             "stream": false,
             "options": {
