@@ -219,6 +219,7 @@ html, body, #root {
   display: flex;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* ===== File Explorer ===== */
@@ -554,6 +555,7 @@ html, body, #root {
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border);
   min-height: 28px;
+  flex-shrink: 0;
 }
 
 .terminal-tabs {
@@ -577,6 +579,7 @@ html, body, #root {
   height: 100%;
   border-right: 1px solid var(--border);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .terminal-tab:hover {
@@ -1663,6 +1666,8 @@ html, body, #root {
   font-size: 11px;
   color: var(--text-muted);
   flex-shrink: 0;
+  position: relative;
+  z-index: 10;
 }
 
 .statusbar-left,
