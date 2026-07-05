@@ -31,6 +31,7 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  overflow: hidden;
 }
 
 /* ===== Titlebar / Menu Bar (merged) ===== */
@@ -1661,6 +1662,7 @@ html, body, #root {
   padding: 0 10px;
   font-size: 11px;
   color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .statusbar-left,
