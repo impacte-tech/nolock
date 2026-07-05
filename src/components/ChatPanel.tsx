@@ -83,11 +83,31 @@ export function MarkdownContent({ text }: { text: string }) {
   );
 }
 
+const PROVIDER_META: Record<string, { label: string; url: string }> = {
+  duckduckgo: { label: "DuckDuckGo", url: "https://duckduckgo.com" },
+  brave: { label: "Brave Search", url: "https://brave.com/search/" },
+};
+
 export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
   const [expanded, setExpanded] = useState(false);
 
-  // Check if any call is web_search to show attribution
   const hasWebSearch = calls.some((c) => c.name === "web_search");
+
+  let providerLabel = "DuckDuckGo";
+  let providerUrl = "https://duckduckgo.com";
+  if (hasWebSearch) {
+    try {
+      const raw = localStorage.getItem("nolock.toolConfig");
+      if (raw) {
+        const config = JSON.parse(raw);
+        const provider = config?.web_search?.provider;
+        if (provider && PROVIDER_META[provider]) {
+          providerLabel = PROVIDER_META[provider].label;
+          providerUrl = PROVIDER_META[provider].url;
+        }
+      }
+    } catch {}
+  }
 
   return (
     <div className="tool-calls">
@@ -116,12 +136,12 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
       {hasWebSearch && (
         <div className="tool-attribution">
           <a
-            href="https://duckduckgo.com"
+            href={providerUrl}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
           >
-            Results from DuckDuckGo
+            Results from {providerLabel}
           </a>
         </div>
       )}
@@ -800,9 +820,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
 
-      // Read per-tool configuration from keychain (fallback: localStorage)
-      const toolConfigStored = await getSecret("toolConfig");
-      const toolConfigRaw = toolConfigStored ?? localStorage.getItem("nolock.toolConfig") ?? "{}";
+      // Read per-tool configuration from localStorage (always the most current,
+      // written synchronously by setSecret; keychain may hold stale data).
+      const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
       const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
 
       // Read chat model parameters from localStorage

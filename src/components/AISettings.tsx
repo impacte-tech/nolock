@@ -101,10 +101,9 @@ export default function AISettings({ visible, onClose }: Props) {
           apiKeys: { ...prev.apiKeys, ...keychainUpdates },
         }));
       }
-      const storedToolConfig = await getSecret("toolConfig");
-      if (storedToolConfig != null) {
-        setToolConfig(JSON.parse(storedToolConfig));
-      }
+      // toolConfig is read from localStorage above (line 64); it is always the
+      // most current copy because setSecret writes to localStorage synchronously.
+      // Do NOT overwrite with (potentially stale) keychain data here.
     })();
   }, [visible]);
 

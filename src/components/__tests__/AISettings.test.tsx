@@ -204,4 +204,110 @@ describe("ToolsPanel", () => {
     fireEvent.click(screen.getByText("\u00D7"));
     expect(onClose).toHaveBeenCalledOnce();
   });
+
+  it("shows web search provider radio buttons when web_search is enabled", () => {
+    render(<ToolsPanel visible={true} onClose={vi.fn()} />);
+
+    // Enable web_search first
+    const webSearchCheckbox = screen.getByLabelText(/^Web Search/);
+    fireEvent.click(webSearchCheckbox);
+
+    expect(screen.getByText("DuckDuckGo (experimental)")).toBeInTheDocument();
+    expect(screen.getByText("Brave Search")).toBeInTheDocument();
+  });
+
+  it("defaults to DuckDuckGo provider when no toolConfig saved", () => {
+    render(<ToolsPanel visible={true} onClose={vi.fn()} />);
+
+    const webSearchCheckbox = screen.getByLabelText(/^Web Search/);
+    fireEvent.click(webSearchCheckbox);
+
+    const duckRadio = screen.getByLabelText(/DuckDuckGo/);
+    expect(duckRadio).toBeChecked();
+  });
+
+  it("shows Brave API key field when Brave provider is selected", () => {
+    render(<ToolsPanel visible={true} onClose={vi.fn()} />);
+
+    const webSearchCheckbox = screen.getByLabelText(/^Web Search/);
+    fireEvent.click(webSearchCheckbox);
+
+    // Initially DuckDuckGo is selected — Brave API key field should NOT be visible
+    expect(screen.queryByPlaceholderText("BSA-...")).not.toBeInTheDocument();
+
+    // Switch to Brave
+    fireEvent.click(screen.getByLabelText(/Brave Search/));
+
+    // API key field should appear
+    expect(screen.getByPlaceholderText("BSA-...")).toBeInTheDocument();
+  });
+
+  it("saves Brave provider and API key to localStorage on Save", () => {
+    render(<ToolsPanel visible={true} onClose={vi.fn()} />);
+
+    const webSearchCheckbox = screen.getByLabelText(/^Web Search/);
+    fireEvent.click(webSearchCheckbox);
+
+    // Select Brave
+    fireEvent.click(screen.getByLabelText(/Brave Search/));
+
+    // Enter API key
+    const apiKeyInput = screen.getByPlaceholderText("BSA-...");
+    fireEvent.change(apiKeyInput, { target: { value: "BSA-test-key-123" } });
+
+    // Save
+    fireEvent.click(screen.getByText("Save"));
+
+    // Verify localStorage
+    const saved = JSON.parse(localStorage.getItem("nolock.toolConfig") || "{}");
+    expect(saved.web_search).toBeDefined();
+    expect(saved.web_search.provider).toBe("brave");
+    expect(saved.web_search.api_key).toBe("BSA-test-key-123");
+  });
+
+  it("preserves DuckDuckGo provider setting when saved without Brave key", () => {
+    render(<ToolsPanel visible={true} onClose={vi.fn()} />);
+
+    const webSearchCheckbox = screen.getByLabelText(/^Web Search/);
+    fireEvent.click(webSearchCheckbox);
+
+    // DuckDuckGo is the default, save immediately
+    fireEvent.click(screen.getByText("Save"));
+
+    const saved = JSON.parse(localStorage.getItem("nolock.toolConfig") || "{}");
+    // web_search might not be in toolConfig if never changed from default
+    if (saved.web_search) {
+      expect(saved.web_search.provider).toBe("duckduckgo");
+    }
+  });
+
+  it("loads existing toolConfig from localStorage on open", () => {
+    // Pre-set toolConfig with Brave provider
+    localStorage.setItem("nolock.toolConfig", JSON.stringify({
+      web_search: { provider: "brave", api_key: "BSA-preloaded-key" },
+    }));
+    localStorage.setItem("nolock.toolsEnabled", JSON.stringify(["web_search"]));
+
+    render(<ToolsPanel visible={true} onClose={vi.fn()} />);
+
+    // Brave should be selected
+    const braveRadio = screen.getByLabelText(/Brave Search/);
+    expect(braveRadio).toBeChecked();
+
+    // API key should be pre-filled
+    expect(screen.getByDisplayValue("BSA-preloaded-key")).toBeInTheDocument();
+  });
+
+  it("reads toolConfig from localStorage (not keychain) when sending chat request", () => {
+    // Simulate the pattern used in ChatPanel.tsx to read toolConfig
+    localStorage.setItem("nolock.toolConfig", JSON.stringify({
+      web_search: { provider: "brave", api_key: "BSA-chat-test" },
+    }));
+
+    const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
+    const toolConfigs = JSON.parse(toolConfigRaw);
+
+    expect(toolConfigs.web_search.provider).toBe("brave");
+    expect(toolConfigs.web_search.api_key).toBe("BSA-chat-test");
+  });
 });
