@@ -55,12 +55,19 @@ export default function StatusBar({ showChat, onToggleChat }: Props) {
         </span>
         {backend?.completionModel && (
           <span className="status-item">
-            ➡ {backend.completionModel}
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="16 18 22 12 16 6" />
+              <polyline points="8 6 2 12 8 18" />
+            </svg>
+            {backend.completionModel}
           </span>
         )}
         {backend?.chatModel && (
           <span className="status-item">
-            💬 {backend.chatModel}
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+            </svg>
+            {backend.chatModel}
           </span>
         )}
       </div>
