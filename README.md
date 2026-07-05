@@ -63,7 +63,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 | **Ollama** | A local server for running large language models on your own machine with a simple REST API. | Supports both inline code completions (via `/api/generate` with Fill-In-The-Middle) and multi-turn chat (via `/api/chat`) with tool calling. |
 | **llama.cpp** | A C/C++ implementation of LLM inference optimized for consumer hardware. | Supports code completions via its `/completion` endpoint with Fill-In-The-Middle support. |
 | **OpenRouter** | A unified API gateway that provides access to dozens of AI models from multiple providers. | Supports chat completions and tool calling through the OpenAI-compatible `/chat/completions` endpoint. |
-| **OpenCode Zen** | An open-source AI coding backend. | Supports code completions and chat via its `/api/generate` endpoint. |
+| **OpenCode Zen** | An AI inference service with some models offering a generous free tier. | Supports code completions and chat via its `/api/generate` endpoint. |
 
 ### Search & Data
 
@@ -197,7 +197,7 @@ Every AI chat response will then show thumbs-up and thumbs-down buttons. If DPO 
 
 nolock would not exist without the following open-source projects and communities:
 
-- **[OpenCode Zen](https://opencode.ai)** — For providing an open AI coding backend and inspiring the vision of local-first AI development tools. This project was built primarily using the **Big Pickle** model (`opencode/big-pickle`) — a generous, free-tier AI provider that made autonomous development workflows possible without any API costs.
+- **[OpenCode Zen](https://opencode.ai)** — For providing an AI inference service with a generous free tier that made autonomous development workflows possible without any API costs. This project was built primarily using the **Big Pickle** model (`opencode/big-pickle`).
 
   > **Cost Tracker:** This project has incurred **$0.00 USD** in AI API costs to date. All development was powered entirely by OpenCode Zen's free Big Pickle model.
 - **[OpenRouter](https://openrouter.ai)** — For building a unified API that makes dozens of AI models accessible from a single endpoint.
