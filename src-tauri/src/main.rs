@@ -1451,7 +1451,7 @@ async fn execute_tool(
                         }
                         output.push_str(&format!("{}. {}\n", i + 1, r));
                     }
-                    Ok(format!("{}\n\n[Search powered by Brave Search]", output.trim()))
+                    Ok(format!("{}\n\n[Results from Brave Search]", output.trim()))
                 }
                 _ => {
                     // Default: DuckDuckGo Instant Answer API (free, no API key, privacy-respecting)
@@ -2989,6 +2989,85 @@ mod tests {
             "description should mention no folder is open when root_path is None, got: {}",
             desc
         );
+    }
+
+    // ---- web_search provider dispatch ------------------------------------
+    #[tokio::test]
+    async fn test_execute_tool_web_search_brave_with_empty_key_returns_hint() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "query": "test query" });
+        let tool_configs = HashMap::from([
+            (
+                "web_search".to_string(),
+                serde_json::json!({
+                    "provider": "brave",
+                    "api_key": "",
+                }),
+            ),
+        ]);
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None)
+            .await
+            .unwrap();
+        assert!(
+            result.contains("Brave Search requires an API key"),
+            "expected key hint for empty API key, got: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_web_search_defaults_to_duckduckgo_when_no_config() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "query": "test query" });
+        let tool_configs = HashMap::new();
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None).await;
+        // Without tool_configs it defaults to DuckDuckGo. The request will fail
+        // because the DuckDuckGo API is reachable but may return no results for
+        // "test query" — either way we get a non-error string (not a tool error).
+        assert!(result.is_ok(), "expected Ok even with default config, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            !output.contains("[Results from Brave Search]"),
+            "expected DuckDuckGo output, got Brave: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_web_search_respects_brave_provider() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({ "query": "Rust programming language" });
+        // Use a real-ish API key shape — still empty to avoid an HTTP call,
+        // but the provider check should route to the "brave" branch.
+        let tool_configs = HashMap::from([
+            (
+                "web_search".to_string(),
+                serde_json::json!({
+                    "provider": "brave",
+                    "api_key": "BSA-test-key",
+                }),
+            ),
+        ]);
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None).await;
+        // With a real-looking key the code attempts an HTTP call, which will
+        // fail (invalid key) but the error message should come from the Brave
+        // Search API path, NOT from DuckDuckGo.
+        match &result {
+            Ok(msg) => {
+                assert!(
+                    msg.contains("Brave Search"),
+                    "expected Brave Search response, got: {}",
+                    msg
+                );
+            }
+            Err(e) => {
+                assert!(
+                    e.contains("Brave Search"),
+                    "expected Brave Search error, got: {}",
+                    e
+                );
+            }
+        }
     }
 
     // ---- tool_call_id fix: reproducing the bug and confirming the fix ----
