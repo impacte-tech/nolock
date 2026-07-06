@@ -178,8 +178,19 @@ export default function App() {
   };
 
   // --- Folder ---
-  const [rootPath, setRootPath] = useState<string>("");
+  const [rootPath, setRootPath] = useState<string>(() => {
+    return localStorage.getItem("nolock.lastRootPath") || "";
+  });
   const [refreshKey, setRefreshKey] = useState(0);
+
+  // Persist last opened folder across restarts
+  useEffect(() => {
+    if (rootPath) {
+      localStorage.setItem("nolock.lastRootPath", rootPath);
+    } else {
+      localStorage.removeItem("nolock.lastRootPath");
+    }
+  }, [rootPath]);
 
   // --- Terminals ---
   const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
