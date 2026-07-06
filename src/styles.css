@@ -614,6 +614,7 @@ html, body, #root {
 .chat-panel {
   width: 360px;
   min-width: 200px;
+  height: 100%;
   background: var(--bg-secondary);
   display: flex;
   flex-direction: column;

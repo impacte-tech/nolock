@@ -857,6 +857,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
         systemPrompt: chatSystemPrompt || undefined,
         rootPath: rootPath || undefined,
+        maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
       };
 
       if (dpoTriggered) {

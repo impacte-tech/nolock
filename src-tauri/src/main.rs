@@ -1167,6 +1167,13 @@ struct ChatRequest {
     /// Used by file-system tools (e.g. write_file) to scope paths.
     #[serde(default)]
     root_path: Option<String>,
+    /// Maximum number of tool call iterations before the agent stops.
+    #[serde(default = "default_max_iterations")]
+    max_iterations: usize,
+}
+
+fn default_max_iterations() -> usize {
+    10
 }
 
 #[derive(serde::Serialize)]
@@ -2192,7 +2199,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     tool_configs: &req.tool_configs,
                     root_path: req.root_path.as_deref(),
                 };
-                ollama_chat_with_tools(&ollama_ctx, &messages, &tools, 10, temperature, max_tokens)
+                ollama_chat_with_tools(&ollama_ctx, &messages, &tools, req.max_iterations, temperature, max_tokens)
                     .await
             } else {
                 // No tools — simple single-turn chat (streaming)
