@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Marked } from "marked";
 import FileAutocomplete, { type AgentRef } from "./FileAutocomplete";
 import SkillAutocomplete from "./SkillAutocomplete";
+import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
 import {
@@ -36,7 +37,7 @@ interface Message {
   displayContent?: string;
   toolCalls?: ToolCallLog[];
   /** File, agent, and skill mentions referenced in this message (for context badges). */
-  contextRefs?: { type: "file" | "agent" | "skill"; name: string }[];
+  contextRefs?: { type: "file" | "agent" | "skill" | "tool"; name: string }[];
   /** RLHF feedback: "good" (thumbs up), "bad" (thumbs down), or undefined (not rated). */
   feedback?: FeedbackType;
   /** User's correction text for a "bad" rating. */
@@ -57,6 +58,11 @@ export interface FileRef {
 }
 
 export interface SkillRef {
+  name: string;
+  path: string;
+}
+
+export interface ToolRef {
   name: string;
   path: string;
 }
@@ -319,9 +325,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [fileRefs, setFileRefs] = useState<FileRef[]>([]);
   const [agentRefs, setAgentRefs] = useState<AgentRef[]>([]);
   const [skillRefs, setSkillRefs] = useState<SkillRef[]>([]);
+  const [toolRefs, setToolRefs] = useState<ToolRef[]>([]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState<number>(-1);
-  const [mentionType, setMentionType] = useState<"file" | "skill" | null>(null);
+  const [mentionType, setMentionType] = useState<"file" | "skill" | "tool" | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   /** Tracks total context tokens sent across the conversation (persists after fileRefs are cleared). */
@@ -376,6 +383,22 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       }
     }
 
+    // Check # mention (custom tools) — trigger on # preceded by whitespace or at start,
+    // followed by non-whitespace.
+    const hashIdx = textBefore.lastIndexOf("#");
+    if (hashIdx !== -1) {
+      const beforeHash = hashIdx === 0 ? " " : textBefore[hashIdx - 1];
+      if (/\s/.test(beforeHash)) {
+        const afterHash = textBefore.substring(hashIdx + 1);
+        if (!/\s/.test(afterHash)) {
+          setMentionQuery(afterHash);
+          setMentionIndex(hashIdx);
+          setMentionType("tool");
+          return;
+        }
+      }
+    }
+
     // No active mention
     setMentionQuery(null);
     setMentionIndex(-1);
@@ -424,6 +447,23 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     textareaRef.current?.focus();
   }, [input, mentionIndex, mentionQuery]);
 
+  /** Called when user selects a tool from the # autocomplete dropdown. */
+  const handleToolSelect = useCallback((toolPath: string, toolName: string) => {
+    if (mentionIndex !== -1 && mentionQuery !== null) {
+      const before = input.substring(0, mentionIndex);
+      const after = input.substring(mentionIndex + 1 + mentionQuery.length);
+      setInput(before + "#" + toolName + after);
+    }
+
+    setToolRefs((prev) => (prev.some((r) => r.path === toolPath) ? prev : [...prev, { path: toolPath, name: toolName }]));
+
+    setMentionQuery(null);
+    setMentionIndex(-1);
+    setMentionType(null);
+
+    textareaRef.current?.focus();
+  }, [input, mentionIndex, mentionQuery]);
+
   /** Called when user selects a skill from the / autocomplete dropdown. */
   const handleSkillSelect = useCallback((skillPath: string, skillName: string) => {
     // Keep the /name visible in the input (replace the partial query with the full /name)
@@ -455,6 +495,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   const removeSkillRef = useCallback((path: string) => {
     setSkillRefs((prev) => prev.filter((r) => r.path !== path));
+  }, []);
+
+  const removeToolRef = useCallback((path: string) => {
+    setToolRefs((prev) => prev.filter((r) => r.path !== path));
   }, []);
 
   useEffect(() => {
@@ -517,12 +561,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const contextSize = accumulatedContextTokens
     + fileRefs.reduce((sum, ref) => sum + (ref._tokenCount || 0), 0)
     + agentRefs.length * 50 // rough estimate for agent system prompt tokens
-    + skillRefs.length * 100; // rough estimate for skill content tokens
+    + skillRefs.length * 100 // rough estimate for skill content tokens
+    + toolRefs.length * 30; // rough estimate for tool directive tokens
 
   const clearAllRefs = useCallback(() => {
     setFileRefs([]);
     setAgentRefs([]);
     setSkillRefs([]);
+    setToolRefs([]);
     setAccumulatedContextTokens(0);
   }, []);
 
@@ -714,10 +760,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     // ---- Build display content (what the user sees in chat) ----
     // The @mentions and /mentions are already embedded in the input text (kept on autocomplete select).
     // We just show the message as-is, with context badges below.
-    const contextRefs: { type: "file" | "agent" | "skill"; name: string }[] = [
+    const contextRefs: { type: "file" | "agent" | "skill" | "tool"; name: string }[] = [
       ...fileRefs.map((r) => ({ type: "file" as const, name: r.name })),
       ...agentRefs.map((r) => ({ type: "agent" as const, name: r.name })),
       ...skillRefs.map((r) => ({ type: "skill" as const, name: r.name })),
+      ...toolRefs.map((r) => ({ type: "tool" as const, name: r.name })),
     ];
     const displayText = trimmed;
 
@@ -754,6 +801,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       } catch (e) {
         console.error(`Failed to read agent prompt for ${agent.name}:`, e);
       }
+    }
+
+    // Collect tool directives — tell the AI to use specific tools
+    for (const tool of toolRefs) {
+      contextParts.push(`The user explicitly requests that you use the tool "#${tool.name}" for this request. You MUST call this tool to fulfill the request.`);
     }
 
     // Collect skill contexts — read skill files, execute any embedded commands, include output
@@ -795,6 +847,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setFileRefs([]); // Clear pending file refs after sending
     setAgentRefs([]); // Clear pending agent refs after sending
     setSkillRefs([]); // Clear pending skill refs after sending
+    setToolRefs([]); // Clear pending tool refs after sending
     setLoading(true);
 
     let unlisten: (() => void) | null = null;
@@ -991,7 +1044,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           <div style={{ color: "var(--text-muted)", fontSize: 13, textAlign: "center", marginTop: 40 }}>
             Ask anything about your code...<br />
             Use <strong>@agent-name</strong> to invoke an AI agent.<br />
-            Use <strong>/skill-name</strong> to run a skill command.
+            Use <strong>/skill-name</strong> to run a skill command.<br />
+            Use <strong>#tool-name</strong> to force the AI to use a specific tool.
 
           </div>
         )}
@@ -1187,8 +1241,27 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           </div>
         )}
 
+        {/* Tool ref chips */}
+        {toolRefs.length > 0 && (
+          <div className="file-ref-chips">
+            <div className="file-ref-chips-list">
+              {toolRefs.map((ref) => (
+                <div key={ref.path} className="tool-ref-chip">
+                  <span className="tool-ref-icon">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+                    </svg>
+                  </span>
+                  <span className="file-ref-name">#{ref.name}</span>
+                  <span className="tool-ref-remove" onClick={() => removeToolRef(ref.path)}>&times;</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Actions bar (when chips are present) */}
-        {(fileRefs.length > 0 || agentRefs.length > 0 || skillRefs.length > 0) && (
+        {(fileRefs.length > 0 || agentRefs.length > 0 || skillRefs.length > 0 || toolRefs.length > 0) && (
           <div className="file-ref-chips-actions" style={{ marginBottom: 6 }}>
             {loading && (
               <button className="stop-generation-btn" onClick={stopGeneration} title="Stop generation">
@@ -1216,7 +1289,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         )}
 
         {/* Persistent context indicator — shown when there are messages or accumulated context */}
-        {fileRefs.length === 0 && agentRefs.length === 0 && skillRefs.length === 0 && (accumulatedContextTokens > 0 || messages.length > 0) && (
+        {fileRefs.length === 0 && agentRefs.length === 0 && skillRefs.length === 0 && toolRefs.length === 0 && (accumulatedContextTokens > 0 || messages.length > 0) && (
           <div className="context-persistent-bar">
             <div className="context-bar-actions">
               {/* Stop button — only visible while the model is generating */}
@@ -1274,13 +1347,27 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             />
           </div>
         )}
+        {mentionQuery !== null && rootPath && mentionType === "tool" && (
+          <div className="chat-autocomplete-panel">
+            <ToolAutocomplete
+              query={mentionQuery}
+              rootPath={rootPath}
+              onSelect={handleToolSelect}
+              onClose={() => {
+                setMentionQuery(null);
+                setMentionIndex(-1);
+                setMentionType(null);
+              }}
+            />
+          </div>
+        )}
 
         <div className="chat-input-wrapper">
           <textarea
             ref={textareaRef}
             className="chat-input"
             rows={2}
-            placeholder={dpoPending ? "Please choose a response above to continue..." : "Type @ to reference a file or agent, / to run a skill... Ask the AI..."}
+            placeholder={dpoPending ? "Please choose a response above to continue..." : "Type @ to reference a file or agent, / to run a skill, # to use a tool... Ask the AI..."}
             value={input}
             onChange={handleInputChange}
             onKeyDown={(e) => {
