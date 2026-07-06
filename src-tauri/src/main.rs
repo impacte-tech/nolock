@@ -1457,12 +1457,20 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
                                         .or_else(|| file_name.strip_suffix(".json"))
                                         .unwrap_or(&file_name);
                                     let description = parsed["description"].as_str().unwrap_or("");
-                                    let params = parsed.get("parameters")
+                                    let mut params = parsed.get("parameters")
                                         .cloned()
                                         .unwrap_or(serde_json::json!({
                                             "type": "object",
                                             "properties": {}
                                         }));
+                                    // Normalize: `"parameters": {}` (empty object) is not a valid
+                                    // JSON Schema for function calling — it needs type + properties.
+                                    if params == serde_json::json!({}) {
+                                        params = serde_json::json!({
+                                            "type": "object",
+                                            "properties": {}
+                                        });
+                                    }
                                     tools.push(serde_json::json!({
                                         "type": "function",
                                         "function": {
@@ -2125,6 +2133,7 @@ fn build_ollama_chat_body(
     body
 }
 
+
 #[tauri::command]
 async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     eprintln!(
@@ -2150,35 +2159,25 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
 
     match req.backend.as_str() {
         "ollama" => {
-            // FITM: Ollama /api/generate supports `suffix` for fill-in-the-middle.
-            // If the model doesn't support it, fall back to prefix-only.
-            let use_suffix = req.suffix.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
-            let body = |with_suffix: bool| {
-                let mut b = serde_json::json!({
-                    "model": req.model,
-                    "system": system_prompt,
-                    "prompt": req.prompt,
-                    "stream": false,
-                    "options": {
-                        "num_predict": max_tokens,
-                        "temperature": temperature,
-                        "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
-                    }
-                });
-                if with_suffix {
-                    if let Some(ref suffix) = req.suffix {
-                        if !suffix.is_empty() {
-                            b["suffix"] = serde_json::json!(suffix);
-                        }
-                    }
+            // FITM: The frontend already wraps the prompt in FIM tokens
+            // (<|fim_prefix|><prefix><|fim_suffix|><suffix><|fim_middle|>).
+            // Send it as-is — no separate `suffix` field needed.
+            let body = serde_json::json!({
+                "model": req.model,
+                "system": system_prompt,
+                "prompt": req.prompt,
+                "stream": false,
+                "options": {
+                    "num_predict": max_tokens,
+                    "temperature": temperature,
+                    "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
                 }
-                b
-            };
+            });
 
-            eprintln!("[nolock] ollama POST {}/api/generate (FITM={})", req.url, use_suffix);
+            eprintln!("[nolock] ollama POST {}/api/generate prompt_len={}", req.url, req.prompt.len());
             let resp = client
                 .post(format!("{}/api/generate", req.url))
-                .json(&body(use_suffix))
+                .json(&body)
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await
@@ -2190,31 +2189,13 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
             let text = resp.text().await.map_err(|e| e.to_string())?;
             eprintln!("[nolock] ollama status={} body={}", status, &text[..text.len().min(300)]);
 
-            // If FITM failed with 400 (model doesn't support insert), retry without suffix
-            if status.as_u16() == 400 && use_suffix {
-                eprintln!("[nolock] ollama FITM not supported, retrying without suffix");
-                let resp2 = client
-                    .post(format!("{}/api/generate", req.url))
-                    .json(&body(false))
-                    .timeout(std::time::Duration::from_secs(30))
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let status2 = resp2.status();
-                let text2 = resp2.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[nolock] ollama retry status={} body={}", status2, &text2[..text2.len().min(200)]);
-                let data: serde_json::Value =
-                    serde_json::from_str(&text2).map_err(|e| format!("JSON parse error: {}", e))?;
-                return Ok(data["response"].as_str().unwrap_or("").to_string());
-            }
-
             let data: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
             Ok(data["response"].as_str().unwrap_or("").to_string())
         }
         "llamacpp" => {
-            // FITM: llama.cpp /completion supports `suffix` for fill-in-the-middle
-            let mut body = serde_json::json!({
+            // FITM: The frontend wraps the prompt in FIM tokens. Send as-is.
+            let body = serde_json::json!({
                 "prompt": req.prompt,
                 "n_predict": max_tokens,
                 "temperature": temperature,
@@ -2222,12 +2203,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
                 "system": system_prompt
             });
-            if let Some(ref suffix) = req.suffix {
-                if !suffix.is_empty() {
-                    body["suffix"] = serde_json::json!(suffix);
-                }
-            }
-            eprintln!("[nolock] llamacpp POST {}/completion (FITM={})", req.url, req.suffix.is_some());
+            eprintln!("[nolock] llamacpp POST {}/completion prompt_len={}", req.url, req.prompt.len());
             let resp = client
                 .post(format!("{}/completion", req.url))
                 .json(&body)
