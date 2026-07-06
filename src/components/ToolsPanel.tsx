@@ -29,6 +29,7 @@ const WEB_SEARCH_PROVIDERS = [
 export default function ToolsPanel({ visible, onClose }: Props) {
   const [toolsEnabled, setToolsEnabled] = useState<string[]>([]);
   const [toolConfig, setToolConfig] = useState<ToolConfig>({});
+  const [maxIterations, setMaxIterations] = useState(10);
 
   // Determine if current backend supports tools
   const backend = (typeof window !== "undefined" ? localStorage.getItem("nolock.backend") : null) || "ollama";
@@ -40,6 +41,8 @@ export default function ToolsPanel({ visible, onClose }: Props) {
     const toolConfigRaw = localStorage.getItem("nolock.toolConfig");
     setToolsEnabled(toolsRaw ? JSON.parse(toolsRaw) : []);
     setToolConfig(toolConfigRaw ? JSON.parse(toolConfigRaw) : {});
+    const savedMax = localStorage.getItem("nolock.toolMaxIterations");
+    setMaxIterations(savedMax ? parseInt(savedMax, 10) : 10);
   }, [visible]);
 
   const toggleTool = (toolId: string) => {
@@ -60,6 +63,7 @@ export default function ToolsPanel({ visible, onClose }: Props) {
   const save = () => {
     localStorage.setItem("nolock.toolsEnabled", JSON.stringify(toolsEnabled));
     localStorage.setItem("nolock.toolConfig", JSON.stringify(toolConfig));
+    localStorage.setItem("nolock.toolMaxIterations", String(maxIterations));
     setSecret("toolConfig", JSON.stringify(toolConfig));
     onClose();
   };
@@ -174,6 +178,26 @@ export default function ToolsPanel({ visible, onClose }: Props) {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {supportsTools && (
+            <div style={{ marginTop: 16 }}>
+              <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", display: "block", marginBottom: 4 }}>
+                Max Tool Iterations
+              </label>
+              <input
+                className="field-input"
+                type="number"
+                min={1}
+                max={100}
+                value={maxIterations}
+                onChange={(e) => setMaxIterations(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                style={{ fontSize: 12, padding: "6px 8px", width: 80 }}
+              />
+              <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+                How many tool calls the agent can make per request before stopping (default: 10).
+              </div>
             </div>
           )}
         </div>
