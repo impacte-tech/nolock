@@ -286,6 +286,133 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Custom tool management commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct CustomToolEntry {
+    name: String,
+    path: String,
+    description: String,
+}
+
+/// List all custom tool files in the `.tools/` directory under root_path.
+/// Creates `.tools/` if it does not exist.
+#[tauri::command]
+fn list_tools(root_path: String) -> Result<Vec<CustomToolEntry>, String> {
+    let tools_dir = std::path::Path::new(&root_path).join(".tools");
+    if !tools_dir.exists() {
+        std::fs::create_dir_all(&tools_dir)
+            .map_err(|e| format!("Failed to create .tools directory: {}", e))?;
+        return Ok(Vec::new());
+    }
+
+    let read_dir = std::fs::read_dir(&tools_dir)
+        .map_err(|e| format!("Failed to read .tools directory: {}", e))?;
+
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+        if metadata.is_file() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.ends_with(".json") {
+                let stem = file_name.strip_suffix(".json").unwrap_or(&file_name).to_string();
+                // Read the file to get the description
+                let content = std::fs::read_to_string(entry.path())
+                    .unwrap_or_default();
+                let description = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .and_then(|v| v["description"].as_str().map(String::from))
+                    .unwrap_or_default();
+                entries.push(CustomToolEntry {
+                    name: stem,
+                    path: entry.path().to_string_lossy().to_string(),
+                    description,
+                });
+            }
+        }
+    }
+
+    entries.sort_by_key(|a| a.name.to_lowercase());
+    Ok(entries)
+}
+
+/// Read and parse a custom tool file from `.tools/`.
+#[tauri::command]
+fn read_tool(path: String) -> Result<serde_json::Value, String> {
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read tool file {}: {}", path, e))?;
+    serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse tool file {}: {}", path, e))
+}
+
+/// Execute a custom tool command by name, substituting arguments into the template.
+#[tauri::command]
+fn run_tool_command(root_path: String, tool_name: String, args: serde_json::Value) -> Result<String, String> {
+    let tool_path = std::path::Path::new(&root_path)
+        .join(".tools")
+        .join(format!("{}.json", tool_name));
+
+    let content = std::fs::read_to_string(&tool_path)
+        .map_err(|e| format!("Failed to read tool '{}': {}", tool_name, e))?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse tool '{}': {}", tool_name, e))?;
+
+    let command_template = parsed["command"].as_str()
+        .ok_or_else(|| format!("Tool '{}' missing 'command' field", tool_name))?;
+
+    // Substitute {param} placeholders with actual argument values
+    let mut command_str = command_template.to_string();
+    if let Some(obj) = args.as_object() {
+        for (key, value) in obj {
+            let placeholder = format!("{{{}}}", key);
+            let replacement = value.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| value.as_i64().map(|n| n.to_string()))
+                .or_else(|| value.as_f64().map(|n| n.to_string()))
+                .unwrap_or_default();
+            command_str = command_str.replace(&placeholder, &replacement);
+        }
+    }
+
+    if command_str.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    let parts: Vec<&str> = command_str.split_whitespace().collect();
+    if parts.is_empty() {
+        return Ok(String::new());
+    }
+
+    let program = parts[0];
+    let cmd_args = &parts[1..];
+
+    match std::process::Command::new(program)
+        .args(cmd_args)
+        .current_dir(&root_path)
+        .output()
+    {
+        Ok(out) => {
+            let mut result = String::new();
+            if !out.stdout.is_empty() {
+                result.push_str(&String::from_utf8_lossy(&out.stdout));
+            }
+            if !out.stderr.is_empty() {
+                if !result.is_empty() { result.push('\n'); }
+                result.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            if result.is_empty() {
+                result = format!("(exit code: {})", out.status.code().unwrap_or(-1));
+            }
+            Ok(result)
+        }
+        Err(e) => Err(format!("Failed to execute tool '{}': {}", tool_name, e)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Skill management commands
 // ---------------------------------------------------------------------------
 
@@ -1314,6 +1441,45 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
             }
         }));
     }
+
+    // Load custom tools from .tools/ directory
+    if let Some(rp) = root_path {
+        let tools_dir = std::path::Path::new(rp).join(".tools");
+        if tools_dir.exists() {
+            if let Ok(read_dir) = std::fs::read_dir(&tools_dir) {
+                for entry in read_dir.flatten() {
+                    if entry.metadata().map(|m| m.is_file()).unwrap_or(false) {
+                        let file_name = entry.file_name().to_string_lossy().to_string();
+                        if file_name.ends_with(".json") {
+                            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                                    let tool_name = parsed["name"].as_str()
+                                        .or_else(|| file_name.strip_suffix(".json"))
+                                        .unwrap_or(&file_name);
+                                    let description = parsed["description"].as_str().unwrap_or("");
+                                    let params = parsed.get("parameters")
+                                        .cloned()
+                                        .unwrap_or(serde_json::json!({
+                                            "type": "object",
+                                            "properties": {}
+                                        }));
+                                    tools.push(serde_json::json!({
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_name,
+                                            "description": description,
+                                            "parameters": params
+                                        }
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     tools
 }
 
@@ -1605,7 +1771,83 @@ async fn execute_tool(
                 .map_err(|e| format!("Failed to write {}: {}", resolved.display(), e))?;
             Ok(format!("Successfully wrote {} bytes to {}", content.len(), resolved_str))
         }
-        _ => Err(format!("Unknown tool: {}", name)),
+        _ => {
+            // Try custom tool from .tools/ directory
+            if let Some(rp) = root_path {
+                let tool_path = std::path::Path::new(rp)
+                    .join(".tools")
+                    .join(format!("{}.json", name));
+                if tool_path.exists() {
+                    return execute_custom_tool(name, args, rp);
+                }
+            }
+            Err(format!("Unknown tool: {}", name))
+        }
+    }
+}
+
+fn execute_custom_tool(name: &str, args: &serde_json::Value, root_path: &str) -> Result<String, String> {
+    let tool_path = std::path::Path::new(root_path)
+        .join(".tools")
+        .join(format!("{}.json", name));
+
+    let content = std::fs::read_to_string(&tool_path)
+        .map_err(|e| format!("Failed to read tool '{}': {}", name, e))?;
+
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse tool '{}': {}", name, e))?;
+
+    let command_template = parsed["command"].as_str()
+        .ok_or_else(|| format!("Tool '{}' missing 'command' field", name))?;
+
+    // Substitute {param} placeholders with actual argument values
+    let mut command_str = command_template.to_string();
+    if let Some(obj) = args.as_object() {
+        for (key, value) in obj {
+            let placeholder = format!("{{{}}}", key);
+            let replacement = value.as_str()
+                .map(|s| s.to_string())
+                .or_else(|| value.as_i64().map(|n| n.to_string()))
+                .or_else(|| value.as_f64().map(|n| n.to_string()))
+                .unwrap_or_default();
+            command_str = command_str.replace(&placeholder, &replacement);
+        }
+    }
+
+    if command_str.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    let parts: Vec<&str> = command_str.split_whitespace().collect();
+    if parts.is_empty() {
+        return Ok(String::new());
+    }
+
+    let program = parts[0];
+    let cmd_args = &parts[1..];
+
+    eprintln!("[nolock] custom tool {} command: {}", name, command_str);
+
+    match std::process::Command::new(program)
+        .args(cmd_args)
+        .current_dir(root_path)
+        .output()
+    {
+        Ok(out) => {
+            let mut result = String::new();
+            if !out.stdout.is_empty() {
+                result.push_str(&String::from_utf8_lossy(&out.stdout));
+            }
+            if !out.stderr.is_empty() {
+                if !result.is_empty() { result.push('\n'); }
+                result.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            if result.is_empty() {
+                result = format!("(exit code: {})", out.status.code().unwrap_or(-1));
+            }
+            Ok(result)
+        }
+        Err(e) => Err(format!("Failed to execute tool '{}': {}", name, e)),
     }
 }
 
@@ -2624,6 +2866,9 @@ pub fn run() {
             read_agent,
             list_skills,
             run_skill_command,
+            list_tools,
+            read_tool,
+            run_tool_command,
             search_in_files,
             replace_in_files,
             create_directory,

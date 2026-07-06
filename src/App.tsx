@@ -800,7 +800,7 @@ export default function App() {
       <ModelProvidersPanel visible={showModelProviders} onClose={() => setShowModelProviders(false)} />
       <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />
       <FITMModelPanel visible={showFITMModel} onClose={() => setShowFITMModel(false)} />
-      <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} />
+      <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} rootPath={rootPath} />
       <RlhfPanel visible={showRlhf} onClose={() => setShowRlhf(false)} />
       <EditorSettings visible={showSettings} onClose={() => setShowSettings(false)} />
 
