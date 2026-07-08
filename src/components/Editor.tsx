@@ -75,8 +75,18 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
   // Gate: only allow one request per debounce window
   private _ready = false;
 
+  /** Set when user presses the explicit trigger shortcut (Ctrl+.) */
+  private _explicitRequest = false;
+
   setEditor(editor: monaco.editor.IStandaloneCodeEditor) {
     this._editor = editor;
+  }
+
+  /** Called when user presses Ctrl+. — bypasses the debounce gate entirely */
+  requestExplicitCompletion() {
+    this._explicitRequest = true;
+    this._ready = true;
+    this._editor?.trigger("ai", "editor.action.inlineSuggest.trigger", null);
   }
 
   dispose() {
@@ -111,8 +121,12 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
     _context: monaco.languages.InlineCompletionContext,
     token: monaco.CancellationToken
   ): Promise<monaco.languages.InlineCompletions> {
-    // Gate check — if not ready, skip immediately (no API call)
-    if (!this._ready) {
+    // Explicit request (Ctrl+.) bypasses the gate check entirely
+    const isExplicit = this._explicitRequest;
+    this._explicitRequest = false;
+
+    // Gate check — if not ready and not explicit, skip immediately
+    if (!isExplicit && !this._ready) {
       return { items: [] };
     }
 
@@ -372,26 +386,50 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
       }
     });
 
-    // ---- Defensive: prevent native Ctrl+S in the webview -----------------
+    // Cmd/Ctrl+Z — explicit undo (works around webview intercepting native undo)
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyZ, () => {
+      editor.trigger("", "undo", null);
+    });
+
+    // Cmd/Ctrl+Y / Cmd/Ctrl+Shift+Z — explicit redo
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyY, () => {
+      editor.trigger("", "redo", null);
+    });
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyZ, () => {
+      editor.trigger("", "redo", null);
+    });
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyA, () => {
+      editor.trigger("keyboard", "editor.action.selectAll", null);
+    });
+
+    // Ctrl+. — explicit FITM trigger (bypasses debounce)
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Period, () => {
+      provider.requestExplicitCompletion();
+    });
+
+    // ---- Defensive: prevent native browser shortcuts ----------------------
     //
-    // PROBLEM: In some Tauri v2 environments (in particular Linux/GTK), the
-    // webview's native "Save Page" Ctrl+S handler can cause the app window
-    // to close when it intercepts the keystroke.  Monaco *should* call
-    // preventDefault() when it matches a keybinding, but this doesn't always
-    // work reliably in every webview configuration.
+    // Some keybindings (Ctrl+S, Ctrl+.) have native browser/webview handlers
+    // that can conflict with Monaco.  We intercept them on the capture phase
+    // and prevent default, but do NOT stop propagation — Monaco's own handler
+    // still fires normally.
     //
-    // SOLUTION: Register a capture‑phase keydown listener on the document
-    // that calls preventDefault() for Ctrl+S / Cmd+S before the event ever
-    // reaches the browser's default handling.  We do NOT stop propagation,
-    // so Monaco's own handler still fires normally.
+    // For Ctrl+Z/Y/A we rely on editor.addCommand above (Monaco's keybinding
+    // system) instead of preventDefault, since preventDefault on capture can
+    // prevent Monaco from seeing the event.
     //
-    const preventNativeSave = (e: KeyboardEvent) => {
+    const preventNativeShortcuts = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
-        // Intercept before any browser/webview native save handling
+        // Native "Save Page" in webview
+        e.preventDefault();
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === ".") {
+        // Native zoom-in in browser/webview
         e.preventDefault();
       }
     };
-    document.addEventListener("keydown", preventNativeSave, true);
+    document.addEventListener("keydown", preventNativeShortcuts, true);
 
     // Run linter on file open
     runLinter(model, filePath);
@@ -403,7 +441,7 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
       provider.dispose();
       editor.dispose();
       model.dispose();
-      document.removeEventListener("keydown", preventNativeSave, true);
+      document.removeEventListener("keydown", preventNativeShortcuts, true);
     };
   }, [filePath]);
 
