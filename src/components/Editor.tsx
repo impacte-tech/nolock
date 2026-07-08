@@ -128,6 +128,7 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
     });
 
     if (fullPrefix.trim().length < 5) {
+      console.log("[FITM] prefix too short, skipping");
       return { items: [] };
     }
 
@@ -151,43 +152,82 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
       const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
 
-      // Read FITM model parameters from localStorage
       const fitmTemperature = localStorage.getItem("nolock.fitmTemperature");
       const fitmMaxTokens = localStorage.getItem("nolock.fitmMaxTokens");
       const fitmSystemPrompt = localStorage.getItem("nolock.fitmSystemPrompt");
 
       if (!completionModel) {
+        console.log("[FITM] no completion model configured");
         return { items: [] };
       }
 
-      // Build the prompt with FIM tokens for better code-only completions
-      const fimPrompt = buildAiPrompt(prefix, suffix || null);
+      const hasSuffix = !!(suffix && suffix.trim().length > 0);
 
-      const text: string = await invoke("ai_complete", {
-        req: {
-          backend,
-          url,
-          model: completionModel,
-          prompt: fimPrompt,
-          suffix: suffix || null,
-          apiKey: apiKey || null,
-          temperature: fitmTemperature ? parseFloat(fitmTemperature) : undefined,
-          max_tokens: fitmMaxTokens ? parseInt(fitmMaxTokens, 10) : undefined,
-          system_prompt: fitmSystemPrompt || undefined,
-        },
-      });
+      let currentPrompt = buildAiPrompt(prefix, suffix || null);
 
-      // Discard stale responses
+      console.log("[FITM] prefix_last_100:", JSON.stringify(prefix.slice(-100)));
+      console.log("[FITM] suffix_first_100:", JSON.stringify(suffix.slice(0, 100)));
+      console.log("[FITM] hasSuffix:", hasSuffix);
+      console.log("[FITM] prompt_len:", currentPrompt.length);
+      console.log("[FITM] prompt_starts_with_FIM:", currentPrompt.startsWith("<|fim_prefix|>"));
+
+      const attemptCompletion = async (
+        prompt: string,
+        attemptSuffix: string | null,
+      ): Promise<string> => {
+        return invoke("ai_complete", {
+          req: {
+            backend,
+            url,
+            model: completionModel,
+            prompt,
+            suffix: attemptSuffix,
+            apiKey: apiKey || null,
+            temperature: fitmTemperature ? parseFloat(fitmTemperature) : undefined,
+            max_tokens: fitmMaxTokens ? parseInt(fitmMaxTokens, 10) : undefined,
+            system_prompt: fitmSystemPrompt || undefined,
+          },
+        });
+      };
+
+      console.log("[FITM] --- attempt 1 (FIM) ---");
+      let text: string = await attemptCompletion(currentPrompt, hasSuffix ? suffix : null);
+      console.log("[FITM] attempt 1 raw response:", JSON.stringify(text));
+      console.log("[FITM] attempt 1 response_len:", text.length);
+
       if (token.isCancellationRequested || requestId !== this._requestCounter) {
+        console.log("[FITM] discard stale response (attempt 1)");
         return { items: [] };
       }
 
-      if (!text) return { items: [] };
+      if (!text && hasSuffix) {
+        console.log("[FITM] FIM returned empty, retrying with raw prefix");
+        currentPrompt = prefix;
+        console.log("[FITM] --- attempt 2 (raw prefix, no FIM) ---");
+        text = await attemptCompletion(currentPrompt, null);
+        console.log("[FITM] attempt 2 raw response:", JSON.stringify(text));
+        console.log("[FITM] attempt 2 response_len:", text.length);
 
-      // Hybrid pipeline: extract code → score quality → truncate
+        if (token.isCancellationRequested || requestId !== this._requestCounter) {
+          console.log("[FITM] discard stale response (attempt 2)");
+          return { items: [] };
+        }
+      }
+
+      if (!text) {
+        console.log("[FITM] all attempts returned empty, no suggestion");
+        return { items: [] };
+      }
+
       const cleaned = processCompletionResponse(text);
-      if (!cleaned) return { items: [] };
+      console.log("[FITM] cleaned:", JSON.stringify(cleaned));
 
+      if (!cleaned) {
+        console.log("[FITM] cleaning pipeline rejected the response");
+        return { items: [] };
+      }
+
+      console.log("[FITM] returning suggestion, len:", cleaned.length);
       return {
         items: [
           {
@@ -201,7 +241,8 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
           },
         ],
       };
-    } catch {
+    } catch (err) {
+      console.log("[FITM] error:", err);
       return { items: [] };
     }
   }
