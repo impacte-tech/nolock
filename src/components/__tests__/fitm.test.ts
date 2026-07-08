@@ -54,6 +54,15 @@ describe("buildAiPrompt", () => {
     const result = buildAiPrompt(prefix, null);
     expect(result).toBe("short");
   });
+
+  it("handles very long suffix without truncation", () => {
+    const prefix = "fn main() {";
+    const longSuffix = "}".repeat(5000);
+    const result = buildAiPrompt(prefix, longSuffix);
+    expect(result).toContain("<|fim_prefix|>");
+    expect(result).toContain(longSuffix);
+    expect(result).toContain("<|fim_middle|>");
+  });
 });
 
 // ===========================================================================
@@ -61,6 +70,57 @@ describe("buildAiPrompt", () => {
 // ===========================================================================
 
 describe("extractCodeFromResponse", () => {
+  it("returns empty string for empty input", () => {
+    expect(extractCodeFromResponse("")).toBe("");
+  });
+
+  it("returns empty string for whitespace-only input", () => {
+    expect(extractCodeFromResponse("   \n  \n  ")).toBe("");
+  });
+
+  it("returns empty string for empty markdown code block", () => {
+    expect(extractCodeFromResponse("```\n```")).toBe("");
+  });
+
+  it("returns empty string for markdown code block with only whitespace", () => {
+    expect(extractCodeFromResponse("```\n   \n```")).toBe("");
+  });
+
+  it("returns empty string for code block with language specifier but no content", () => {
+    expect(extractCodeFromResponse("```typescript\n```")).toBe("");
+  });
+
+  it("strips FIM middle token if model outputs it literally", () => {
+    // Some models output the FIM token literally when they don't understand FIM
+    const input = "<|fim_middle|>fn main() {\n  println!(\"hello\");\n}";
+    const result = extractCodeFromResponse(input);
+    expect(result).toBe("fn main() {\n  println!(\"hello\");\n}");
+  });
+
+  it("strips FIM prefix token if model echoes it back", () => {
+    const input = "<|fim_prefix|>const x = 42;";
+    const result = extractCodeFromResponse(input);
+    expect(result).toBe("const x = 42;");
+  });
+
+  it("strips FIM suffix token at start of response", () => {
+    const input = "<|fim_suffix|>\nconst y = 1;";
+    const result = extractCodeFromResponse(input);
+    expect(result).toBe("const y = 1;");
+  });
+
+  it("strips multiple FIM tokens at start", () => {
+    const input = "<|fim_prefix|><|fim_suffix|><|fim_middle|>const z = 3;";
+    const result = extractCodeFromResponse(input);
+    expect(result).toBe("const z = 3;");
+  });
+
+  it("handles FIM tokens followed by conversational text then code", () => {
+    const input = "<|fim_middle|>Here is the code:\n\nfunction hello() {\n  return 42;\n}";
+    const result = extractCodeFromResponse(input);
+    expect(result).toBe("function hello() {\n  return 42;\n}");
+  });
+
   it("extracts code from markdown code blocks", () => {
     const input = "```python\nprint('hello world')\n```";
     expect(extractCodeFromResponse(input)).toBe("print('hello world')");
@@ -219,6 +279,37 @@ describe("scoreCodeQuality", () => {
     expect(score).toBeGreaterThanOrEqual(30);
     expect(score).toBeLessThan(80);
   });
+
+  it("scores whitespace-only as neutral (indentation triggers code-like reward)", () => {
+    // Whitespace with indentation gets +10 for the indentation reward
+    expect(scoreCodeQuality("   \n  \n  ")).toBe(60);
+  });
+
+  it("scores text with only FIM tokens above 0 (special chars trigger code reward)", () => {
+    // FIM tokens contain < and > which match code-symbol reward (+15)
+    expect(scoreCodeQuality("<|fim_middle|>")).toBe(65);
+  });
+
+  it("scores empty markdown code block at minScore threshold (backticks trigger string reward)", () => {
+    const input = "```\n```";
+    const score = scoreCodeQuality(input);
+    // Score is exactly 30: 50 - 25 (fences) + 5 (backtick string literal) = 30
+    expect(score).toBe(30);
+  });
+
+  it("scores code with trailing explanation above threshold but lower than clean code", () => {
+    const input =
+      "function foo() {\n  return 42;\n}\n\nThis function returns 42.";
+    const score = scoreCodeQuality(input);
+    // Has code patterns (braces, indentation, function declaration)
+    expect(score).toBeGreaterThanOrEqual(30);
+  });
+
+  it("scores Rust code with impl block highly", () => {
+    const input = "impl Foo {\n  fn bar(&self) -> i32 {\n    42\n  }\n}";
+    const score = scoreCodeQuality(input);
+    expect(score).toBeGreaterThanOrEqual(55);
+  });
 });
 
 // ===========================================================================
@@ -268,6 +359,36 @@ describe("truncateAtLogicalBoundary", () => {
     // Should cut at a boundary that's past 15 chars
     expect(result.length).toBeGreaterThan(15);
     expect(result.length).toBeLessThanOrEqual(31); // 30 + 1 for the boundary char
+  });
+
+  it("returns empty string unchanged", () => {
+    expect(truncateAtLogicalBoundary("", 256)).toBe("");
+  });
+
+  it("returns text exactly at maxChars unchanged", () => {
+    const text = "a".repeat(256);
+    expect(truncateAtLogicalBoundary(text, 256)).toBe(text);
+  });
+
+  it("truncates at semicolon-newline boundary with parens", () => {
+    const text = "foo(bar);\nbaz(qux);\nmore();";
+    const result = truncateAtLogicalBoundary(text, 12);
+    // lastIndexOf(";\n") = 8 → slice(0,9) = "foo(bar);" (without trailing \n)
+    expect(result).toBe("foo(bar);");
+  });
+
+  it("truncates at blank line boundary (first \\n of \\n\\n)", () => {
+    const text = "line one\n\nline two\n\nline three";
+    const result = truncateAtLogicalBoundary(text, 14);
+    // lastIndexOf("\n\n") = 8 → slice(0,9) = "line one\n"
+    expect(result).toBe("line one\n");
+  });
+
+  it("strips trailing spaces after truncation", () => {
+    const text = "const x = 1;\nconst y = 2;   \nconst z = 3;";
+    const result = truncateAtLogicalBoundary(text, 25);
+    expect(result).toBe("const x = 1;\nconst y = 2;");
+    expect(result).not.toMatch(/[ \t]+$/);
   });
 });
 
@@ -333,5 +454,29 @@ describe("processCompletionResponse", () => {
     // With a very high threshold, even valid code could be rejected
     const result = processCompletionResponse(plausibleCode, 200);
     expect(result).toBe("");
+  });
+
+  it("rejects whitespace-only response", () => {
+    expect(processCompletionResponse("   \n  \n  ")).toBe("");
+  });
+
+  it("rejects response with empty markdown code block", () => {
+    expect(processCompletionResponse("```\n```")).toBe("");
+  });
+
+  it("rejects response that is only FIM tokens", () => {
+    expect(processCompletionResponse("<|fim_middle|>")).toBe("");
+  });
+
+  it("cleans response with FIM tokens followed by code", () => {
+    const input = "<|fim_middle|>fn main() {\n  println!(\"hello\");\n}";
+    const result = processCompletionResponse(input);
+    expect(result).toBe("fn main() {\n  println!(\"hello\");\n}");
+  });
+
+  it("cleans markdown code block preceded by FIM tokens", () => {
+    const input = "<|fim_middle|>```rust\nfn main() {}\n```";
+    const result = processCompletionResponse(input);
+    expect(result).toBe("fn main() {}");
   });
 });

@@ -2134,6 +2134,39 @@ fn build_ollama_chat_body(
 }
 
 
+// ---------------------------------------------------------------------------
+// Ollama request body construction (extracted for testability)
+// ---------------------------------------------------------------------------
+
+/// Builds the JSON body for an Ollama `/api/generate` request.
+///
+/// * `raw: true` bypasses the model's chat template so FIM tokens
+///   (`<|fim_prefix|>`, `<|fim_suffix|>`, `<|fim_middle|>`) are sent
+///   as-is rather than wrapped inside `<|im_start|>user...<|im_end|>` tags.
+/// * The `system_prompt` is prepended to the prompt because raw mode
+///   may drop the separate `system` field.
+fn build_ollama_body(
+    model: &str,
+    system_prompt: &str,
+    prompt: &str,
+    max_tokens: u32,
+    temperature: f64,
+) -> serde_json::Value {
+    let raw_prompt = format!("{}\n{}", system_prompt, prompt);
+    serde_json::json!({
+        "model": model,
+        "prompt": raw_prompt,
+        "stream": false,
+        "raw": true,
+        "options": {
+            "num_predict": max_tokens,
+            "temperature": temperature,
+            "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+        }
+    })
+}
+
+
 #[tauri::command]
 async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     eprintln!(
@@ -2162,17 +2195,16 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
             // FITM: The frontend already wraps the prompt in FIM tokens
             // (<|fim_prefix|><prefix><|fim_suffix|><suffix><|fim_middle|>).
             // Send it as-is — no separate `suffix` field needed.
-            let body = serde_json::json!({
-                "model": req.model,
-                "system": system_prompt,
-                "prompt": req.prompt,
-                "stream": false,
-                "options": {
-                    "num_predict": max_tokens,
-                    "temperature": temperature,
-                    "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
-                }
-            });
+            // raw=true bypasses the chat template so FIM tokens are not wrapped
+            // inside chat tags. The system prompt is prepended since raw mode
+            // may drop the separate `system` field.
+            let body = build_ollama_body(
+                &req.model,
+                system_prompt,
+                &req.prompt,
+                max_tokens,
+                temperature,
+            );
 
             eprintln!("[nolock] ollama POST {}/api/generate prompt_len={}", req.url, req.prompt.len());
             let resp = client
@@ -2200,7 +2232,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 "n_predict": max_tokens,
                 "temperature": temperature,
                 "stream": false,
-                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+                "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
                 "system": system_prompt
             });
             eprintln!("[nolock] llamacpp POST {}/completion prompt_len={}", req.url, req.prompt.len());
@@ -2336,7 +2368,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                     "options": {
                         "num_predict": max_tokens,
                         "temperature": temperature,
-                        "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+                        "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
                     }
                 });
                 let full_url = format!("{}/api/generate", req.url.trim_end_matches('/'));
@@ -3846,7 +3878,7 @@ mod tests {
             "options": {
                 "num_predict": 64,
                 "temperature": 0.2,
-                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+                "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
             }
         });
         if with_suffix {
@@ -3860,7 +3892,7 @@ mod tests {
         assert_eq!(b["model"], "qwen2.5-coder:1.5b");
         assert!(b["system"].as_str().unwrap().contains("code completion engine"));
         assert!(b["system"].as_str().unwrap().contains("Output ONLY"));
-        assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("\n\n")));
+        assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("<|im_end|>")));
         assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("Here is")));
         assert!(b["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("Explanation")));
         assert_eq!(b["suffix"], "}");
@@ -3886,7 +3918,7 @@ mod tests {
             "n_predict": 64,
             "temperature": 0.2,
             "stream": false,
-            "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+            "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
             "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code."
         });
         if let Some(ref suffix) = req.suffix {
@@ -4015,7 +4047,7 @@ mod tests {
             "options": {
                 "num_predict": 64,
                 "temperature": 0.2,
-                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+                "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
             }
         });
 
@@ -4028,21 +4060,24 @@ mod tests {
     fn test_ai_complete_stop_tokens_include_conversational_triggers() {
         let all_backend_stops = [
             // Ollama stops
-            vec!["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+            vec!["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
             // llama.cpp stops
-            vec!["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+            vec!["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
             // OpenRouter stops
             vec!["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"],
             // OpenCode stops
-            vec!["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+            vec!["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
         ];
 
         // Every backend's stop array must contain the core conversational triggers
         for stops in &all_backend_stops {
-            assert!(stops.contains(&"\n\n"), "Every backend needs \\n\\n stop");
             assert!(stops.contains(&"```"), "Every backend needs ``` stop");
             assert!(stops.contains(&"Here is"), "Every backend needs 'Here is' stop");
             assert!(stops.contains(&"I'll"), "Every backend needs 'I'll' stop");
+        }
+        // Local backends (ollama, llamacpp, opencode) must include ChatML end-of-turn
+        for stops in [&all_backend_stops[0], &all_backend_stops[1], &all_backend_stops[3]] {
+            assert!(stops.contains(&"<|im_end|>"), "Local backends need ChatML end-of-turn stop");
         }
     }
 
@@ -4069,11 +4104,75 @@ mod tests {
             "options": {
                 "num_predict": 64,
                 "temperature": 0.2,
-                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+                "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
             }
         });
         // Fallback body must NOT have suffix field
         assert!(!body.as_object().unwrap().contains_key("suffix"),
                 "Fallback body (no suffix) must not contain a 'suffix' field");
+    }
+
+    // =========================================================================
+    // build_ollama_body – request body construction
+    // =========================================================================
+
+    #[test]
+    fn test_build_ollama_body_has_raw_true() {
+        let body = build_ollama_body("qwen2.5-coder:1.5b", "system", "<|fim_prefix|>fn main() {", 64, 0.2);
+        assert_eq!(body["raw"], true, "Ollama body must have raw=true to bypass chat template");
+    }
+
+    #[test]
+    fn test_build_ollama_body_prepends_system_prompt() {
+        let body = build_ollama_body("qwen2.5-coder:1.5b", "You are a code completion engine.", "<|fim_middle|>", 64, 0.2);
+        let prompt = body["prompt"].as_str().unwrap();
+        assert!(prompt.starts_with("You are a code completion engine."),
+                "System prompt should be prepended to the raw prompt");
+        assert!(prompt.contains("<|fim_middle|>"),
+                "FIM tokens should be in the prompt after the system prompt");
+    }
+
+    #[test]
+    fn test_build_ollama_body_forwards_model() {
+        let body = build_ollama_body("deepseek-coder:6.7b", "sys", "prompt", 128, 0.5);
+        assert_eq!(body["model"], "deepseek-coder:6.7b");
+    }
+
+    #[test]
+    fn test_build_ollama_body_forwards_max_tokens() {
+        let body = build_ollama_body("m", "s", "p", 256, 0.3);
+        assert_eq!(body["options"]["num_predict"], 256);
+    }
+
+    #[test]
+    fn test_build_ollama_body_forwards_temperature() {
+        let body = build_ollama_body("m", "s", "p", 64, 0.8);
+        assert_eq!(body["options"]["temperature"], 0.8);
+    }
+
+    #[test]
+    fn test_build_ollama_body_has_stop_tokens() {
+        let body = build_ollama_body("m", "s", "p", 64, 0.2);
+        let stops = body["options"]["stop"].as_array().unwrap();
+        assert!(stops.contains(&serde_json::json!("<|im_end|>")),
+                "Must stop on Qwen ChatML end-of-turn token");
+        assert!(stops.contains(&serde_json::json!("```")),
+                "Must stop on markdown code fence to prevent prose leakage");
+        assert!(stops.contains(&serde_json::json!("Here is")),
+                "Must stop on conversational preamble trigger");
+    }
+
+    #[test]
+    fn test_build_ollama_body_does_not_have_system_field() {
+        // With raw=true, the system field is not needed — it's prepended to prompt.
+        let body = build_ollama_body("m", "s", "p", 64, 0.2);
+        assert!(!body.as_object().unwrap().contains_key("system"),
+                "Body should not contain a separate 'system' field when raw=true");
+    }
+
+    #[test]
+    fn test_build_ollama_body_stream_is_false() {
+        let body = build_ollama_body("m", "s", "p", 64, 0.2);
+        assert_eq!(body["stream"], false);
     }
 }

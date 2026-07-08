@@ -197,6 +197,11 @@ export default function AISettings({ visible, onClose }: Props) {
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
               Smaller/faster model for inline code suggestions. Uses Fill-In-The-Middle (prefix+suffix).
             </span>
+            <span style={{ fontSize: 10, color: "var(--text-warning)", display: "block", marginTop: 6, padding: "6px 8px", background: "rgba(232, 184, 48, 0.08)", borderRadius: 4, lineHeight: 1.5 }}>
+              FIM prompts are sent in <strong>raw mode</strong> (bypassing chat template) — required for
+              <strong> Qwen2.5-Coder</strong>, <strong>DeepSeek-Coder</strong>, <strong>CodeLlama</strong>, and
+              other FIM-trained models. Models that don't understand FIM tokens may return empty.
+            </span>
           </div>
 
           <div>

@@ -71,6 +71,13 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
             Smaller/faster model for inline code suggestions. Uses Fill-In-The-Middle (prefix+suffix).
           </span>
+          <span style={{ fontSize: 10, color: "var(--text-warning)", display: "block", marginBottom: 12, padding: "6px 8px", background: "rgba(255, 200, 0, 0.08)", borderRadius: 4, lineHeight: 1.5 }}>
+            FIM prompts are sent in <strong>raw mode</strong> (bypassing chat template). This is required for
+            <strong> Qwen2.5-Coder</strong>, <strong>DeepSeek-Coder</strong>, <strong>CodeLlama</strong>, and
+            other FIM-trained models. If the model does not understand FIM tokens
+            (<code>&lt;|fim_prefix|&gt;...&lt;|fim_middle|&gt;</code>), it may return empty completions.
+            Switch to a raw-prefix-only model or disable the system prompt to troubleshoot.
+          </span>
 
           <label className="field-label">System Prompt</label>
           <textarea

@@ -222,6 +222,84 @@ describe("AiInlineCompletionProvider - API integration", () => {
 });
 
 // ===========================================================================
+// FITM parameter forwarding
+// ===========================================================================
+
+describe("AiInlineCompletionProvider - FITM parameter forwarding", () => {
+  beforeEach(() => {
+    mockCompletionResponse("const result = 42;");
+  });
+
+  it("forwards temperature, max_tokens, and system_prompt to ai_complete", async () => {
+    localStorage.setItem("nolock.fitmTemperature", "0.5");
+    localStorage.setItem("nolock.fitmMaxTokens", "128");
+    localStorage.setItem("nolock.fitmSystemPrompt", "You are a Rust expert.");
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const model = createModel("fn main() {");
+    const position = new Position(1, 12);
+
+    await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    const req = mockInvoke.mock.calls[1][1].req;
+    expect(req.temperature).toBe(0.5);
+    expect(req.max_tokens).toBe(128);
+    expect(req.system_prompt).toBe("You are a Rust expert.");
+  });
+
+  it("forwards undefined temperature and max_tokens when not set in localStorage", async () => {
+    localStorage.removeItem("nolock.fitmTemperature");
+    localStorage.removeItem("nolock.fitmMaxTokens");
+    localStorage.removeItem("nolock.fitmSystemPrompt");
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const model = createModel("fn main() {");
+    const position = new Position(1, 12);
+
+    await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    const req = mockInvoke.mock.calls[1][1].req;
+    expect(req.temperature).toBeUndefined();
+    expect(req.max_tokens).toBeUndefined();
+    expect(req.system_prompt).toBeUndefined();
+  });
+
+  it("forwards the configured completion model name", async () => {
+    localStorage.setItem("nolock.completionModel", "deepseek-coder:6.7b");
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const model = createModel("fn main() {");
+    const position = new Position(1, 12);
+
+    await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    const req = mockInvoke.mock.calls[1][1].req;
+    expect(req.model).toBe("deepseek-coder:6.7b");
+  });
+});
+
+// ===========================================================================
 // Response cleaning pipeline
 // ===========================================================================
 
@@ -350,6 +428,111 @@ describe("AiInlineCompletionProvider - response cleaning", () => {
     expect(result.items).toHaveLength(0);
   });
 
+  it("handles whitespace-only response from backend gracefully", async () => {
+    mockCompletionResponse("   \n  \n  ");
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const model = createModel("const x = ");
+    const position = new Position(1, 11);
+
+    const result = await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    expect(result.items).toHaveLength(0);
+  });
+
+  it("handles response that is only an empty markdown code block", async () => {
+    mockCompletionResponse("```\n```");
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const model = createModel("const x = ");
+    const position = new Position(1, 11);
+
+    const result = await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    expect(result.items).toHaveLength(0);
+  });
+
+  it("cleans FIM tokens from model output that echo them literally", async () => {
+    mockCompletionResponse("<|fim_middle|>fn main() {\n  println!(\"hello\");\n}");
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const model = createModel("fn main() {");
+    const position = new Position(1, 11);
+
+    const result = await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].insertText).toBe(
+      "fn main() {\n  println!(\"hello\");\n}",
+    );
+    expect(result.items[0].insertText).not.toContain("<|fim_middle|>");
+  });
+
+  it("discards stale responses when request counter changes", async () => {
+    // Simulate a second request starting before the first one completes
+    let resolveComplete!: (value: string) => void;
+    const completePromise = new Promise<any>((resolve) => { resolveComplete = resolve; });
+
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_secret") return Promise.resolve(null);
+      if (cmd === "ai_complete") return completePromise;
+      return Promise.resolve(null);
+    });
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+    const model = createModel("const x = ");
+    const position = new Position(1, 11);
+
+    // Start first request
+    const promise1 = provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    // Simulate a second typing event by incrementing request counter
+    (provider as any)._requestCounter = 1; // Simulate requestId mismatch
+    openGate(provider);
+
+    // Start second request (this would have requestId=2)
+    const promise2 = provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    // Resolve the first request
+    resolveComplete!("const result = 42;");
+
+    const [result1, result2] = await Promise.all([promise1, promise2]);
+
+    // First request should be discarded (stale)
+    expect(result1.items).toHaveLength(0);
+    // Second request should proceed (but its promise reuses the same mock)
+    // Since we didn't set up a response for the second, it may be empty
+  });
+
   it("discards stale responses when token is cancelled", async () => {
     // Pre-create both deferred promises so both resolve functions are defined
     // before provideInlineCompletions runs. This avoids microtask-ordering issues
@@ -474,5 +657,189 @@ describe("AiInlineCompletionProvider - FIM prompt construction", () => {
     const req = mockInvoke.mock.calls[1][1].req;
     expect(req.prompt).not.toContain("<|fim_prefix|>");
     expect(req.prompt).toBe("console.");
+  });
+});
+
+// ===========================================================================
+// FIM fallback: retry with raw prefix when FIM returns empty
+// ===========================================================================
+
+describe("AiInlineCompletionProvider - FIM fallback", () => {
+  it("retries with raw prefix when FIM request returns empty and suffix exists", async () => {
+    // First call (getSecret) and second call (ai_complete with FIM) return empty.
+    // Third call (ai_complete retry with raw prefix) returns the completion.
+    let callCount = 0;
+    mockInvoke.mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "get_secret") return Promise.resolve(null);
+      if (cmd === "ai_complete") {
+        callCount++;
+        if (callCount === 1) {
+          // First attempt with FIM tokens → empty
+          return Promise.resolve("");
+        }
+        // Second attempt with raw prefix → completion
+        return Promise.resolve("const result = 42;");
+      }
+      return Promise.resolve(null);
+    });
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    // Model with suffix (content after cursor)
+    const code = "function greet() {\n  \n}\n\n// after\n";
+    const model = createModel(code);
+    const position = new Position(1, 17); // cursor at end of "function greet() {"
+
+    const result = await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    // Should have made 3 invoke calls: getSecret + ai_complete(FIM) + ai_complete(retry)
+    expect(mockInvoke).toHaveBeenCalledTimes(3);
+
+    // First ai_complete should use FIM prompt
+    const fimCall = mockInvoke.mock.calls[1];
+    expect(fimCall[0]).toBe("ai_complete");
+    expect(fimCall[1].req.prompt).toContain("<|fim_prefix|>");
+
+    // Second ai_complete (retry) should use raw prefix, no FIM tokens
+    const retryCall = mockInvoke.mock.calls[2];
+    expect(retryCall[0]).toBe("ai_complete");
+    expect(retryCall[1].req.prompt).not.toContain("<|fim_prefix|>");
+    expect(retryCall[1].req.suffix).toBeNull();
+
+    // Should return the cleaned retry response
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].insertText).toBe("const result = 42;");
+  });
+
+  it("returns empty when both FIM and raw-prefix attempts return empty", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_secret") return Promise.resolve(null);
+      if (cmd === "ai_complete") return Promise.resolve("");
+      return Promise.resolve(null);
+    });
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const code = "function greet() {\n  \n}\n\n// after\n";
+    const model = createModel(code);
+    const position = new Position(1, 17);
+
+    const result = await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    // Two ai_complete calls (FIM + retry), both empty
+    expect(mockInvoke).toHaveBeenCalledTimes(3);
+    expect(result.items).toHaveLength(0);
+  });
+
+  it("does NOT retry when there is no suffix (FIM not used)", async () => {
+    let callCount = 0;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_secret") return Promise.resolve(null);
+      if (cmd === "ai_complete") {
+        callCount++;
+        return Promise.resolve("");
+      }
+      return Promise.resolve(null);
+    });
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    // Single line, no content after cursor
+    const model = createModel("const x = ");
+    const position = new Position(1, 11);
+
+    const result = await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    // Only getSecret + one ai_complete (no retry)
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(result.items).toHaveLength(0);
+  });
+
+  it("does NOT retry when FIM request succeeds (non-empty response)", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_secret") return Promise.resolve(null);
+      if (cmd === "ai_complete") return Promise.resolve("result");
+      return Promise.resolve(null);
+    });
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const code = "function greet() {\n  \n}\n\n// after\n";
+    const model = createModel(code);
+    const position = new Position(1, 17);
+
+    const result = await provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    // Only getSecret + one ai_complete (no retry needed)
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(result.items).toHaveLength(1);
+  });
+
+  it("discards stale retry when request counter changes", async () => {
+    let resolveFim!: (value: string) => void;
+    let resolveRetry!: (value: string) => void;
+
+    const fimPromise = new Promise<string>((resolve) => { resolveFim = resolve; });
+    const retryPromise = new Promise<string>((resolve) => { resolveRetry = resolve; });
+
+    let callIndex = 0;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_secret") return Promise.resolve(null);
+      if (cmd === "ai_complete") {
+        callIndex++;
+        if (callIndex === 1) return fimPromise;
+        if (callIndex === 2) return retryPromise;
+      }
+      return Promise.resolve(null);
+    });
+
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const code = "fn main() {\n  \n}\n";
+    const model = createModel(code);
+    const position = new Position(1, 12);
+
+    const promise = provider.provideInlineCompletions(
+      model,
+      position as any,
+      {} as any,
+      createCancellationToken(),
+    );
+
+    // Simulate stale request by bumping counter
+    (provider as any)._requestCounter++;
+
+    resolveFim!("");      // FIM returns empty
+    resolveRetry!("fn main() {\n  println!(\"hi\");\n}"); // retry returns code
+
+    const result = await promise;
+
+    // Both attempts were discarded
+    expect(result.items).toHaveLength(0);
   });
 });
