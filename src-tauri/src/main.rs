@@ -63,6 +63,36 @@ fn list_directory(path: String, show_hidden: Option<bool>) -> Result<Vec<DirEntr
 }
 
 #[tauri::command]
+fn list_files_recursive(path: String) -> Result<Vec<String>, String> {
+    let mut files = Vec::new();
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", path));
+    }
+    collect_files(dir, &mut files).map_err(|e| e.to_string())?;
+    Ok(files)
+}
+
+fn collect_files(dir: &std::path::Path, files: &mut Vec<String>) -> std::io::Result<()> {
+    if dir.is_dir() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                collect_files(&path, files)?;
+            } else {
+                files.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn rename_file(path: String, new_name: String) -> Result<(), String> {
     let parent = std::path::Path::new(&path)
         .parent()
@@ -2866,6 +2896,7 @@ pub fn run() {
             read_file,
             write_file,
             list_directory,
+            list_files_recursive,
             rename_file,
             delete_file,
             copy_file,
