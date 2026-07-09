@@ -34,7 +34,7 @@ interface Props {
   /** Root path to list files from */
   rootPath: string;
   /** Called when a file is selected */
-  onSelect: (filePath: string, fileName: string) => void;
+  onSelect: (filePath: string, fileName: string, isDir: boolean) => void;
   /** Called when an agent is selected */
   onSelectAgent?: (agent: AgentRef) => void;
   /** Called when the autocomplete should close (escape, blur, etc.) */
@@ -222,9 +222,14 @@ export default function FileAutocomplete({ query, rootPath, onSelect, onSelectAg
             description: selected.description || "",
           });
         } else if (selected.is_dir) {
-          navigateInto(selected.path);
+          // Enter selects the directory as a reference; Shift+Enter navigates into it
+          if (e.shiftKey) {
+            navigateInto(selected.path);
+          } else {
+            onSelect(selected.path, selected.name, true);
+          }
         } else {
-          onSelect(selected.path, selected.name);
+          onSelect(selected.path, selected.name, false);
         }
       } else if (e.key === "Escape") {
         e.preventDefault();
@@ -283,9 +288,14 @@ export default function FileAutocomplete({ query, rootPath, onSelect, onSelectAg
                   description: item.description || "",
                 });
               } else if (item.is_dir) {
-                navigateInto(item.path);
+                // Shift+click selects directory; normal click navigates
+                if ((window.event as MouseEvent | undefined)?.shiftKey) {
+                  onSelect(item.path, item.name, true);
+                } else {
+                  navigateInto(item.path);
+                }
               } else {
-                onSelect(item.path, item.name);
+                onSelect(item.path, item.name, false);
               }
             }}
             onMouseEnter={() => setSelectedIndex(i)}

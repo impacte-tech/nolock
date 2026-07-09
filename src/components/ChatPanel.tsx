@@ -36,8 +36,8 @@ interface Message {
   /** Text to display in the chat UI (user sees this instead of the full API content) */
   displayContent?: string;
   toolCalls?: ToolCallLog[];
-  /** File, agent, and skill mentions referenced in this message (for context badges). */
-  contextRefs?: { type: "file" | "agent" | "skill" | "tool"; name: string }[];
+  /** File, directory, agent, skill, and tool mentions referenced in this message (for context badges). */
+  contextRefs?: { type: "file" | "directory" | "agent" | "skill" | "tool"; name: string }[];
   /** RLHF feedback: "good" (thumbs up), "bad" (thumbs down), or undefined (not rated). */
   feedback?: FeedbackType;
   /** User's correction text for a "bad" rating. */
@@ -53,6 +53,7 @@ interface Message {
 export interface FileRef {
   path: string;
   name: string;
+  isDir?: boolean;
   /** Internal: token count of file content (populated after first read). */
   _tokenCount?: number;
 }
@@ -160,7 +161,7 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
  * Splits on @word patterns and wraps matches in a styled span.
  */
 function MentionHighlight({ text }: { text: string }) {
-  const parts = text.split(/(@\w[\w.-]*)/g);
+  const parts = text.split(/(@[\w.\/-]+)/g);
   return (
     <>
       {parts.map((part, i) =>
@@ -405,17 +406,26 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setMentionType(null);
   }, []);
 
-  /** Called when user selects a file from the autocomplete dropdown. */
-  const handleFileSelect = useCallback((filePath: string, fileName: string) => {
+  /** Called when user selects a file or directory from the autocomplete dropdown. */
+  const handleFileSelect = useCallback((filePath: string, fileName: string, isDir: boolean) => {
+    // Compute a path relative to the project root for display
+    const relativeName = rootPath
+      ? filePath.replace(rootPath, "").replace(/^[\\/]+/, "") || fileName
+      : fileName;
+
     // Keep the @name visible in the input (replace the partial query with the full @name)
     if (mentionIndex !== -1 && mentionQuery !== null) {
       const before = input.substring(0, mentionIndex);
       const after = input.substring(mentionIndex + 1 + mentionQuery.length);
-      setInput(before + "@" + fileName + after);
+      setInput(before + "@" + relativeName + after);
     }
 
     // Add to file refs (deduplicate by path)
-    setFileRefs((prev) => (prev.some((r) => r.path === filePath) ? prev : [...prev, { path: filePath, name: fileName }]));
+    setFileRefs((prev) =>
+      prev.some((r) => r.path === filePath)
+        ? prev
+        : [...prev, { path: filePath, name: relativeName, isDir }]
+    );
 
     // Close autocomplete
     setMentionQuery(null);
@@ -424,7 +434,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     // Refocus the textarea
     textareaRef.current?.focus();
-  }, [input, mentionIndex, mentionQuery]);
+  }, [input, mentionIndex, mentionQuery, rootPath]);
 
   /** Called when user selects an agent from the autocomplete dropdown. */
   const handleAgentSelect = useCallback((agent: AgentRef) => {
@@ -760,8 +770,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     // ---- Build display content (what the user sees in chat) ----
     // The @mentions and /mentions are already embedded in the input text (kept on autocomplete select).
     // We just show the message as-is, with context badges below.
-    const contextRefs: { type: "file" | "agent" | "skill" | "tool"; name: string }[] = [
-      ...fileRefs.map((r) => ({ type: "file" as const, name: r.name })),
+    const contextRefs: { type: "file" | "directory" | "agent" | "skill" | "tool"; name: string }[] = [
+      ...fileRefs.map((r) => ({ type: r.isDir ? ("directory" as const) : ("file" as const), name: r.name })),
       ...agentRefs.map((r) => ({ type: "agent" as const, name: r.name })),
       ...skillRefs.map((r) => ({ type: "skill" as const, name: r.name })),
       ...toolRefs.map((r) => ({ type: "tool" as const, name: r.name })),
@@ -774,15 +784,46 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     // Collect file contexts
     const contextParts: string[] = [];
+
+    // Always include the working directory so the agent knows where it is
+    if (rootPath) {
+      contextParts.push(`Working directory: ${rootPath}`);
+    }
+
     if (fileRefs.length > 0) {
+      const expandedFilePaths = new Set<string>();
       for (const ref of fileRefs) {
-        try {
-          const fileContent: string = await invoke("read_file", { path: ref.path });
-          const tokenCount = countTokens(fileContent);
-          contextParts.push(`File: ${ref.path}\n\`\`\`\n${fileContent}\n\`\`\``);
-          refsWithSize.push({ ...ref, _tokenCount: tokenCount });
-        } catch (e) {
-          console.error(`Failed to read referenced file ${ref.path}:`, e);
+        if (ref.isDir) {
+          try {
+            const files: string[] = await invoke("list_files_recursive", { path: ref.path });
+            for (const filePath of files) {
+              if (expandedFilePaths.has(filePath)) continue;
+              expandedFilePaths.add(filePath);
+              try {
+                const fileContent: string = await invoke("read_file", { path: filePath });
+                const tokenCount = countTokens(fileContent);
+                contextParts.push(`File: ${filePath}\n\`\`\`\n${fileContent}\n\`\`\``);
+                refsWithSize.push({
+                  path: filePath,
+                  name: rootPath ? filePath.replace(rootPath, "").replace(/^[\\/]+/, "") || filePath : filePath,
+                  _tokenCount: tokenCount,
+                });
+              } catch (e) {
+                console.error(`Failed to read referenced file ${filePath}:`, e);
+              }
+            }
+          } catch (e) {
+            console.error(`Failed to list directory ${ref.path}:`, e);
+          }
+        } else {
+          try {
+            const fileContent: string = await invoke("read_file", { path: ref.path });
+            const tokenCount = countTokens(fileContent);
+            contextParts.push(`File: ${ref.path}\n\`\`\`\n${fileContent}\n\`\`\``);
+            refsWithSize.push({ ...ref, _tokenCount: tokenCount });
+          } catch (e) {
+            console.error(`Failed to read referenced file ${ref.path}:`, e);
+          }
         }
       }
       if (refsWithSize.length > 0) {
@@ -1181,13 +1222,20 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         <div ref={messagesEndRef} />
       </div>
       <div className="chat-input-area">
-        {/* File ref chips */}
+        {/* File / directory ref chips */}
         {fileRefs.length > 0 && (
           <div className="file-ref-chips">
             <div className="file-ref-chips-list">
               {fileRefs.map((ref) => (
-                <div key={ref.path} className="file-ref-chip">
-                  <span className="file-ref-name">{ref.name}</span>
+                <div key={ref.path} className={`file-ref-chip ${ref.isDir ? "directory-ref-chip" : ""}`}>
+                  {ref.isDir && (
+                    <span className="directory-ref-icon">
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                      </svg>
+                    </span>
+                  )}
+                  <span className="file-ref-name">{ref.isDir ? ref.name : ref.name}</span>
                   <span className="file-ref-remove" onClick={() => removeFileRef(ref.path)}>&times;</span>
                 </div>
               ))}

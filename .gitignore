@@ -5,3 +5,4 @@ src-tauri/target/
 *.vsix
 .planning/
 src-tauri/gen/
+.rlhf/
