@@ -121,6 +121,18 @@ describe("extractCodeFromResponse", () => {
     expect(result).toBe("function hello() {\n  return 42;\n}");
   });
 
+  it("strips <|cursor|> token from response", () => {
+    const input = "strs: Vec<String>,\n) -> Result<(), Box<dyn std::error::Error>> {<|cursor|\n}";
+    const result = extractCodeFromResponse(input);
+    expect(result).toBe("strs: Vec<String>,\n) -> Result<(), Box<dyn std::error::Error>> {\n}");
+  });
+
+  it("strips multiple <|cursor|> tokens", () => {
+    const input = "<|cursor|>const x = <|cursor|>42;<|cursor|>";
+    const result = extractCodeFromResponse(input);
+    expect(result).toBe("const x = 42;");
+  });
+
   it("extracts code from markdown code blocks", () => {
     const input = "```python\nprint('hello world')\n```";
     expect(extractCodeFromResponse(input)).toBe("print('hello world')");

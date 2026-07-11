@@ -386,21 +386,21 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
       }
     });
 
-    // Cmd/Ctrl+Z — explicit undo (works around webview intercepting native undo)
+    // Ctrl+Z / Ctrl+Y / Ctrl+A — keybinding fallback for Linux/Windows.
+    // On macOS the capture handler below prevents native WKWebView handling
+    // and calls editor.trigger directly (with stopPropagation), so these
+    // addCommand calls won't fire there.
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyZ, () => {
-      editor.trigger("", "undo", null);
+      editor.trigger("keyboard", "undo", null);
     });
-
-    // Cmd/Ctrl+Y / Cmd/Ctrl+Shift+Z — explicit redo
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyY, () => {
-      editor.trigger("", "redo", null);
+      editor.trigger("keyboard", "redo", null);
     });
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyZ, () => {
-      editor.trigger("", "redo", null);
+      editor.trigger("keyboard", "redo", null);
     });
-
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyA, () => {
-      editor.trigger("keyboard", "editor.action.selectAll", null);
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyA, () => {
+      editor.trigger("keyboard", "selectAll", null);
     });
 
     // Ctrl+. — explicit FITM trigger (bypasses debounce)
@@ -410,23 +410,49 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
 
     // ---- Defensive: prevent native browser shortcuts ----------------------
     //
-    // Some keybindings (Ctrl+S, Ctrl+.) have native browser/webview handlers
-    // that can conflict with Monaco.  We intercept them on the capture phase
-    // and prevent default, but do NOT stop propagation — Monaco's own handler
-    // still fires normally.
-    //
-    // For Ctrl+Z/Y/A we rely on editor.addCommand above (Monaco's keybinding
-    // system) instead of preventDefault, since preventDefault on capture can
-    // prevent Monaco from seeing the event.
+    // On macOS, WKWebView intercepts Cmd+Z/Y/A at the NSResponder level before
+    // the keydown event reaches Monaco's keybinding system.  We intercept on
+    // the capture phase, prevent the native action, and call editor.trigger
+    // directly.
     //
     const preventNativeShortcuts = (e: KeyboardEvent) => {
+      // Native "Save Page" in webview
       if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
-        // Native "Save Page" in webview
         e.preventDefault();
+        return;
       }
+      // Native zoom-in in browser/webview
       if ((e.ctrlKey || e.metaKey) && e.key === ".") {
-        // Native zoom-in in browser/webview
         e.preventDefault();
+        return;
+      }
+      // Cmd+Z — undo (macOS WKWebView intercepts natively)
+      if ((e.metaKey && !e.ctrlKey && (e.key === "z" || e.key === "Z"))) {
+        e.preventDefault();
+        e.stopPropagation();
+        editor.trigger("keyboard", "undo", null);
+        return;
+      }
+      // Cmd+Y — redo on Mac
+      if ((e.metaKey && !e.ctrlKey && (e.key === "y" || e.key === "Y"))) {
+        e.preventDefault();
+        e.stopPropagation();
+        editor.trigger("keyboard", "redo", null);
+        return;
+      }
+      // Cmd+Shift+Z — redo on Mac
+      if (e.metaKey && !e.ctrlKey && e.shiftKey && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        e.stopPropagation();
+        editor.trigger("keyboard", "redo", null);
+        return;
+      }
+      // Cmd+A — select all
+      if ((e.metaKey && !e.ctrlKey && (e.key === "a" || e.key === "A"))) {
+        e.preventDefault();
+        e.stopPropagation();
+        editor.trigger("keyboard", "selectAll", null);
+        return;
       }
     };
     document.addEventListener("keydown", preventNativeShortcuts, true);

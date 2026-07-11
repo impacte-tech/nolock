@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import DirectoryPicker from "./DirectoryPicker";
 
 interface DirEntry {
   name: string;
@@ -54,6 +55,15 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   const [entries, setEntries] = useState<TreeDirEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [activePath, setActivePath] = useState<string | null>(null);
+  const [rootExpanded, setRootExpanded] = useState(true);
+  const entriesRef = useRef<TreeDirEntry[]>([]);
+  const dragSourceRef = useRef<string | null>(null);
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+
+  // Keep entriesRef in sync with entries state
+  useEffect(() => {
+    entriesRef.current = entries;
+  }, [entries]);
 
   // ---- Context menu state ----
   const [ctxMenu, setCtxMenu] = useState<CtxMenu>({
@@ -73,6 +83,9 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   // ---- Copy/paste clipboard ----
   const copiedPathRef = useRef<string | null>(null);
 
+  // ---- "Move to..." directory picker ----
+  const [moveSource, setMoveSource] = useState<string | null>(null);
+
   // ---- Load directory on mount / path change ----
   const loadDir = useCallback(async (dirPath: string) => {
     setLoading(true);
@@ -89,6 +102,45 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
       setEntries([]);
     }
     setLoading(false);
+  }, []);
+
+  /** Re-fetches directory contents at dirPath, preserving expanded/children state. */
+  const reloadPreservingState = useCallback(async (dirPath: string) => {
+    try {
+      const items: DirEntry[] = await invoke("list_directory", { path: dirPath, showHidden: true });
+      const oldEntries = entriesRef.current;
+
+      // Walk the entire old tree to collect expanded paths and cached children
+      const expandedPaths = new Set<string>();
+      const childrenCache = new Map<string, TreeDirEntry[] | undefined>();
+      const walkOld = (list: TreeDirEntry[]) => {
+        for (const e of list) {
+          if (e.expanded) expandedPaths.add(e.path);
+          if (e.children) {
+            childrenCache.set(e.path, e.children);
+            walkOld(e.children);
+          }
+        }
+      };
+      walkOld(oldEntries);
+
+      // Merge new items with preserved state (recursive)
+      const merge = (newItems: DirEntry[]): TreeDirEntry[] =>
+        newItems.map((item) => {
+          const wasExpanded = expandedPaths.has(item.path);
+          const cachedChildren = childrenCache.get(item.path);
+          return {
+            ...item,
+            children: cachedChildren,
+            expanded: wasExpanded,
+            loaded: wasExpanded ? true : false,
+          };
+        });
+
+      setEntries(merge(items));
+    } catch (e) {
+      console.error("Failed to reload directory:", e);
+    }
   }, []);
 
   useEffect(() => {
@@ -201,13 +253,14 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     try {
       await invoke("rename_file", { path: renaming.path, newName });
       setRenaming(null);
-      loadDir(rootPath);
+      // Reload but preserve expanded state
+      reloadPreservingState(rootPath);
     } catch (e) {
       console.error("Rename failed:", e);
       alert(`Rename failed: ${e}`);
       setRenaming(null);
     }
-  }, [renaming, loadDir, rootPath]);
+  }, [renaming, rootPath]);
 
   const cancelRename = useCallback(() => {
     setRenaming(null);
@@ -218,9 +271,9 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     const kind = entry.is_dir ? "folder" : "file";
     if (!confirm(`Delete ${kind} "${entry.name}"?`)) return;
     invoke("delete_file", { path: entry.path })
-      .then(() => loadDir(rootPath))
+      .then(() => reloadPreservingState(rootPath))
       .catch((e: any) => alert(`Delete failed: ${e}`));
-  }, [closeCtx, loadDir, rootPath]);
+  }, [closeCtx, rootPath]);
 
   const doCopy = useCallback((entry: TreeDirEntry) => {
     closeCtx();
@@ -236,11 +289,11 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     try {
       await invoke("copy_file", { source: src, destination: dest });
       copiedPathRef.current = null;
-      loadDir(rootPath);
+      reloadPreservingState(rootPath);
     } catch (e) {
       alert(`Paste failed: ${e}`);
     }
-  }, [closeCtx, loadDir, rootPath]);
+  }, [closeCtx, reloadPreservingState, rootPath]);
 
   const doNewFile = useCallback((parentPath: string) => {
     closeCtx();
@@ -259,13 +312,13 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     try {
       await invoke("create_file", { path: fullPath });
       setNewFileName(null);
-      loadDir(rootPath);
+      reloadPreservingState(rootPath);
     } catch (e) {
       console.error("Create file failed:", e);
       alert(`Create file failed: ${e}`);
       setNewFileName(null);
     }
-  }, [newFileName, loadDir, rootPath]);
+  }, [newFileName, reloadPreservingState, rootPath]);
 
   const cancelNewFile = useCallback(() => {
     setNewFileName(null);
@@ -288,17 +341,82 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     try {
       await invoke("create_directory", { path: fullPath });
       setNewFolderName(null);
-      loadDir(rootPath);
+      reloadPreservingState(rootPath);
     } catch (e) {
       console.error("Create folder failed:", e);
       alert(`Create folder failed: ${e}`);
       setNewFolderName(null);
     }
-  }, [newFolderName, loadDir, rootPath]);
+  }, [newFolderName, reloadPreservingState, rootPath]);
 
   const cancelNewFolder = useCallback(() => {
     setNewFolderName(null);
   }, []);
+
+  // Helper: find an entry by path in the tree (recursive)
+  const findEntryByPath = useCallback((path: string, items: TreeDirEntry[]): TreeDirEntry | null => {
+    for (const item of items) {
+      if (item.path === path) return item;
+      if (item.children) {
+        const found = findEntryByPath(path, item.children);
+        if (found) return found;
+      }
+    }
+    return null;
+  }, []);
+
+  // Container-level drag/drop (event delegation)
+  const handleContainerDragOver = useCallback((e: React.DragEvent) => {
+    const item = (e.target as Element).closest('.tree-item');
+    if (!item) {
+      if (dragOverPath !== null) setDragOverPath(null);
+      return;
+    }
+    const isDir = item.getAttribute('data-is-dir') === 'true';
+    if (!isDir) {
+      e.dataTransfer.dropEffect = "none";
+      if (dragOverPath !== null) setDragOverPath(null);
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const path = item.getAttribute('data-path');
+    if (path && dragOverPath !== path) {
+      setDragOverPath(path);
+    }
+  }, [dragOverPath]);
+
+  const handleContainerDragLeave = useCallback((e: React.DragEvent) => {
+    // Only clear when actually leaving the entire file-tree
+    const related = e.relatedTarget as Node | null;
+    if (!related || !e.currentTarget.contains(related)) {
+      setDragOverPath(null);
+    }
+  }, []);
+
+  const handleContainerDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOverPath(null);
+    const srcPath = dragSourceRef.current || e.dataTransfer.getData("text/plain");
+    dragSourceRef.current = null;
+    if (!srcPath) return;
+
+    const item = (e.target as Element).closest('.tree-item');
+    if (!item) return;
+    const path = item.getAttribute('data-path');
+    const isDir = item.getAttribute('data-is-dir') === 'true';
+    if (!path) return;
+    if (!isDir) return;
+    if (srcPath === path) return;
+
+    try {
+      await invoke("move_file", { source: srcPath, destDir: path });
+      reloadPreservingState(rootPath);
+    } catch (err) {
+      console.error("Failed to move file:", err);
+      alert(`Failed to move file: ${err}`);
+    }
+  }, [rootPath, reloadPreservingState]);
 
   // ---- Tree rendering ----
   const renderItem = (entry: TreeDirEntry, depth: number) => {
@@ -308,14 +426,23 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
       ? entry.expanded ? "\u25BC" : "\u25B6"
       : null;
     const fileColor = !entry.is_dir ? getFileColor(entry.name) : undefined;
+    const isDragOver = entry.is_dir && dragOverPath === entry.path;
 
     // Inline rename
     const isRenaming = renaming && renaming.path === entry.path;
 
+    const handleDragStart = (e: React.DragEvent) => {
+      e.dataTransfer.setData("text/plain", entry.path);
+      e.dataTransfer.effectAllowed = "move";
+      dragSourceRef.current = entry.path;
+    };
+
     return (
       <div key={entry.path}>
         <div
-          className={`tree-item ${isActive ? "active" : ""} ${isHidden ? "tree-item--hidden" : ""}`}
+          className={`tree-item ${isActive ? "active" : ""} ${isHidden ? "tree-item--hidden" : ""} ${isDragOver ? "tree-item--drag-over" : ""}`}
+          data-path={entry.path}
+          data-is-dir={entry.is_dir ? "true" : "false"}
           style={{ paddingLeft: `${8 + depth * 14}px` } as React.CSSProperties}
           onClick={() => {
             if (entry.is_dir) {
@@ -326,6 +453,8 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
             }
           }}
           onContextMenu={(e) => openCtxForItem(e, entry)}
+          draggable={!entry.is_dir}
+          onDragStart={handleDragStart}
         >
           {entry.is_dir ? (
             <span className="chevron">{chevron}</span>
@@ -413,19 +542,25 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
       <div
         className="file-tree"
         onContextMenu={openCtxForWhitespace}
+        onDragOver={handleContainerDragOver}
+        onDragLeave={handleContainerDragLeave}
+        onDrop={handleContainerDrop}
       >
         {rootPath && (
           <div
-            className="tree-item"
+            className={`tree-item${dragOverPath === rootPath ? " tree-item--drag-over" : ""}`}
+            data-path={rootPath}
+            data-is-dir="true"
             style={{ paddingLeft: "8px" } as React.CSSProperties}
+            onClick={() => setRootExpanded((v) => !v)}
           >
-            <span className="chevron">&#x25BC;</span>
+            <span className="chevron">{rootExpanded ? "\u25BC" : "\u25B6"}</span>
             <span className="file-name" style={{ fontWeight: 600 }}>
               {rootPath.split("/").pop() || rootPath}
             </span>
           </div>
         )}
-        {entries.map((e) => renderItem(e, 1))}
+        {rootExpanded && entries.map((e) => renderItem(e, 1))}
 
         {/* Inline "new file" input at root level */}
         {newFileName && newFileName.parentPath === rootPath && (
@@ -553,17 +688,42 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
                   </div>
                 </>
               ) : (
-                // File: Rename, Delete, Copy
-                <div
-                  className="ctx-menu-item"
-                  onClick={() => ctxMenu.target && doCopy(ctxMenu.target)}
-                >
-                  Copy
-                </div>
+                // File: Rename, Delete, Copy, Move to...
+                <>
+                  <div
+                    className="ctx-menu-item"
+                    onClick={() => ctxMenu.target && doCopy(ctxMenu.target)}
+                  >
+                    Copy
+                  </div>
+                  <div className="ctx-menu-separator" />
+                  <div
+                    className="ctx-menu-item"
+                    onClick={() => {
+                      if (ctxMenu.target) setMoveSource(ctxMenu.target.path);
+                      setCtxMenu((p) => ({ ...p, visible: false }));
+                    }}
+                  >
+                    Move to...
+                  </div>
+                </>
               )}
             </>
           ) : null}
         </div>
+      )}
+      {moveSource && rootPath && (
+        <DirectoryPicker
+          sourcePath={moveSource}
+          sourceName={moveSource.split("/").pop() || moveSource}
+          rootPath={rootPath}
+          onMove={async (source, destDir) => {
+            await invoke("move_file", { source, destDir });
+            setMoveSource(null);
+            reloadPreservingState(rootPath);
+          }}
+          onClose={() => setMoveSource(null)}
+        />
       )}
     </div>
   );

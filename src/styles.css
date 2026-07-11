@@ -299,6 +299,12 @@ html, body, #root {
   font-style: italic;
 }
 
+.tree-item--drag-over {
+  background: rgba(255, 255, 255, 0.12);
+  outline: 1px dashed rgba(255, 255, 255, 0.3);
+  outline-offset: -1px;
+}
+
 /* ===== Inline rename / new-file input in tree ===== */
 .tree-rename-input {
   background: var(--bg-surface);
@@ -372,7 +378,6 @@ html, body, #root {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  height: 100%;
 }
 
 /* Outer wrapper for editor + browser row (terminal sits below) */
@@ -458,7 +463,8 @@ html, body, #root {
 .browser-panel {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 .browser-toolbar {
