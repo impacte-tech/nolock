@@ -183,7 +183,7 @@ describe("saveKtoFeedback", () => {
   it("saves good (thumbs-up) feedback to good dir under project root", async () => {
     const path = await saveKtoFeedback("/my/project", {
       prompt: "What is Rust?",
-      response: "Rust is a systems language.",
+      completion: "Rust is a systems language.",
       label: true,
       model_provider: "ollama",
       model_name: "qwen3:8b",
@@ -202,7 +202,7 @@ describe("saveKtoFeedback", () => {
   it("saves bad (thumbs-down) feedback to bad dir", async () => {
     const path = await saveKtoFeedback("/my/project", {
       prompt: "Explain monads.",
-      response: "Monads are...",
+      completion: "Monads are...",
       label: false,
       model_provider: "ollama",
       model_name: "qwen3:8b",
@@ -224,7 +224,7 @@ describe("saveKtoFeedback", () => {
 
     const path = await saveKtoFeedback("/custom/path", {
       prompt: "Q",
-      response: "A",
+      completion: "A",
       label: true,
       model_provider: "ollama",
       model_name: "qwen3:8b",
@@ -240,7 +240,7 @@ describe("saveKtoFeedback", () => {
 
     const path = await saveKtoFeedback("/path", {
       prompt: "Q",
-      response: "A",
+      completion: "A",
       label: false,
       model_provider: "ollama",
       model_name: "qwen3:8b",
@@ -255,7 +255,7 @@ describe("saveKtoFeedback", () => {
   it("sanitises model key (non-alphanumeric chars replaced with underscore)", async () => {
     const path = await saveKtoFeedback("/p", {
       prompt: "Q",
-      response: "A",
+      completion: "A",
       label: true,
       model_provider: "open-ai",
       model_name: "gpt-4o:latest",
@@ -271,7 +271,7 @@ describe("saveKtoFeedback", () => {
     setLocal("nolock.rlhf.enabled", "false");
     const path = await saveKtoFeedback("/my/project", {
       prompt: "Hi",
-      response: "Hello",
+      completion: "Hello",
       label: true,
       model_provider: "ollama",
       model_name: "qwen3:8b",
@@ -291,7 +291,7 @@ describe("saveKtoFeedback", () => {
 
     const path = await saveKtoFeedback("", {
       prompt: "Q",
-      response: "A",
+      completion: "A",
       label: true,
       model_provider: "ollama",
       model_name: "model",
@@ -317,7 +317,7 @@ describe("saveKtoFeedback", () => {
 
     const path = await saveKtoFeedback("", {
       prompt: "Q",
-      response: "A",
+      completion: "A",
       label: true,
       model_provider: "ollama",
       model_name: "model",
@@ -337,7 +337,7 @@ describe("saveKtoFeedback", () => {
     await expect(
       saveKtoFeedback("/project", {
         prompt: "Q",
-        response: "A",
+        completion: "A",
         label: true,
         model_provider: "ollama",
         model_name: "m",
@@ -358,7 +358,7 @@ describe("saveKtoFeedback", () => {
 
     await saveKtoFeedback("/p", {
       prompt: "How?",
-      response: "Like this.",
+      completion: "Like this.",
       label: false,
       model_provider: "ollama",
       model_name: "qwen3:8b",
@@ -371,7 +371,7 @@ describe("saveKtoFeedback", () => {
     expect(writtenContent.endsWith("\n")).toBe(true);
     const parsed = JSON.parse(writtenContent.trim());
     expect(parsed.prompt).toBe("How?");
-    expect(parsed.response).toBe("Like this.");
+    expect(parsed.completion).toBe("Like this.");
     expect(parsed.label).toBe(false);
     expect(parsed.model_provider).toBe("ollama");
     expect(parsed.model_name).toBe("qwen3:8b");
@@ -393,7 +393,7 @@ describe("saveKtoFeedback", () => {
 
     await saveKtoFeedback("/p", {
       prompt: "Q",
-      response: "A",
+      completion: "A",
       label: true,
       model_provider: "ollama",
       model_name: "m",
@@ -618,7 +618,7 @@ describe("saveRlhfFeedback (deprecated)", () => {
     const content = callArgs?.[1]?.content || "";
     const parsed = JSON.parse(content.trim());
     expect(parsed.prompt).toBe("What is Rust?");
-    expect(parsed.response).toBe("Rust is a systems language.");
+    expect(parsed.completion).toBe("Rust is a systems language.");
     expect(parsed.label).toBe(true);
     expect(parsed.model_provider).toBe("ollama");
     expect(parsed.model_name).toBe("qwen3:8b");
@@ -647,7 +647,7 @@ describe("saveRlhfFeedback (deprecated)", () => {
     const parsed = JSON.parse(content.trim());
     expect(parsed.label).toBe(false);
     expect(parsed.prompt).toBe("Q");
-    expect(parsed.response).toBe("A");
+    expect(parsed.completion).toBe("A");
     expect(parsed.user_correction).toBe("Fix it");
   });
 

@@ -146,7 +146,7 @@ Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), ma
 ```json
 {
   "prompt": "What is Rust?",
-  "response": "Rust is a systems language.",
+  "completion": "Rust is a systems language.",
   "label": true,
   "model_provider": "ollama",
   "model_name": "qwen3:8b",
@@ -174,7 +174,7 @@ Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), ma
 
 2. **No extra workflow burden**: Thumbs-up/down buttons appear naturally on every AI response. DPO prompts happen at configurable intervals. Feedback collection is woven into the chat experience, not a separate chore.
 
-3. **Portable and framework-ready**: The JSONL format is the standard input for popular RLHF training libraries (e.g., Hugging Face TRL, Axolotl, LLaMA Factory). Export your `.rlhf/` directory to any training pipeline — no conversion needed.
+3. **Portable and framework-ready**: The JSONL format matches the [DPO](https://huggingface.co/docs/trl/v1.8.0/en/dpo_trainer#expected-dataset-type-and-format) and [KTO](https://huggingface.co/docs/trl/v1.8.0/en/kto_trainer#expected-dataset-type-and-format) dataset schemas used by Hugging Face TRL (v1.8.0). Export your `.rlhf/` directory to TRL, Axolotl, or LLaMA Factory — no conversion needed.
 
 4. **Model-configuration aware**: Because data is partitioned by provider + model (e.g., `ollama_qwen3_8b` vs `openrouter_gpt-4o`), you can train separate adapters for different models or analyze which backends produce the most preferred responses.
 
@@ -191,12 +191,17 @@ Press **`Ctrl+A, R`** to open the RLHF settings panel. There you can:
 
 Every AI chat response will then show thumbs-up and thumbs-down buttons. If DPO is enabled, the system will automatically generate two responses at the configured interval for you to compare.
 
+### Training with Your Data
+
+The collected JSONL data is ready for fine-tuning with [Hugging Face TRL](https://huggingface.co/docs/trl/v1.8.0) (`trl==1.8.0`). See **[.rlhf/README.md](.rlhf/README.md)** for complete DPO and KTO training guides with example scripts.
+
 ---
 
 ## Acknowledgements
 
 nolock would not exist without the following open-source projects and communities:
 
+- **[Hugging Face TRL](https://huggingface.co/docs/trl)** — The Transformer Reinforcement Learning library that provides state-of-the-art implementations of alignment methods (DPO, KTO, PPO, and more). nolock's RLHF dataset formats are designed to be directly compatible with TRL's [DPOTrainer](https://huggingface.co/docs/trl/v1.8.0/en/dpo_trainer) and [KTOTrainer](https://huggingface.co/docs/trl/v1.8.0/en/kto_trainer).
 - **[OpenCode Zen](https://opencode.ai)** — For providing an AI inference service with a generous free tier that made autonomous development workflows possible without any API costs. This project was built primarily using the **Big Pickle** model (`opencode/big-pickle`).
 
   > **Cost Tracker:** This project has incurred **$0.00 USD** in AI API costs to date. All development was powered entirely by OpenCode Zen's free Big Pickle model.

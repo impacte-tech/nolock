@@ -5,4 +5,8 @@ src-tauri/target/
 *.vsix
 .planning/
 src-tauri/gen/
-.rlhf/
+.venv-rlhf/
+# Ignore RLHF feedback data, but keep the training guide and dependencies tracked
+.rlhf/*
+!.rlhf/requirements.txt
+!.rlhf/README.md

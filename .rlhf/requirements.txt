@@ -1,0 +1,13 @@
+# Python dependencies for fine-tuning models on nolock's RLHF datasets.
+#
+# Install:  pip install -r .rlhf/requirements.txt
+# Docs:     https://huggingface.co/docs/trl/v1.8.0
+#
+# The JSONL data under .rlhf/dpo/ is pre-formatted for TRL's DPOTrainer
+# and KTOTrainer — no conversion needed.
+
+trl==1.8.0
+transformers>=4.50.0
+datasets>=3.0.0
+accelerate>=1.0.0
+peft>=0.15.0

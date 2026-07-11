@@ -4,14 +4,17 @@
  * Stores user feedback in JSONL format, partitioned by model configuration.
  * All feedback is consolidated under a `dpoDir` parent folder for clarity.
  *
+ * The JSONL schemas follow the dataset formats expected by Hugging Face TRL
+ * (https://huggingface.co/docs/trl/v1.8.0) for DPO and KTO training.
+ *
  * ## KTO format (thumbs up / thumbs down)
  *
  * Each entry is appended as one JSON line to:
  *   <root>/<dpoDir>/<goodDir>/<modelKey>/data.jsonl   (thumbs up, label: true)
  *   <root>/<dpoDir>/<badDir>/<modelKey>/data.jsonl    (thumbs down, label: false)
  *
- * JSONL line schema (KTO-compatible):
- *   { "prompt": "...", "response": "...", "label": true|false,
+ * JSONL line schema (KTO-compatible — see https://huggingface.co/docs/trl/v1.8.0/en/kto_trainer):
+ *   { "prompt": "...", "completion": "...", "label": true|false,
  *     "model_provider": "...", "model_name": "...",
  *     "model_configurations": { "temperature": ..., "max_tokens": ..., "system_prompt": "..." },
  *     "timestamp": "ISO 8601", "user_correction": "..." }
@@ -22,7 +25,7 @@
  * The chosen/rejected pair is appended as one JSON line to:
  *   <root>/<dpoDir>/<pairwiseDir>/<modelKey>/data.jsonl
  *
- * JSONL line schema (DPO-compatible):
+ * JSONL line schema (DPO-compatible — see https://huggingface.co/docs/trl/v1.8.0/en/dpo_trainer):
  *   { "prompt": "...", "chosen": "...", "rejected": "...",
  *     "model_provider": "...", "model_name": "...",
  *     "model_configurations": { ... },
@@ -72,10 +75,14 @@ export const DEFAULT_DPO_DIR = "dpo";
 /** Default subdirectory for pairwise preference data. */
 export const DEFAULT_PAIRWISE_DIR = "pairwise";
 
-/** A KTO-format entry — maps one prompt+response with a binary label */
+/**
+ * A KTO-format entry — maps one prompt+completion with a binary label.
+ * Uses `completion` (not `response`) to match the TRL v1.8.0 KTO dataset format:
+ * https://huggingface.co/docs/trl/v1.8.0/en/kto_trainer#expected-dataset-type-and-format
+ */
 export interface KtoEntry {
   prompt: string;
-  response: string;
+  completion: string;
   label: boolean;
   model_provider: string;
   model_name: string;
@@ -309,7 +316,7 @@ export async function saveRlhfFeedback(
 ): Promise<string> {
   return saveKtoFeedback(rootPath, {
     prompt: feedback.question,
-    response: feedback.answer,
+    completion: feedback.answer,
     label: feedback.feedback_type === "good",
     model_provider: feedback.model_provider,
     model_name: feedback.model_name,
