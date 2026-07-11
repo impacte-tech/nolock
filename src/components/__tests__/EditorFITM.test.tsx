@@ -843,3 +843,257 @@ describe("AiInlineCompletionProvider - FIM fallback", () => {
     expect(result.items).toHaveLength(0);
   });
 });
+
+// ===========================================================================
+// Debounce timing and explicit trigger tests
+// ===========================================================================
+
+describe("AiInlineCompletionProvider - debounce timing", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.clearAllMocks();
+    localStorage.setItem("nolock.backend", "ollama");
+    localStorage.setItem("nolock.url", "http://localhost:11434");
+    localStorage.setItem("nolock.completionModel", "qwen2.5-coder:1.5b");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function createMockEditor() {
+    const trigger = vi.fn();
+    const editor = {
+      trigger,
+      focus: vi.fn(),
+      addCommand: vi.fn(),
+      getModel: vi.fn(() => null),
+      getValue: vi.fn(() => ""),
+      layout: vi.fn(),
+      dispose: vi.fn(),
+      onDidChangeModelContent: vi.fn(() => vi.fn()),
+    } as any;
+    return { editor, trigger };
+  }
+
+  it("closes gate and starts timer on keystroke", () => {
+    const provider = new AiInlineCompletionProvider();
+    expect((provider as any)._ready).toBe(false);
+
+    (provider as any)._ready = true;
+    provider.onContentChange();
+
+    expect((provider as any)._ready).toBe(false);
+    expect((provider as any)._timer).not.toBeNull();
+  });
+
+  it("opens gate and triggers editor after 500ms of silence", () => {
+    const { editor, trigger } = createMockEditor();
+    const provider = new AiInlineCompletionProvider();
+    provider.setEditor(editor);
+
+    provider.onContentChange();
+    expect((provider as any)._ready).toBe(false);
+
+    vi.advanceTimersByTime(500);
+
+    expect((provider as any)._ready).toBe(true);
+    expect((provider as any)._timer).toBeNull();
+    expect(trigger).toHaveBeenCalledWith(
+      "ai",
+      "editor.action.inlineSuggest.trigger",
+      null,
+    );
+  });
+
+  it("resets timer on rapid keystrokes (debounce resets)", () => {
+    const { editor, trigger } = createMockEditor();
+    const provider = new AiInlineCompletionProvider();
+    provider.setEditor(editor);
+
+    provider.onContentChange();
+    vi.advanceTimersByTime(200);
+    expect((provider as any)._ready).toBe(false);
+
+    provider.onContentChange();
+    vi.advanceTimersByTime(200);
+    expect((provider as any)._ready).toBe(false);
+
+    provider.onContentChange();
+    vi.advanceTimersByTime(200);
+    expect((provider as any)._ready).toBe(false);
+
+    vi.advanceTimersByTime(300);
+    expect((provider as any)._ready).toBe(true);
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT call trigger if no editor is set", () => {
+    const provider = new AiInlineCompletionProvider();
+    provider.onContentChange();
+    vi.advanceTimersByTime(500);
+
+    expect((provider as any)._ready).toBe(true);
+  });
+
+  it("consumes gate after provideInlineCompletions, blocking duplicate calls", async () => {
+    mockCompletionResponse("const result = 42;");
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+
+    const model = createModel("const x = ");
+    const position = new Position(1, 11);
+
+    await provider.provideInlineCompletions(
+      model, position as any, {} as any, createCancellationToken(),
+    );
+    expect((provider as any)._ready).toBe(false);
+
+    const secondResult = await provider.provideInlineCompletions(
+      model, position as any, {} as any, createCancellationToken(),
+    );
+    expect(secondResult.items).toHaveLength(0);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("full debounce cycle: keystroke → 500ms → gate open → trigger → completion", async () => {
+    const { editor, trigger } = createMockEditor();
+    const provider = new AiInlineCompletionProvider();
+    provider.setEditor(editor);
+    mockCompletionResponse("return a + b;\n}");
+
+    provider.onContentChange();
+    expect((provider as any)._ready).toBe(false);
+
+    vi.advanceTimersByTime(500);
+    expect((provider as any)._ready).toBe(true);
+    expect(trigger).toHaveBeenCalled();
+
+    const model = createModel("function add(a, b) {\n  \n}\n");
+    const position = new Position(1, 22);
+    const result = await provider.provideInlineCompletions(
+      model, position as any, {} as any, createCancellationToken(),
+    );
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].insertText).toBe("return a + b;\n}");
+    expect((provider as any)._ready).toBe(false);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("disposes the timer on provider dispose", () => {
+    const provider = new AiInlineCompletionProvider();
+    provider.onContentChange();
+    expect((provider as any)._timer).not.toBeNull();
+
+    provider.dispose();
+    expect((provider as any)._timer).toBeNull();
+    expect((provider as any)._ready).toBe(false);
+  });
+
+  // ----- Explicit trigger (Ctrl+.) tests -----
+
+  it("requestExplicitCompletion sets _explicitRequest, opens gate, and triggers editor", () => {
+    const { editor, trigger } = createMockEditor();
+    const provider = new AiInlineCompletionProvider();
+    provider.setEditor(editor);
+
+    provider.requestExplicitCompletion();
+
+    expect((provider as any)._explicitRequest).toBe(true);
+    expect((provider as any)._ready).toBe(true);
+    expect(trigger).toHaveBeenCalledWith(
+      "ai",
+      "editor.action.inlineSuggest.trigger",
+      null,
+    );
+  });
+
+  it("explicit request bypasses the gate when _ready is false", async () => {
+    mockCompletionResponse("explicit result;");
+    const provider = new AiInlineCompletionProvider();
+    expect((provider as any)._ready).toBe(false);
+
+    (provider as any)._explicitRequest = true;
+    (provider as any)._ready = true;
+
+    const model = createModel("const x = ");
+    const position = new Position(1, 11);
+    const result = await provider.provideInlineCompletions(
+      model, position as any, {} as any, createCancellationToken(),
+    );
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].insertText).toBe("explicit result;");
+    expect((provider as any)._explicitRequest).toBe(false);
+    expect((provider as any)._ready).toBe(false);
+  });
+
+  it("explicit request still respects minimal prefix length", async () => {
+    const provider = new AiInlineCompletionProvider();
+    (provider as any)._explicitRequest = true;
+    (provider as any)._ready = true;
+
+    const model = createModel("ab");
+    const position = new Position(1, 3);
+    const result = await provider.provideInlineCompletions(
+      model, position as any, {} as any, createCancellationToken(),
+    );
+
+    expect(result.items).toHaveLength(0);
+    expect(mockInvoke).not.toHaveBeenCalled();
+    expect((provider as any)._explicitRequest).toBe(false);
+  });
+
+  it("explicit request does not affect subsequent gate-closed requests", async () => {
+    const provider = new AiInlineCompletionProvider();
+    (provider as any)._explicitRequest = true;
+    (provider as any)._ready = true;
+
+    const model = createModel("const x = ");
+    const position = new Position(1, 11);
+    await provider.provideInlineCompletions(
+      model, position as any, {} as any, createCancellationToken(),
+    );
+    expect((provider as any)._explicitRequest).toBe(false);
+    expect((provider as any)._ready).toBe(false);
+
+    mockInvoke.mockClear();
+    const secondResult = await provider.provideInlineCompletions(
+      model, position as any, {} as any, createCancellationToken(),
+    );
+    expect(secondResult.items).toHaveLength(0);
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("rapid typing followed by pause delivers exactly one completion", async () => {
+    const { editor, trigger } = createMockEditor();
+    const provider = new AiInlineCompletionProvider();
+    provider.setEditor(editor);
+    mockCompletionResponse("42");
+
+    provider.onContentChange();
+    vi.advanceTimersByTime(100);
+    provider.onContentChange();
+    vi.advanceTimersByTime(50);
+    provider.onContentChange();
+    vi.advanceTimersByTime(200);
+    provider.onContentChange();
+
+    vi.advanceTimersByTime(499);
+    expect((provider as any)._ready).toBe(false);
+    expect(trigger).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect((provider as any)._ready).toBe(true);
+    expect(trigger).toHaveBeenCalledTimes(1);
+
+    const model = createModel("const x = ");
+    const position = new Position(1, 11);
+    const result = await provider.provideInlineCompletions(
+      model, position as any, {} as any, createCancellationToken(),
+    );
+    expect(result.items).toHaveLength(1);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+});

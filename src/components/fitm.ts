@@ -65,11 +65,14 @@ export function extractCodeFromResponse(text: string): string {
 
   let cleaned = text.trim();
 
-  // --- Step 0: Strip FIM tokens that some models emit literally -----------
-  // When a model doesn't properly understand FIM tokens, it may echo back the
-  // control tokens (e.g. <|fim_middle|>, <|fim_prefix|>, <|fim_suffix|>) at the
-  // start of its response. Strip any leading FIM tokens before further processing.
-  cleaned = cleaned.replace(/^(<\|fim_prefix\|>|<\|fim_suffix\|>|<\|fim_middle\|>\s*)*/, "").trim();
+  // --- Step 0: Strip control tokens that some models emit literally --------
+  // Some models echo back FIM tokens or insert cursor-placeholder tokens
+  // (e.g. <|fim_middle|>, <|fim_prefix|>, <|fim_suffix|>, <|cursor|>).
+  // Strip any leading FIM tokens, and remove <|cursor|> tokens globally.
+  cleaned = cleaned
+    .replace(/^(<\|fim_prefix\|>|<\|fim_suffix\|>|<\|fim_middle\|>\s*)*/, "")
+    .replace(/<\|cursor\|>?/g, "")
+    .trim();
 
   // --- Step 1: Extract from markdown code blocks ---------------------------
   // Match ```lang? optional newline, then content, then ```

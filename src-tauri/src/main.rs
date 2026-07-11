@@ -103,6 +103,16 @@ fn rename_file(path: String, new_name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn move_file(source: String, dest_dir: String) -> Result<(), String> {
+    let file_name = std::path::Path::new(&source)
+        .file_name()
+        .ok_or_else(|| "Cannot determine file name".to_string())?;
+    let dest_path = std::path::Path::new(&dest_dir).join(file_name);
+    std::fs::rename(&source, &dest_path)
+        .map_err(|e| format!("Failed to move {} to {}: {}", source, dest_path.display(), e))
+}
+
+#[tauri::command]
 fn delete_file(path: String) -> Result<(), String> {
     let meta = std::fs::metadata(&path)
         .map_err(|e| format!("Failed to access {}: {}", path, e))?;
@@ -2898,6 +2908,7 @@ pub fn run() {
             list_directory,
             list_files_recursive,
             rename_file,
+            move_file,
             delete_file,
             copy_file,
             create_file,

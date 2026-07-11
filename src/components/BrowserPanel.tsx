@@ -244,21 +244,16 @@ export default function BrowserPanel({ url, onClose, resizeEpoch }: Props) {
           height: rect.height,
         }).catch(() => {});
       } else if (jsWebviewRef.current) {
-        const mainWindow = getCurrentWindow();
-        mainWindow.outerPosition().then((wp) => {
-          mainWindow.scaleFactor().then((sf) => {
-            const sx = Math.round(wp.x + rect.x * sf);
-            const sy = Math.round(wp.y + rect.y * sf);
-            const sw = Math.round(rect.width * sf);
-            const sh = Math.round(rect.height * sf);
-            jsWebviewRef.current
-              ?.setPosition(new LogicalPosition(sx, sy))
-              .catch(() => {});
-            jsWebviewRef.current
-              ?.setSize(new LogicalSize(sw, sh))
-              .catch(() => {});
-          });
-        });
+        const sx = Math.round(rect.x);
+        const sy = Math.round(rect.y);
+        const sw = Math.round(rect.width);
+        const sh = Math.round(rect.height);
+        jsWebviewRef.current
+          ?.setPosition(new LogicalPosition(sx, sy))
+          .catch(() => {});
+        jsWebviewRef.current
+          ?.setSize(new LogicalSize(sw, sh))
+          .catch(() => {});
       }
     };
 
