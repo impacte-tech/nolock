@@ -47,7 +47,7 @@ describe("App", () => {
     expect(screen.getByText("Chat")).toBeInTheDocument();
   });
 
-  it("toggles chat panel on Ctrl+A, C chord", () => {
+  it("toggles chat panel on Ctrl+A, O chord", () => {
     render(<App />);
     // Chat should be hidden initially
     expect(screen.queryByText("Agent Chat")).not.toBeInTheDocument();
@@ -57,17 +57,17 @@ describe("App", () => {
     // The chord hint should appear
     expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
 
-    // Send 'c' to toggle chat
-    fireEvent.keyDown(window, { key: "c", ctrlKey: false });
+    // Send 'o' to toggle chat
+    fireEvent.keyDown(window, { key: "o", ctrlKey: false });
     expect(screen.getByText("Agent Chat")).toBeInTheDocument();
 
-    // Send Ctrl+A, C again to toggle off
+    // Send Ctrl+A, O again to toggle off
     fireEvent.keyDown(window, { key: "a", ctrlKey: true, shiftKey: false });
-    fireEvent.keyDown(window, { key: "c", ctrlKey: false });
+    fireEvent.keyDown(window, { key: "o", ctrlKey: false });
     expect(screen.queryByText("Agent Chat")).not.toBeInTheDocument();
   });
 
-  it("creates a terminal on Ctrl+T, T chord", () => {
+  it("creates a terminal on Ctrl+T, O chord", () => {
     render(<App />);
     // No terminal initially
     expect(screen.queryByText("Terminal 1")).not.toBeInTheDocument();
@@ -76,34 +76,45 @@ describe("App", () => {
     fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
     expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
 
-    // Press T again to create terminal
-    fireEvent.keyDown(window, { key: "T", ctrlKey: false });
+    // Press O to create terminal
+    fireEvent.keyDown(window, { key: "O", ctrlKey: false });
     expect(screen.getByText("Terminal 1")).toBeInTheDocument();
 
-    // Ctrl+T, T again creates Terminal 2
+    // Ctrl+T, O again creates Terminal 2
     fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
-    fireEvent.keyDown(window, { key: "T", ctrlKey: false });
+    fireEvent.keyDown(window, { key: "O", ctrlKey: false });
     expect(screen.getByText("Terminal 2")).toBeInTheDocument();
   });
 
-  it("opens browser panel on Ctrl+Shift+B", () => {
+  it("opens browser panel on Ctrl+B, O chord", () => {
     render(<App />);
     // No browser initially
     expect(screen.queryByTitle("Close browser")).not.toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "B", ctrlKey: true, shiftKey: true });
+    // Ctrl+B sets chord prefix
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true, shiftKey: false });
+    expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
+
+    // Press O to toggle browser
+    fireEvent.keyDown(window, { key: "O", ctrlKey: false });
     expect(screen.getByTitle("Close browser")).toBeInTheDocument();
 
     // Toggle off
-    fireEvent.keyDown(window, { key: "B", ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: "b", ctrlKey: true, shiftKey: false });
+    fireEvent.keyDown(window, { key: "O", ctrlKey: false });
     expect(screen.queryByTitle("Close browser")).not.toBeInTheDocument();
   });
 
-  it("opens Model Providers on Ctrl+Shift+P", () => {
+  it("opens Model Providers on Ctrl+A, P chord", () => {
     render(<App />);
     expect(screen.queryByText("Provider")).not.toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "P", ctrlKey: true, shiftKey: true });
+    // Ctrl+A sets chord prefix
+    fireEvent.keyDown(window, { key: "a", ctrlKey: true, shiftKey: false });
+    expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
+
+    // Press P to open Model Providers
+    fireEvent.keyDown(window, { key: "p", ctrlKey: false });
     // The Model Providers modal should be visible
     expect(screen.getByText("Provider")).toBeInTheDocument();
     expect(screen.getByText("Model Providers")).toBeInTheDocument();
@@ -132,7 +143,7 @@ describe("App", () => {
 
     // Open chat
     fireEvent.keyDown(window, { key: "a", ctrlKey: true, shiftKey: false });
-    fireEvent.keyDown(window, { key: "c", ctrlKey: false });
+    fireEvent.keyDown(window, { key: "o", ctrlKey: false });
     expect(screen.getByText("Agent Chat")).toBeInTheDocument();
 
     // No browser yet
@@ -147,8 +158,9 @@ describe("App", () => {
   it("closes Model Providers via Escape", () => {
     render(<App />);
 
-    // Open Model Providers
-    fireEvent.keyDown(window, { key: "P", ctrlKey: true, shiftKey: true });
+    // Open Model Providers via chord
+    fireEvent.keyDown(window, { key: "a", ctrlKey: true, shiftKey: false });
+    fireEvent.keyDown(window, { key: "p", ctrlKey: false });
     expect(screen.getByText("Model Providers")).toBeInTheDocument();
 
     // Escape closes it

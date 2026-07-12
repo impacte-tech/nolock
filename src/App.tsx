@@ -196,9 +196,10 @@ export default function App() {
   const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
-  // --- Chord state: null | 'A' | 'T'
+  // --- Chord state: null | 'A' | 'T' | 'B' | 'E' | 'F'
   // 'A' = waiting for second key after Ctrl+A (AI shortcuts)
   // 'T' = waiting for second key after Ctrl+T (Terminal shortcuts)
+  // 'B' = waiting for second key after Ctrl+B (Browser shortcuts)
   const [chordPrefix, setChordPrefix] = useState<string | null>(null);
 
   // --- Terminal Memory ---
@@ -347,7 +348,7 @@ export default function App() {
       if (chordPrefix !== null) {
         // Any keypress that isn't a valid second key cancels the chord
         if (chordPrefix === "A") {
-          if (e.key === "c") {
+          if (e.key === "o") {
             e.preventDefault();
             setChordPrefix(null);
             setShowChat((v) => !v);
@@ -399,8 +400,21 @@ export default function App() {
           }
         }
 
+        if (chordPrefix === "B") {
+          if (e.key === "o" || e.key === "O") {
+            e.preventDefault();
+            setChordPrefix(null);
+            if (browserUrl) {
+              closeBrowser();
+            } else {
+              setBrowserUrl("https://google.com");
+            }
+            return;
+          }
+        }
+
         if (chordPrefix === "T") {
-          if (e.key === "t" || e.key === "T") {
+          if (e.key === "o" || e.key === "O") {
             e.preventDefault();
             setChordPrefix(null);
             createTerminal();
@@ -415,7 +429,7 @@ export default function App() {
         }
 
         if (chordPrefix === "E") {
-          if (e.key === "e" || e.key === "E") {
+          if (e.key === "o" || e.key === "O") {
             e.preventDefault();
             setChordPrefix(null);
             setShowExplorer((v) => !v);
@@ -508,13 +522,15 @@ export default function App() {
         return;
       }
 
-      // Ctrl+Shift+B — Toggle Browser
-      if (e.ctrlKey && e.shiftKey && e.key === "B") {
+      // Ctrl+B — Chord prefix for Browser shortcuts.
+      if (e.ctrlKey && !e.shiftKey && e.key === "b") {
         e.preventDefault();
-        if (browserUrl) {
-          closeBrowser();
+        if (chordPrefix === "B") {
+          // Tapped twice quickly — cancel chord
+          setChordPrefix(null);
         } else {
-          setBrowserUrl("https://google.com");
+          setChordPrefix("B");
+          setTimeout(() => setChordPrefix(null), 1500);
         }
         return;
       }
@@ -542,13 +558,6 @@ export default function App() {
           setChordPrefix("A");
           setTimeout(() => setChordPrefix(null), 1500);
         }
-        return;
-      }
-
-      // Ctrl+Shift+P — Direct Model Providers access
-      if (e.ctrlKey && e.shiftKey && e.key === "P") {
-        e.preventDefault();
-        setShowModelProviders(true);
         return;
       }
 
@@ -609,7 +618,7 @@ export default function App() {
     {
       label: "Terminal",
       items: [
-        { label: "New Terminal", action: createTerminal, shortcut: "Ctrl+T, T" },
+        { label: "New Terminal", action: createTerminal, shortcut: "Ctrl+T, O" },
         { label: "Terminal Memory", action: () => setShowTermMemory(true), shortcut: "Ctrl+T, M" },
         ...terminals.map((t) => ({
           label: t.label,
@@ -620,13 +629,13 @@ export default function App() {
     {
       label: "Browser",
       items: [
-        { label: "Toggle Browser", action: () => browserUrl ? closeBrowser() : setBrowserUrl("https://google.com"), shortcut: "Ctrl+Shift+B" },
+        { label: "Toggle Browser", action: () => browserUrl ? closeBrowser() : setBrowserUrl("https://google.com"), shortcut: "Ctrl+B, O" },
       ],
     },
     {
       label: "AI Integrations",
       items: [
-        { label: "Toggle Agent Chat", action: () => setShowChat((v) => !v), shortcut: "Ctrl+A, C" },
+        { label: "Toggle Agent Chat", action: () => setShowChat((v) => !v), shortcut: "Ctrl+A, O" },
         { label: "Model Providers...", action: () => setShowModelProviders(true), shortcut: "Ctrl+A, P" },
         { label: "Chat Model...", action: () => setShowChatModel(true), shortcut: "Ctrl+A, M" },
         { label: "FITM Model...", action: () => setShowFITMModel(true), shortcut: "Ctrl+A, F" },
@@ -666,11 +675,13 @@ export default function App() {
       {chordPrefix && (
         <div className="chord-hint">
           {chordPrefix === "A" ? (
-            <>Waiting for second key... (press <strong>C</strong> for Chat, <strong>G</strong> for Agents, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF)</>
+            <>Waiting for second key... (press <strong>O</strong> for Chat, <strong>G</strong> for Agents, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF)</>
           ) : chordPrefix === "T" ? (
-            <>Waiting for second key... (press <strong>T</strong> for Terminal, <strong>M</strong> for Memory)</>
+            <>Waiting for second key... (press <strong>O</strong> for Terminal, <strong>M</strong> for Memory)</>
+          ) : chordPrefix === "B" ? (
+            <>Waiting for second key... (press <strong>O</strong> for Browser)</>
           ) : chordPrefix === "E" ? (
-            <>Waiting for second key... (press <strong>E</strong> for Explorer, <strong>S</strong> for Editor Settings)</>
+            <>Waiting for second key... (press <strong>O</strong> for Explorer, <strong>S</strong> for Editor Settings)</>
           ) : (
             <>Waiting for second key... (press <strong>S</strong> for Search, <strong>O</strong> for Open Folder, <strong>E</strong> for Explorer, <strong>R</strong> for Refresh)</>
           )}
