@@ -2,16 +2,19 @@
  * RLHF (Reinforcement Learning from Human Feedback) storage utilities.
  *
  * Stores user feedback in JSONL format, partitioned by model configuration.
- * All feedback is consolidated under a `dpoDir` parent folder for clarity.
+ * KTO and DPO data live in separate top-level directories under the feedback root:
+ *
+ *   <root>/
+ *     kto/
+ *       good/<modelKey>/data.jsonl   (thumbs up, label: true)
+ *       bad/<modelKey>/data.jsonl    (thumbs down, label: false)
+ *     dpo/
+ *       <modelKey>/data.jsonl        (chosen / rejected pairs)
  *
  * The JSONL schemas follow the dataset formats expected by Hugging Face TRL
  * (https://huggingface.co/docs/trl/v1.8.0) for DPO and KTO training.
  *
  * ## KTO format (thumbs up / thumbs down)
- *
- * Each entry is appended as one JSON line to:
- *   <root>/<dpoDir>/<goodDir>/<modelKey>/data.jsonl   (thumbs up, label: true)
- *   <root>/<dpoDir>/<badDir>/<modelKey>/data.jsonl    (thumbs down, label: false)
  *
  * JSONL line schema (KTO-compatible — see https://huggingface.co/docs/trl/v1.8.0/en/kto_trainer):
  *   { "prompt": "...", "completion": "...", "label": true|false,
@@ -20,10 +23,6 @@
  *     "timestamp": "ISO 8601", "user_correction": "..." }
  *
  * ## DPO format (pairwise preference)
- *
- * Every Nth message, the user is asked to choose between two AI responses.
- * The chosen/rejected pair is appended as one JSON line to:
- *   <root>/<dpoDir>/<pairwiseDir>/<modelKey>/data.jsonl
  *
  * JSONL line schema (DPO-compatible — see https://huggingface.co/docs/trl/v1.8.0/en/dpo_trainer):
  *   { "prompt": "...", "chosen": "...", "rejected": "...",
@@ -34,10 +33,10 @@
  * ## localStorage settings
  *   nolock.rlhf.enabled       - "true" | "false" (default "true")
  *   nolock.rlhf.root          - root folder name (default ".rlhf")
- *   nolock.rlhf.dpoDir        - parent container for all feedback (default "dpo")
- *   nolock.rlhf.goodDir       - good subdirectory inside dpoDir (default "good")
- *   nolock.rlhf.badDir        - bad subdirectory inside dpoDir (default "bad")
- *   nolock.rlhf.pairwiseDir   - pairwise subdirectory inside dpoDir (default "pairwise")
+ *   nolock.rlhf.ktoDir        - top-level directory for KTO data (default "kto")
+ *   nolock.rlhf.goodDir       - good subdirectory inside ktoDir (default "good")
+ *   nolock.rlhf.badDir        - bad subdirectory inside ktoDir (default "bad")
+ *   nolock.rlhf.dpoDir        - top-level directory for DPO data (default "dpo")
  *   nolock.rlhf.dpoEnabled    - "true" | "false" (default "false")
  *   nolock.rlhf.dpoInterval   - number of messages between DPO prompts (default 10)
  */
@@ -57,23 +56,24 @@ export interface ModelConfig {
 /** Settings read from localStorage */
 export interface RlhfSettings {
   enabled: boolean;
+  /** Root feedback directory inside the project (default ".rlhf"). */
   root: string;
-  /** Parent container directory for all feedback data (e.g. "dpo"). */
-  dpoDir: string;
-  /** Subdirectory inside dpoDir for good (thumbs-up) examples. */
+  /** Top-level directory for KTO data inside root (default "kto"). */
+  ktoDir: string;
+  /** Subdirectory inside ktoDir for good (thumbs-up) examples. */
   goodDir: string;
-  /** Subdirectory inside dpoDir for bad (thumbs-down) examples. */
+  /** Subdirectory inside ktoDir for bad (thumbs-down) examples. */
   badDir: string;
-  /** Subdirectory inside dpoDir for DPO pairwise (chosen/rejected) examples. */
-  pairwiseDir: string;
+  /** Top-level directory for DPO data inside root (default "dpo"). */
+  dpoDir: string;
   dpoEnabled: boolean;
   dpoInterval: number;
 }
 
-/** Default directory name for the RLHF parent container. */
+/** Default top-level directory for KTO (thumbs up/down) data. */
+export const DEFAULT_KTO_DIR = "kto";
+/** Default top-level directory for DPO (pairwise preference) data. */
 export const DEFAULT_DPO_DIR = "dpo";
-/** Default subdirectory for pairwise preference data. */
-export const DEFAULT_PAIRWISE_DIR = "pairwise";
 
 /**
  * A KTO-format entry — maps one prompt+completion with a binary label.
@@ -134,11 +134,12 @@ function sanitiseModelKey(provider: string, model: string): string {
 /**
  * Build the JSONL path for a given feedback type and model.
  *
- * Produces: <baseDir>/<parentDir>/<subDir>/<modelKey>/data.jsonl
+ * Produces: <baseDir>/<parentDir>/<subDir>/<modelKey>/data.jsonl   (when subDir is non-empty)
+ *           <baseDir>/<parentDir>/<modelKey>/data.jsonl             (when subDir is empty)
  *
  * @param baseDir   The feedback root directory (e.g. "/project/.rlhf")
- * @param parentDir The parent container (e.g. "dpo")
- * @param subDir    The feedback type subdirectory (e.g. "good", "bad", "pairwise")
+ * @param parentDir The parent container (e.g. "kto" or "dpo")
+ * @param subDir    The feedback type subdirectory (e.g. "good", "bad"), or "" for DPO
  * @param provider  The AI model provider
  * @param model     The AI model name
  */
@@ -150,7 +151,10 @@ function jsonlPath(
   model: string,
 ): string {
   const modelKey = sanitiseModelKey(provider, model);
-  return `${baseDir}/${parentDir}/${subDir}/${modelKey}/data.jsonl`;
+  if (subDir) {
+    return `${baseDir}/${parentDir}/${subDir}/${modelKey}/data.jsonl`;
+  }
+  return `${baseDir}/${parentDir}/${modelKey}/data.jsonl`;
 }
 
 /**
@@ -207,10 +211,10 @@ export function readRlhfSettings(): RlhfSettings {
   return {
     enabled: localStorage.getItem("nolock.rlhf.enabled") !== "false",
     root: localStorage.getItem("nolock.rlhf.root") || ".rlhf",
-    dpoDir: localStorage.getItem("nolock.rlhf.dpoDir") || DEFAULT_DPO_DIR,
+    ktoDir: localStorage.getItem("nolock.rlhf.ktoDir") || DEFAULT_KTO_DIR,
     goodDir: localStorage.getItem("nolock.rlhf.goodDir") || "good",
     badDir: localStorage.getItem("nolock.rlhf.badDir") || "bad",
-    pairwiseDir: localStorage.getItem("nolock.rlhf.pairwiseDir") || DEFAULT_PAIRWISE_DIR,
+    dpoDir: localStorage.getItem("nolock.rlhf.dpoDir") || DEFAULT_DPO_DIR,
     dpoEnabled: localStorage.getItem("nolock.rlhf.dpoEnabled") === "true",
     dpoInterval: dpoIntervalRaw ? parseInt(dpoIntervalRaw, 10) : 10,
   };
@@ -244,7 +248,7 @@ export async function saveKtoFeedback(
     ? `${rootPath}/${settings.root}`
     : await getRlhfFallbackDir();
 
-  const filePath = jsonlPath(baseDir, settings.dpoDir, subDir, entry.model_provider, entry.model_name);
+  const filePath = jsonlPath(baseDir, settings.ktoDir, subDir, entry.model_provider, entry.model_name);
   const jsonlLine = JSON.stringify(entry) + "\n";
 
   try {
@@ -281,7 +285,7 @@ export async function saveDpoFeedback(
     ? `${rootPath}/${settings.root}`
     : await getRlhfFallbackDir();
 
-  const filePath = jsonlPath(baseDir, settings.dpoDir, settings.pairwiseDir, entry.model_provider, entry.model_name);
+  const filePath = jsonlPath(baseDir, settings.dpoDir, "", entry.model_provider, entry.model_name);
   const jsonlLine = JSON.stringify(entry) + "\n";
 
   try {

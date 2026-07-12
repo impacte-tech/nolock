@@ -89,10 +89,10 @@ describe("readRlhfSettings", () => {
     const s = readRlhfSettings();
     expect(s.enabled).toBe(true);
     expect(s.root).toBe(".rlhf");
-    expect(s.dpoDir).toBe("dpo");
+    expect(s.ktoDir).toBe("kto");
     expect(s.goodDir).toBe("good");
     expect(s.badDir).toBe("bad");
-    expect(s.pairwiseDir).toBe("pairwise");
+    expect(s.dpoDir).toBe("dpo");
     expect(s.dpoEnabled).toBe(false);
     expect(s.dpoInterval).toBe(10);
   });
@@ -100,45 +100,41 @@ describe("readRlhfSettings", () => {
   it("reads custom KTO settings from localStorage", () => {
     setLocal("nolock.rlhf.enabled", "false");
     setLocal("nolock.rlhf.root", "_feedback");
+    setLocal("nolock.rlhf.ktoDir", "feedback_kto");
     setLocal("nolock.rlhf.goodDir", "pos");
     setLocal("nolock.rlhf.badDir", "neg");
     const s = readRlhfSettings();
     expect(s.enabled).toBe(false);
     expect(s.root).toBe("_feedback");
-    expect(s.dpoDir).toBe("dpo");
+    expect(s.ktoDir).toBe("feedback_kto");
     expect(s.goodDir).toBe("pos");
     expect(s.badDir).toBe("neg");
-    expect(s.pairwiseDir).toBe("pairwise");
   });
 
   it("reads custom DPO settings from localStorage", () => {
     setLocal("nolock.rlhf.dpoEnabled", "true");
     setLocal("nolock.rlhf.dpoInterval", "5");
+    setLocal("nolock.rlhf.dpoDir", "pairwise_data");
     const s = readRlhfSettings();
     expect(s.dpoEnabled).toBe(true);
     expect(s.dpoInterval).toBe(5);
-    expect(s.dpoDir).toBe("dpo");
-    expect(s.pairwiseDir).toBe("pairwise");
+    expect(s.dpoDir).toBe("pairwise_data");
   });
 
-  it("reads custom dpoDir and pairwiseDir from localStorage", () => {
-    setLocal("nolock.rlhf.dpoDir", "rlhf_data");
-    setLocal("nolock.rlhf.pairwiseDir", "preferences");
+  it("reads custom ktoDir from localStorage", () => {
+    setLocal("nolock.rlhf.ktoDir", "thumbs");
     const s = readRlhfSettings();
-    expect(s.dpoDir).toBe("rlhf_data");
-    expect(s.pairwiseDir).toBe("preferences");
+    expect(s.ktoDir).toBe("thumbs");
+  });
+
+  it("defaults ktoDir to 'kto' when not set", () => {
+    const s = readRlhfSettings();
+    expect(s.ktoDir).toBe("kto");
   });
 
   it("defaults dpoDir to 'dpo' when not set", () => {
-    // Don't set dpoDir
     const s = readRlhfSettings();
     expect(s.dpoDir).toBe("dpo");
-  });
-
-  it("defaults pairwiseDir to 'pairwise' when not set", () => {
-    // Don't set pairwiseDir
-    const s = readRlhfSettings();
-    expect(s.pairwiseDir).toBe("pairwise");
   });
 
   it("treats missing enabled key as enabled (true)", () => {
@@ -191,10 +187,10 @@ describe("saveKtoFeedback", () => {
       timestamp: "2026-06-26T12:00:00.000Z",
     });
 
-    expect(path).toBe("/my/project/.rlhf/dpo/good/ollama_qwen3_8b/data.jsonl");
+    expect(path).toBe("/my/project/.rlhf/kto/good/ollama_qwen3_8b/data.jsonl");
     expect(mockInvoke).toHaveBeenCalledTimes(1);
     expect(mockInvoke).toHaveBeenCalledWith("append_to_file", {
-      path: "/my/project/.rlhf/dpo/good/ollama_qwen3_8b/data.jsonl",
+      path: "/my/project/.rlhf/kto/good/ollama_qwen3_8b/data.jsonl",
       content: expect.any(String),
     });
   });
@@ -211,9 +207,9 @@ describe("saveKtoFeedback", () => {
       user_correction: "Too complex, simplify.",
     });
 
-    expect(path).toBe("/my/project/.rlhf/dpo/bad/ollama_qwen3_8b/data.jsonl");
+    expect(path).toBe("/my/project/.rlhf/kto/bad/ollama_qwen3_8b/data.jsonl");
     expect(mockInvoke).toHaveBeenCalledWith("append_to_file", {
-      path: "/my/project/.rlhf/dpo/bad/ollama_qwen3_8b/data.jsonl",
+      path: "/my/project/.rlhf/kto/bad/ollama_qwen3_8b/data.jsonl",
       content: expect.any(String),
     });
   });
@@ -232,7 +228,7 @@ describe("saveKtoFeedback", () => {
       timestamp: "2026-06-26T12:00:00.000Z",
     });
 
-    expect(path).toBe("/custom/path/_feedback/dpo/likes/ollama_qwen3_8b/data.jsonl");
+    expect(path).toBe("/custom/path/_feedback/kto/likes/ollama_qwen3_8b/data.jsonl");
   });
 
   it("uses custom badDir from settings", async () => {
@@ -249,7 +245,7 @@ describe("saveKtoFeedback", () => {
       user_correction: "Fix this",
     });
 
-    expect(path).toBe("/path/.rlhf/dpo/dislikes/ollama_qwen3_8b/data.jsonl");
+    expect(path).toBe("/path/.rlhf/kto/dislikes/ollama_qwen3_8b/data.jsonl");
   });
 
   it("sanitises model key (non-alphanumeric chars replaced with underscore)", async () => {
@@ -264,7 +260,7 @@ describe("saveKtoFeedback", () => {
     });
 
     // The provider "open-ai" has a hyphen which is kept, model "gpt-4o:latest" has colon replaced
-    expect(path).toBe("/p/.rlhf/dpo/good/open-ai_gpt-4o_latest/data.jsonl");
+    expect(path).toBe("/p/.rlhf/kto/good/open-ai_gpt-4o_latest/data.jsonl");
   });
 
   it("returns empty string and skips save when RLHF is disabled", async () => {
@@ -299,10 +295,10 @@ describe("saveKtoFeedback", () => {
       timestamp: "2026-06-26T12:00:00.000Z",
     });
 
-    expect(path).toBe("/app/data/rlhf/dpo/good/ollama_model/data.jsonl");
+    expect(path).toBe("/app/data/rlhf/kto/good/ollama_model/data.jsonl");
     expect(mockInvoke).toHaveBeenCalledWith("get_rlhf_dir");
     expect(mockInvoke).toHaveBeenCalledWith("append_to_file", {
-      path: "/app/data/rlhf/dpo/good/ollama_model/data.jsonl",
+      path: "/app/data/rlhf/kto/good/ollama_model/data.jsonl",
       content: expect.any(String),
     });
   });
@@ -325,7 +321,7 @@ describe("saveKtoFeedback", () => {
       timestamp: "2026-06-26T12:00:00.000Z",
     });
 
-    expect(path).toBe("/tmp/nolock/rlhf/dpo/good/ollama_model/data.jsonl");
+    expect(path).toBe("/tmp/nolock/rlhf/kto/good/ollama_model/data.jsonl");
   });
 
   it("throws when append_to_file fails", async () => {
@@ -429,10 +425,10 @@ describe("saveDpoFeedback", () => {
       timestamp: "2026-06-26T12:00:00.000Z",
     });
 
-    expect(path).toBe("/my/project/.rlhf/dpo/pairwise/ollama_qwen3_8b/data.jsonl");
+    expect(path).toBe("/my/project/.rlhf/dpo/ollama_qwen3_8b/data.jsonl");
     expect(mockInvoke).toHaveBeenCalledTimes(1);
     expect(mockInvoke).toHaveBeenCalledWith("append_to_file", {
-      path: "/my/project/.rlhf/dpo/pairwise/ollama_qwen3_8b/data.jsonl",
+      path: "/my/project/.rlhf/dpo/ollama_qwen3_8b/data.jsonl",
       content: expect.any(String),
     });
   });
@@ -449,7 +445,7 @@ describe("saveDpoFeedback", () => {
       timestamp: "2026-06-26T12:00:00.000Z",
     });
 
-    expect(path).toBe("/p/.rlhf/dpo/pairwise/open-router_gpt-4o-mini/data.jsonl");
+    expect(path).toBe("/p/.rlhf/dpo/open-router_gpt-4o-mini/data.jsonl");
   });
 
   it("returns empty string and skips save when RLHF is disabled", async () => {
@@ -495,7 +491,7 @@ describe("saveDpoFeedback", () => {
       timestamp: "2026-06-26T12:00:00.000Z",
     });
 
-    expect(path).toBe("/project/.rlhf/dpo/pairwise/ollama_m/data.jsonl");
+    expect(path).toBe("/project/.rlhf/dpo/ollama_m/data.jsonl");
     expect(mockInvoke).toHaveBeenCalledTimes(1);
     expect(mockInvoke).toHaveBeenCalledWith("append_to_file", expect.any(Object));
   });
@@ -519,7 +515,7 @@ describe("saveDpoFeedback", () => {
       timestamp: "2026-06-26T12:00:00.000Z",
     });
 
-    expect(path).toBe("/fallback/rlhf/dpo/pairwise/ollama_m/data.jsonl");
+    expect(path).toBe("/fallback/rlhf/dpo/ollama_m/data.jsonl");
     expect(mockInvoke).toHaveBeenCalledWith("get_rlhf_dir");
   });
 
@@ -605,9 +601,9 @@ describe("saveRlhfFeedback (deprecated)", () => {
     });
 
     // Should produce the same JSONL path as saveKtoFeedback with label:true
-    expect(path).toBe("/my/project/.rlhf/dpo/good/ollama_qwen3_8b/data.jsonl");
+    expect(path).toBe("/my/project/.rlhf/kto/good/ollama_qwen3_8b/data.jsonl");
     expect(mockInvoke).toHaveBeenCalledWith("append_to_file", {
-      path: "/my/project/.rlhf/dpo/good/ollama_qwen3_8b/data.jsonl",
+      path: "/my/project/.rlhf/kto/good/ollama_qwen3_8b/data.jsonl",
       content: expect.any(String),
     });
 

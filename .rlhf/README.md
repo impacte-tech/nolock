@@ -44,10 +44,12 @@ python -c "import trl; print(f'TRL {trl.__version__}')"
 ## Data Layout
 
 ```
-.rlhf/dpo/
-  good/<provider>_<model>/data.jsonl      # KTO thumbs-up (label: true)
-  bad/<provider>_<model>/data.jsonl       # KTO thumbs-down (label: false)
-  pairwise/<provider>_<model>/data.jsonl  # DPO chosen/rejected pairs
+.rlhf/
+  kto/
+    good/<provider>_<model>/data.jsonl  # KTO thumbs-up (label: true)
+    bad/<provider>_<model>/data.jsonl   # KTO thumbs-down (label: false)
+  dpo/
+    <provider>_<model>/data.jsonl       # DPO chosen/rejected pairs
 ```
 
 Each model configuration gets its own subdirectory (e.g. `ollama_qwen3_8b`),
@@ -96,7 +98,7 @@ example has a `chosen` and `rejected` response for the same prompt.
 from datasets import load_dataset, concatenate_datasets
 from pathlib import Path
 
-def load_dpo_data(data_dir: str = ".rlhf/dpo/pairwise"):
+def load_dpo_data(data_dir: str = ".rlhf/dpo"):
     """Load all DPO pairwise JSONL files and concatenate them."""
     dataset_dir = Path(data_dir)
     jsonl_files = list(dataset_dir.glob("*/data.jsonl"))
@@ -189,7 +191,7 @@ thumbs-up/thumbs-down feedback.
 from datasets import load_dataset, concatenate_datasets
 from pathlib import Path
 
-def load_kto_data(data_dir: str = ".rlhf/dpo"):
+def load_kto_data(data_dir: str = ".rlhf/kto"):
     """Load all KTO JSONL files (good + bad) and concatenate them."""
     dataset_dir = Path(data_dir)
     jsonl_files = (
@@ -287,11 +289,11 @@ different backends to create a richer training set:
 
 ```python
 # Merge all DPO data across all models
-dataset = load_dpo_data(".rlhf/dpo/pairwise")
+dataset = load_dpo_data(".rlhf/dpo")
 
 # Or train on data from a specific model only
 from datasets import load_dataset
-dataset = load_dataset("json", data_files=".rlhf/dpo/pairwise/ollama_qwen3_8b/data.jsonl", split="train")
+dataset = load_dataset("json", data_files=".rlhf/dpo/ollama_qwen3_8b/data.jsonl", split="train")
 ```
 
 ---
