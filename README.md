@@ -333,7 +333,7 @@ Then in nolock's AI Settings (`Ctrl+A, I`):
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+E, E` | Toggle file explorer |
+| `Ctrl+E, O` | Toggle file explorer |
 | `Ctrl+E, S` | Open editor settings (linter configuration) |
 
 #### File & Search (Ctrl+F chord)
@@ -357,14 +357,14 @@ Within the search panel (`Ctrl+F, S`):
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+T, T` | New terminal |
+| `Ctrl+T, O` | New terminal |
 | `Ctrl+T, M` | Open terminal memory overlay |
 
 #### AI (Ctrl+A chord)
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+A, C` | Toggle agent chat panel |
+| `Ctrl+A, O` | Toggle agent chat panel |
 | `Ctrl+A, P` | Model providers |
 | `Ctrl+A, M` | Chat model settings |
 | `Ctrl+A, F` | FITM model settings |
@@ -373,13 +373,12 @@ Within the search panel (`Ctrl+F, S`):
 | `Ctrl+A, K` | Manage skills |
 | `Ctrl+A, R` | Human feedback (RLHF) |
 | `Ctrl+A, I` | Open AI settings |
-| `Ctrl+Shift+I` | Direct AI settings |
 
-#### Browser
+#### Browser (Ctrl+B chord)
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+Shift+B` | Toggle browser panel |
+| `Ctrl+B, O` | Toggle browser panel |
 
 #### Direct Shortcuts
 
@@ -387,7 +386,7 @@ Within the search panel (`Ctrl+F, S`):
 |---|---|
 | `Ctrl+O` | Open folder |
 | `Ctrl+R` | Refresh explorer |
-| `Ctrl+S` | Save current file |
+| `Ctrl+S / Cmd+S` | Save current file |
 | `Escape` | Close overlays / panels |
 
 ---

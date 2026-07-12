@@ -27,14 +27,14 @@ const GROUPS: ShortcutGroup[] = [
   {
     title: "Terminal",
     items: [
-      { keys: "Ctrl+T, T", description: "New terminal" },
+      { keys: "Ctrl+T, O", description: "New terminal" },
       { keys: "Ctrl+T, M", description: "Open terminal memory" },
     ],
   },
   {
     title: "AI Integrations",
     items: [
-      { keys: "Ctrl+A, C", description: "Toggle agent chat" },
+      { keys: "Ctrl+A, O", description: "Toggle agent chat" },
       { keys: "Ctrl+A, P", description: "Model providers" },
       { keys: "Ctrl+A, M", description: "Chat model settings" },
       { keys: "Ctrl+A, F", description: "FITM model settings" },
@@ -43,21 +43,20 @@ const GROUPS: ShortcutGroup[] = [
       { keys: "Ctrl+A, K", description: "Manage skills" },
       { keys: "Ctrl+A, R", description: "Human feedback (RLHF)" },
       { keys: "Ctrl+A, I", description: "Open AI settings" },
-      { keys: "Ctrl+Shift+I", description: "Direct AI settings" },
     ],
   },
   {
     title: "Browser",
     items: [
-      { keys: "Ctrl+Shift+B", description: "Toggle browser panel" },
+      { keys: "Ctrl+B, O", description: "Toggle browser panel" },
     ],
   },
   {
     title: "Editor",
     items: [
-      { keys: "Ctrl+E, E", description: "Toggle file explorer" },
+      { keys: "Ctrl+E, O", description: "Toggle file explorer" },
       { keys: "Ctrl+E, S", description: "Open editor settings (linter)" },
-      { keys: "Ctrl+S", description: "Save current file" },
+      { keys: "Ctrl+S / Cmd+S", description: "Save current file" },
     ],
   },
 ];
