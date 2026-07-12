@@ -131,13 +131,13 @@ All feedback is stored as **JSONL** (one JSON object per line) under the project
 
 ```
 <project>/.rlhf/
-  dpo/
+  kto/
     good/
       <provider>_<model>/data.jsonl    ← KTO thumbs-up examples
     bad/
       <provider>_<model>/data.jsonl    ← KTO thumbs-down examples
-    pairwise/
-      <provider>_<model>/data.jsonl    ← DPO chosen/rejected pairs
+  dpo/
+    <provider>_<model>/data.jsonl      ← DPO chosen/rejected pairs
 ```
 
 Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), making it easy to train on data from specific models. The JSONL schemas follow the standard formats expected by KTO and DPO training scripts:
