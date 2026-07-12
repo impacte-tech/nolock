@@ -1360,6 +1360,8 @@ struct ToolCallLog {
 #[derive(Clone, serde::Serialize)]
 struct StreamPayload {
     token: String,
+    #[serde(default)]
+    thinking: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1907,6 +1909,8 @@ fn execute_custom_tool(name: &str, args: &serde_json::Value, root_path: &str) ->
 struct StreamResult {
     /// Content emitted by the model in this iteration (for the assistant message).
     iter_content: String,
+    /// Thinking trace emitted by thinking-capable models (e.g. Qwen3).
+    iter_thinking: String,
     /// Tool calls detected, if any.
     tool_calls: Option<Vec<serde_json::Value>>,
 }
@@ -1946,15 +1950,71 @@ fn build_initial_messages(
 
 /// Stream an Ollama NDJSON response line by line, emitting tokens to the
 /// frontend via `app_handle` and accumulating content into `full_content`.
-/// Returns the iteration-scoped content and any tool calls found.
+/// Returns the iteration-scoped content, thinking trace, and any tool calls found.
 async fn stream_ollama_response(
     mut resp: reqwest::Response,
     app_handle: &tauri::AppHandle,
     full_content: &mut String,
 ) -> Result<StreamResult, String> {
     let mut iter_content = String::new();
+    let mut iter_thinking = String::new();
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
     let mut buf = String::new();
+
+    // Helper to process a single NDJSON line — extracted so the main loop
+    // and the trailing-buffer drain share the same logic.
+    let process_line = |line: &str,
+                            iter_content: &mut String,
+                            iter_thinking: &mut String,
+                            tool_calls: &mut Option<Vec<serde_json::Value>>,
+                            full_content: &mut String|
+     -> Result<(), String> {
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(line) {
+            // Thinking-capable models (Qwen3, DeepSeek-R1, etc.) emit a
+            // `thinking` field separate from `content`.  Capture it for the
+            // tool-loop context but stream it with a `thinking` flag so the
+            // frontend can display it transiently without adding it to the
+            // conversation messages.
+            if let Some(thinking) = data["message"]["thinking"].as_str() {
+                if !thinking.is_empty() {
+                    iter_thinking.push_str(thinking);
+                    app_handle
+                        .emit(
+                            "stream-token",
+                            StreamPayload {
+                                token: thinking.to_string(),
+                                thinking: true,
+                            },
+                        )
+                        .ok();
+                }
+            }
+            if let Some(content) = data["message"]["content"].as_str() {
+                if !content.is_empty() {
+                    iter_content.push_str(content);
+                    full_content.push_str(content);
+                    app_handle
+                        .emit(
+                            "stream-token",
+                            StreamPayload {
+                                token: content.to_string(),
+                                thinking: false,
+                            },
+                        )
+                        .ok();
+                }
+            }
+            // Detect tool calls in ANY chunk — not just the done:true chunk.
+            // Some Ollama versions/streaming modes may emit tool_calls
+            // in a separate chunk before the done marker.
+            if let Some(calls) = data["message"]["tool_calls"].as_array() {
+                if !calls.is_empty() {
+                    *tool_calls = Some(calls.clone());
+                }
+            }
+        }
+        Ok(())
+    };
 
     loop {
         match resp.chunk().await.map_err(|e| e.to_string())? {
@@ -1968,38 +2028,24 @@ async fn stream_ollama_response(
                     if line.is_empty() {
                         continue;
                     }
-
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
-                        if let Some(content) = data["message"]["content"].as_str() {
-                            if !content.is_empty() {
-                                iter_content.push_str(content);
-                                full_content.push_str(content);
-                                app_handle
-                                    .emit(
-                                        "stream-token",
-                                        StreamPayload {
-                                            token: content.to_string(),
-                                        },
-                                    )
-                                    .ok();
-                            }
-                        }
-                        // Detect tool calls in ANY chunk — not just the done:true chunk.
-                        // Some Ollama versions/streaming modes may emit tool_calls
-                        // in a separate chunk before the done marker.
-                        if let Some(calls) = data["message"]["tool_calls"].as_array() {
-                            if !calls.is_empty() {
-                                tool_calls = Some(calls.clone());
-                            }
-                        }
-                    }
+                    process_line(&line, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
                 }
             }
         }
     }
 
+    // Drain any remaining data in the buffer after the stream ends.
+    // The last chunk from the server may not end with a newline, so the
+    // inner while-let loop leaves residual bytes in `buf`.  Process them
+    // now so we don't silently drop content or tool-call detection.
+    if !buf.trim().is_empty() {
+        let line = buf.trim().to_string();
+        process_line(&line, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
+    }
+
     Ok(StreamResult {
         iter_content,
+        iter_thinking,
         tool_calls,
     })
 }
@@ -2045,7 +2091,7 @@ async fn ollama_chat_with_tools(
             .client
             .post(format!("{}/api/chat", ctx.url))
             .json(&body)
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(300))
             .send()
             .await
             .map_err(|e| {
@@ -2079,12 +2125,18 @@ async fn ollama_chat_with_tools(
 
         // --- Handle tool calls or return final response ---
         if let Some(calls) = stream.tool_calls {
-            // Push the assistant message so Ollama knows the context
-            ollama_msgs.push(serde_json::json!({
+            // Push the assistant message so Ollama knows the context.
+            // Include the thinking field for thinking-capable models so the
+            // model retains its reasoning context across tool-call iterations.
+            let mut assistant_msg = serde_json::json!({
                 "role": "assistant",
                 "content": stream.iter_content,
                 "tool_calls": calls
-            }));
+            });
+            if !stream.iter_thinking.is_empty() {
+                assistant_msg["thinking"] = serde_json::json!(stream.iter_thinking);
+            }
+            ollama_msgs.push(assistant_msg);
 
             // Execute each tool call and add results
             for call in &calls {
@@ -2114,6 +2166,13 @@ async fn ollama_chat_with_tools(
                     "tool_call_id": tool_call_id,
                     "content": result
                 }));
+            }
+
+            // Add a newline separator between tool-loop iterations so the
+            // streamed content from the previous turn doesn't run directly
+            // into the next turn's content without a visual break.
+            if !full_content.is_empty() {
+                full_content.push('\n');
             }
         } else {
             // No tool calls — final response
@@ -2508,7 +2567,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     let mut resp = client
                         .post(format!("{}/api/chat", req.url))
                     .json(&body)
-                    .timeout(std::time::Duration::from_secs(60))
+                    .timeout(std::time::Duration::from_secs(180))
                     .send()
                     .await
                     .map_err(|e| {
@@ -2528,7 +2587,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     return Err(format!("Ollama API error ({}): {}", status, error_detail));
                 }
 
-                // Stream NDJSON response
+                // Stream NDJSON response (handles both thinking and content fields)
                 let mut full_content = String::new();
                 let mut buf = String::new();
                 loop {
@@ -2542,15 +2601,48 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                 buf = buf[pos + 1..].to_string();
                                 if line.is_empty() { continue; }
                                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                                    // Capture thinking field for thinking-capable models
+                                    if let Some(thinking) = data["message"]["thinking"].as_str() {
+                                        if !thinking.is_empty() {
+                                            app_handle.emit("stream-token", StreamPayload {
+                                                token: thinking.to_string(),
+                                                thinking: true,
+                                            }).ok();
+                                        }
+                                    }
                                     if let Some(content) = data["message"]["content"].as_str() {
                                         if !content.is_empty() {
                                             full_content.push_str(content);
                                             app_handle.emit("stream-token", StreamPayload {
                                                 token: content.to_string(),
+                                                thinking: false,
                                             }).ok();
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                // Drain trailing buffer (last chunk may not end with '\n')
+                if !buf.trim().is_empty() {
+                    let line = buf.trim().to_string();
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if let Some(thinking) = data["message"]["thinking"].as_str() {
+                            if !thinking.is_empty() {
+                                app_handle.emit("stream-token", StreamPayload {
+                                    token: thinking.to_string(),
+                                    thinking: true,
+                                }).ok();
+                            }
+                        }
+                        if let Some(content) = data["message"]["content"].as_str() {
+                            if !content.is_empty() {
+                                full_content.push_str(content);
+                                app_handle.emit("stream-token", StreamPayload {
+                                    token: content.to_string(),
+                                    thinking: false,
+                                }).ok();
                             }
                         }
                     }
@@ -2618,10 +2710,31 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                                 full_content.push_str(content);
                                                 app_handle.emit("stream-token", StreamPayload {
                                                     token: content.to_string(),
+                                                    thinking: false,
                                                 }).ok();
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Drain trailing buffer (last chunk may not end with '\n\n')
+            if !buf.trim().is_empty() {
+                for line in buf.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data == "[DONE]" { continue; }
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(content) = json["content"].as_str() {
+                                if !content.is_empty() {
+                                    full_content.push_str(content);
+                                    app_handle.emit("stream-token", StreamPayload {
+                                        token: content.to_string(),
+                                        thinking: false,
+                                    }).ok();
                                 }
                             }
                         }
@@ -2717,10 +2830,31 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                                 full_content.push_str(content);
                                                 app_handle.emit("stream-token", StreamPayload {
                                                     token: content.to_string(),
+                                                    thinking: false,
                                                 }).ok();
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Drain trailing buffer (last chunk may not end with '\n\n')
+            if !buf.trim().is_empty() {
+                for line in buf.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data == "[DONE]" { continue; }
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                if !content.is_empty() {
+                                    full_content.push_str(content);
+                                    app_handle.emit("stream-token", StreamPayload {
+                                        token: content.to_string(),
+                                        thinking: false,
+                                    }).ok();
                                 }
                             }
                         }
@@ -2787,12 +2921,33 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                             if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                                 if !content.is_empty() {
                                                     full_content.push_str(content);
-                                                    app_handle.emit("stream-token", StreamPayload {
+                                                     app_handle.emit("stream-token", StreamPayload {
                                                         token: content.to_string(),
+                                                        thinking: false,
                                                     }).ok();
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Drain trailing buffer (last chunk may not end with '\n\n')
+                if !buf.trim().is_empty() {
+                    for line in buf.lines() {
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            let data = data.trim();
+                            if data == "[DONE]" { continue; }
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                    if !content.is_empty() {
+                                        full_content.push_str(content);
+                                        app_handle.emit("stream-token", StreamPayload {
+                                            token: content.to_string(),
+                                            thinking: false,
+                                        }).ok();
                                     }
                                 }
                             }
@@ -2855,14 +3010,30 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                 if line.is_empty() { continue; }
                                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
                                     if let Some(content) = data["response"].as_str() {
-                                        if !content.is_empty() {
+                                         if !content.is_empty() {
                                             full_content.push_str(content);
                                             app_handle.emit("stream-token", StreamPayload {
                                                 token: content.to_string(),
+                                                thinking: false,
                                             }).ok();
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+                // Drain trailing buffer (last chunk may not end with '\n')
+                if !buf.trim().is_empty() {
+                    let line = buf.trim().to_string();
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
+                        if let Some(content) = data["response"].as_str() {
+                            if !content.is_empty() {
+                                full_content.push_str(content);
+                                app_handle.emit("stream-token", StreamPayload {
+                                    token: content.to_string(),
+                                    thinking: false,
+                                }).ok();
                             }
                         }
                     }

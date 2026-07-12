@@ -307,6 +307,72 @@ function CorrectionInput({ onSubmit, onCancel }: { onSubmit: (text: string) => v
   );
 }
 
+/**
+ * Heuristic: returns true when an assistant response looks like it was cut
+ * off mid-generation (hit max_tokens, network error, etc.).
+ */
+export function looksIncomplete(text: string): boolean {
+  if (!text) return false;
+  const trimmed = text.trimEnd();
+  if (!trimmed) return false;
+
+  // Unclosed code fences (odd number of ```)
+  const fenceCount = (trimmed.match(/```/g) || []).length;
+  if (fenceCount % 2 !== 0) return true;
+
+  // Unclosed markdown links  [...](  or  ![...](
+  const openLinks = (trimmed.match(/!\[[^\]]*\]\([^)]*$/g) || []).length
+    + (trimmed.match(/(?<!!)\[[^\]]*\]\([^)]*$/g) || []).length;
+  if (openLinks > 0) return true;
+
+  // Ends mid-word (last char is alphanumeric — no sentence-ending punctuation)
+  const lastChar = trimmed[trimmed.length - 1];
+  if (/[a-zA-Z0-9]/.test(lastChar)) return true;
+
+  // Ends with a colon or comma (likely introducing a list or code block)
+  if (/[,:]/.test(lastChar)) return true;
+
+  // Ends with an opening bracket/brace
+  if (/[({[]$/.test(lastChar)) return true;
+
+  return false;
+}
+
+/**
+ * Transient thinking indicator — shows the model's reasoning trace while
+ * streaming, then disappears once the response is complete.  Collapsible
+ * so the user can hide the trace while it's still streaming.
+ */
+export function ThinkingIndicator({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll the thinking content as new tokens arrive
+  useEffect(() => {
+    if (expanded && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [text, expanded]);
+
+  if (!text) return null;
+
+  return (
+    <div className="thinking-indicator">
+      <div className="thinking-indicator-header" onClick={() => setExpanded(!expanded)}>
+        <span className="thinking-indicator-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        <span className="thinking-indicator-spinner" />
+        <span className="thinking-indicator-label">Thinking...</span>
+        <span className="thinking-indicator-chars">{text.length.toLocaleString()} chars</span>
+      </div>
+      {expanded && (
+        <div className="thinking-indicator-body" ref={contentRef}>
+          <pre className="thinking-indicator-text">{text}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, onOpenAgentManager }: Props) {
   // Wire up global ref so MarkdownContent can open URLs
   useEffect(() => {
@@ -321,6 +387,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const sendingRef = useRef(false); // guards against concurrent sendMessage calls
   const stopRequestedRef = useRef(false); // set to true when user clicks stop
   const unlistenRef = useRef<(() => void) | null>(null); // stored stream-token unlisten callback
+
+  /** Live thinking text from thinking-capable models — shown transiently, never persisted. */
+  const [thinkingText, setThinkingText] = useState("");
+  const showThinking = localStorage.getItem("nolock.showThinking") === "true";
 
   // ---- Mention state (@ for files/agents, / for skills) ----
   const [fileRefs, setFileRefs] = useState<FileRef[]>([]);
@@ -591,7 +661,115 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     }
     sendingRef.current = false;
     setLoading(false);
+    setThinkingText("");
   }, []);
+
+  /** Continue the last assistant response — appends new tokens to the existing message. */
+  const continueResponse = useCallback(async () => {
+    if (loading || sendingRef.current) return;
+    // Need at least one assistant message to continue
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg || lastMsg.role !== "assistant") return;
+
+    sendingRef.current = true;
+    setLoading(true);
+    setThinkingText("");
+
+    let unlisten: (() => void) | null = null;
+    try {
+      const backend = localStorage.getItem("nolock.backend") || "ollama";
+      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const chatModel = localStorage.getItem("nolock.chatModel") || "";
+      if (!chatModel) return;
+
+      const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
+
+      const chatTemperature = localStorage.getItem("nolock.chatTemperature");
+      const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
+      const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
+
+      // Build API messages from existing conversation history
+      const apiMessages = [
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        // Append a system instruction to continue
+        { role: "system" as const, content: "Continue your previous response exactly where you left off. Do not repeat any content. Do not add any preamble or explanation — just continue the text." },
+      ];
+
+      const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
+      const toolsEnabled: string[] = JSON.parse(toolsRaw);
+      const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
+      const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
+
+      const reqBase = {
+        backend,
+        url,
+        model: chatModel,
+        messages: apiMessages,
+        apiKey: apiKey || null,
+        toolsEnabled,
+        toolConfigs,
+        temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
+        maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
+        systemPrompt: chatSystemPrompt || undefined,
+        rootPath: rootPath || undefined,
+        maxIterations: 1,
+      };
+
+      // Stream tokens — they get appended to the existing last assistant message
+      unlisten = await listen<{ token: string; thinking: boolean }>("stream-token", (event) => {
+        if (stopRequestedRef.current) return;
+        const { token, thinking } = event.payload;
+        if (thinking && showThinking) {
+          setThinkingText((prev) => prev + token);
+        } else if (!thinking) {
+          setMessages((prev) => {
+            const msgs = [...prev];
+            const last = msgs[msgs.length - 1];
+            if (last && last.role === "assistant") {
+              msgs[msgs.length - 1] = { ...last, content: last.content + token };
+            }
+            return msgs;
+          });
+        }
+      });
+      unlistenRef.current = unlisten;
+
+      const result: { content: string; tool_calls: ToolCallLog[] } = await invoke("ai_chat", { req: reqBase });
+
+      if (stopRequestedRef.current) return;
+
+      // Finalize — append the complete response to the existing assistant message
+      const responseText = result.content || "";
+      setMessages((prev) => {
+        const msgs = [...prev];
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant") {
+          msgs[msgs.length - 1] = {
+            ...last,
+            content: last.content + responseText,
+          };
+        }
+        return msgs;
+      });
+
+      if (responseText) {
+        const respTokens = countTokens(responseText);
+        if (respTokens > 0) {
+          setAccumulatedContextTokens((prev) => prev + respTokens);
+        }
+      }
+    } catch (e: any) {
+      console.error("[continue] Error:", e);
+    } finally {
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
+      }
+      sendingRef.current = false;
+      setLoading(false);
+      setThinkingText("");
+    }
+  }, [loading, messages, rootPath, showThinking]);
 
   /** Find the question (user message) that precedes an assistant message at a given index. */
   const findQuestionForAssistant = useCallback((assistantIndex: number): string => {
@@ -993,16 +1171,24 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         ]);
       } else {
         // ---- Normal mode: stream a single response ----
-        unlisten = await listen<{ token: string }>("stream-token", (event) => {
+        unlisten = await listen<{ token: string; thinking: boolean }>("stream-token", (event) => {
           if (stopRequestedRef.current) return;
-          setMessages((prev) => {
-            const msgs = [...prev];
-            const last = msgs[msgs.length - 1];
-            if (last && last.role === "assistant") {
-              msgs[msgs.length - 1] = { ...last, content: last.content + event.payload.token };
-            }
-            return msgs;
-          });
+          const { token, thinking } = event.payload;
+          if (thinking && showThinking) {
+            // Thinking tokens go into the transient thinking indicator
+            setThinkingText((prev) => prev + token);
+          } else if (!thinking) {
+            // Content tokens go into the assistant message
+            setMessages((prev) => {
+              const msgs = [...prev];
+              const last = msgs[msgs.length - 1];
+              if (last && last.role === "assistant") {
+                msgs[msgs.length - 1] = { ...last, content: last.content + token };
+              }
+              return msgs;
+            });
+          }
+          // When thinking && !showThinking: silently discard (don't pollute chat)
         });
         unlistenRef.current = unlisten;
 
@@ -1042,23 +1228,33 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         });
       }
     } catch (e: any) {
-      // On error, replace the empty placeholder with the error message
+      // On error, replace the placeholder/partial message with the error.
+      // If streaming tokens already filled part of the message, replace it
+      // instead of leaving an orphaned partial response.
       setMessages((prev) => {
         const msgs = [...prev];
         const last = msgs[msgs.length - 1];
-        if (last && last.role === "assistant" && last.content === "") {
-          msgs[msgs.length - 1] = { role: "assistant", content: `Error: ${e}` };
+        if (last && last.role === "assistant") {
+          msgs[msgs.length - 1] = {
+            ...last,
+            content: `Error: ${e}`,
+            toolCalls: undefined,
+          };
         } else {
           msgs.push({ role: "assistant", content: `Error: ${e}` });
         }
         return msgs;
       });
     } finally {
-      if (unlisten) unlisten();
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
+      }
       sendingRef.current = false;
       setLoading(false);
+      setThinkingText("");
     }
-  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs]);
+  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking]);
 
   return (
     <div className="chat-panel" style={style}>
@@ -1098,6 +1294,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             )}
             {m.role === "assistant" ? (
               <div className="assistant-content">
+                {/* Thinking indicator — shown transiently while thinking tokens stream in */}
+                {i === messages.length - 1 && thinkingText && showThinking && (
+                  <ThinkingIndicator text={thinkingText} />
+                )}
                 {/* DPO choice component — show two responses side by side */}
                 {m.dpoResponses ? (
                   <DpoChoice
@@ -1177,6 +1377,16 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                       </>
                     )}
                   </div>
+                )}
+
+                {/* Continue button — shown when the last assistant response looks incomplete */}
+                {i === messages.length - 1 && !loading && !m.dpoResponses && m.content && looksIncomplete(m.content) && (
+                  <button className="continue-btn" onClick={continueResponse} title="Continue generating this response">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                    Continue
+                  </button>
                 )}
               </div>
             ) : (
@@ -1438,7 +1648,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             disabled={dpoPending}
           />
         </div>
-        <button className="chat-send" onClick={sendMessage} disabled={loading || dpoPending}>
+        <button className="chat-send" onClick={() => sendMessage()} disabled={loading || dpoPending}>
           {loading ? "Thinking..." : dpoPending ? "Choose response..." : "Send"}
         </button>
       </div>

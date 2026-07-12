@@ -20,6 +20,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(2048);
+  const [showThinking, setShowThinking] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
@@ -33,6 +34,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     setBackend(localStorage.getItem("nolock.backend") || "ollama");
     const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
     setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
+    setShowThinking(localStorage.getItem("nolock.showThinking") === "true");
   }, [visible]);
 
   const save = () => {
@@ -40,6 +42,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.chatSystemPrompt", systemPrompt);
     localStorage.setItem("nolock.chatTemperature", String(temperature));
     localStorage.setItem("nolock.chatMaxTokens", String(maxTokens));
+    localStorage.setItem("nolock.showThinking", String(showThinking));
     onClose();
   };
 
@@ -109,6 +112,19 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
             Maximum number of tokens in the model's response (64–32768).
+          </span>
+
+          <label className="field-label" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={showThinking}
+              onChange={(e) => setShowThinking(e.target.checked)}
+              style={{ accentColor: "var(--accent)" }}
+            />
+            Show Thinking
+          </label>
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+            Display the model's reasoning trace while it generates a response. Only supported by thinking-capable models (Qwen3, DeepSeek-R1, etc.). Thinking tokens are shown transiently and not saved to the conversation.
           </span>
         </div>
         <div className="modal-footer">
