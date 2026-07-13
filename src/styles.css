@@ -3018,6 +3018,7 @@ html, body, #root {
   border-radius: 6px;
   overflow: hidden;
   margin-top: 4px;
+  min-width: 420px;
 }
 
 .model-selector-server-url {
@@ -3068,7 +3069,7 @@ html, body, #root {
 }
 
 .model-selector-list {
-  max-height: 260px;
+  max-height: 420px;
   overflow-y: auto;
 }
 
@@ -3111,7 +3112,7 @@ html, body, #root {
 
 .model-selector-item {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
   padding: 8px 10px;
   cursor: pointer;
@@ -3132,11 +3133,18 @@ html, body, #root {
   border-left: 3px solid var(--accent);
 }
 
+.model-selector-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
 .model-selector-item-name {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3146,7 +3154,6 @@ html, body, #root {
   font-size: 11px;
   color: var(--text-muted);
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

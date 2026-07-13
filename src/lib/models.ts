@@ -1,9 +1,9 @@
 /**
  * Model fetching utilities for AI model providers.
  *
- * Fetches available models from provider APIs (OpenRouter, OpenCode Zen)
+ * Fetches available models from provider APIs (OpenRouter, OpenCode Zen, Ollama, llama.cpp)
  * via the Rust backend (to avoid CORS restrictions in the webview).
- * Provides filtering by free models and zero-data-retention models.
+ * Provides filtering by free models and zero-data-retention models (remote providers only).
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -57,7 +57,8 @@ export async function fetchModels(
   apiKey?: string,
   filters?: ModelFilters,
 ): Promise<ModelInfo[]> {
-  if (provider !== "openrouter" && provider !== "opencode") {
+  const supportedProviders = ["openrouter", "opencode", "ollama", "llamacpp"];
+  if (!supportedProviders.includes(provider)) {
     return [];
   }
 
