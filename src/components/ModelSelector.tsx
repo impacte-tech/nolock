@@ -28,13 +28,14 @@ interface Props {
 /**
  * A filterable model selector component.
  *
- * For OpenRouter and OpenCode Zen providers, this component:
+ * For all supported providers (OpenRouter, OpenCode Zen, Ollama, llama.cpp), this component:
  * - Fetches available models from the provider API
- * - Shows toggleable filters: "Free models only" and "Zero data retention only"
- * - Displays a filtered list of models the user can click to select
+ * - Displays a list of models the user can click to select
  *
- * For other providers (Ollama, llama.cpp), it renders as a plain text input
- * since those backends don't provide filterable model lists.
+ * For OpenRouter and OpenCode Zen, additional filter toggles are shown:
+ * - "Free models only" and "Zero data retention only"
+ *
+ * For Ollama and llama.cpp, filters are hidden since all local models are free and private.
  */
 export default function ModelSelector({
   provider,
@@ -54,14 +55,20 @@ export default function ModelSelector({
   const [fetched, setFetched] = useState(false);
 
   const browseRef = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
 
   // Whether model listing + filtering is supported for this provider
-  const supportsListing = provider === "openrouter" || provider === "opencode";
+  const supportsListing = provider === "openrouter" || provider === "opencode" || provider === "ollama" || provider === "llamacpp";
+  // Whether this provider supports pricing/privacy filters (only remote providers)
+  const supportsFilters = provider === "openrouter" || provider === "opencode";
 
   // Load saved filter preferences on mount
   useEffect(() => {
     setFilters(loadFilters());
   }, []);
+
+  // For providers without filters (Ollama, llama.cpp), skip fetching with filters
+  const effectiveFilters = supportsFilters ? filters : { freeOnly: false, zeroDataRetentionOnly: false };
 
   // Fetch models when the user opens the browser, or when provider/url/apiKey change
   // (only for supported providers)
@@ -70,7 +77,7 @@ export default function ModelSelector({
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchModels(provider, url, apiKey, filters);
+      const result = await fetchModels(provider, url, apiKey, effectiveFilters);
       setModels(result);
       setFetched(true);
     } catch (err) {
@@ -79,7 +86,7 @@ export default function ModelSelector({
     } finally {
       setLoading(false);
     }
-  }, [provider, url, apiKey, filters, supportsListing]);
+  }, [provider, url, apiKey, effectiveFilters, supportsListing]);
 
   // Apply client-side filters whenever models or filters change.
   // For OpenRouter, the ZDR filter is applied server-side via the ?zdr=true param,
@@ -118,10 +125,13 @@ export default function ModelSelector({
     setBrowseOpen(false);
   };
 
-  // Close browse panel when clicking outside
+  // Close browse panel when clicking outside (but not on the toggle button)
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (browseRef.current && !browseRef.current.contains(e.target as Node)) {
+      if (
+        browseRef.current && !browseRef.current.contains(e.target as Node) &&
+        toggleRef.current && !toggleRef.current.contains(e.target as Node)
+      ) {
         setBrowseOpen(false);
       }
     };
@@ -138,6 +148,7 @@ export default function ModelSelector({
           {label && <label className="field-label">{label}</label>}
           {supportsListing && (
             <button
+              ref={toggleRef}
               className="model-selector-toggle-btn"
               onClick={() => {
                 setBrowseOpen((prev) => !prev);
@@ -168,25 +179,27 @@ export default function ModelSelector({
             Server: <span className="model-selector-server-url-value">{url}</span>
           </div>
 
-          {/* Filter toggles */}
-          <div className="model-selector-filters">
-            <label className="model-filter-toggle">
-              <input
-                type="checkbox"
-                checked={filters.freeOnly}
-                onChange={() => handleFilterChange("freeOnly")}
-              />
-              <span>Free models only</span>
-            </label>
-            <label className="model-filter-toggle">
-              <input
-                type="checkbox"
-                checked={filters.zeroDataRetentionOnly}
-                onChange={() => handleFilterChange("zeroDataRetentionOnly")}
-              />
-              <span>Zero data retention</span>
-            </label>
-          </div>
+          {/* Filter toggles (only for providers with pricing/privacy data) */}
+          {supportsFilters && (
+            <div className="model-selector-filters">
+              <label className="model-filter-toggle">
+                <input
+                  type="checkbox"
+                  checked={filters.freeOnly}
+                  onChange={() => handleFilterChange("freeOnly")}
+                />
+                <span>Free models only</span>
+              </label>
+              <label className="model-filter-toggle">
+                <input
+                  type="checkbox"
+                  checked={filters.zeroDataRetentionOnly}
+                  onChange={() => handleFilterChange("zeroDataRetentionOnly")}
+                />
+                <span>Zero data retention</span>
+              </label>
+            </div>
+          )}
 
           {/* Model list */}
           <div className="model-selector-list">
@@ -209,7 +222,9 @@ export default function ModelSelector({
             )}
             {!loading && !error && filteredModels.length === 0 && fetched && (
               <div className="model-selector-status">
-                No models match the selected filters.
+                {supportsFilters
+                  ? "No models match the selected filters."
+                  : "No models found. Is the server running?"}
               </div>
             )}
             {!loading &&
@@ -218,9 +233,14 @@ export default function ModelSelector({
                   key={m.id}
                   className={`model-selector-item ${value === m.id ? "selected" : ""}`}
                   onClick={() => handleSelectModel(m.id)}
+                  title={m.id !== m.name ? `${m.name}\n${m.id}` : m.id}
                 >
-                  <span className="model-selector-item-name">{m.name}</span>
-                  <span className="model-selector-item-id">{m.id}</span>
+                  <span className="model-selector-item-text">
+                    <span className="model-selector-item-name">{m.name}</span>
+                    {m.name !== m.id && (
+                      <span className="model-selector-item-id">{m.id}</span>
+                    )}
+                  </span>
                   <span className="model-selector-item-badges">
                     {m.isFree && <span className="badge badge-free">Free</span>}
                     {m.zeroDataRetention && (

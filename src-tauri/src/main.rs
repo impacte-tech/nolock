@@ -1278,6 +1278,74 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                 }).collect())
             }
         }
+        "ollama" => {
+            let base = req.url.trim_end_matches('/');
+            let endpoint = format!("{}/api/tags", base);
+            eprintln!("[nolock] fetch_models ollama GET {}", endpoint);
+            let resp = client
+                .get(&endpoint)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(|e| format!("Ollama request failed: {}", e))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(format!("Ollama API error ({}): {}", status, &text[..text.len().min(200)]));
+            }
+
+            let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let models = body["models"].as_array().cloned().unwrap_or_default();
+
+            Ok(models.iter().map(|m| {
+                let name = m["name"].as_str().unwrap_or("");
+                ModelListItem {
+                    id: name.to_string(),
+                    name: name.to_string(),
+                    is_free: true, // local models are always free
+                    zero_data_retention: true, // local = fully private
+                }
+            }).collect())
+        }
+        "llamacpp" => {
+            let base = req.url.trim_end_matches('/');
+            let endpoint = format!("{}/v1/models", base);
+            eprintln!("[nolock] fetch_models llamacpp GET {}", endpoint);
+            let mut builder = client
+                .get(&endpoint)
+                .header("Accept", "application/json");
+            if let Some(ref key) = req.api_key {
+                if !key.is_empty() {
+                    builder = builder.header("Authorization", format!("Bearer {}", key));
+                }
+            }
+            let resp = builder
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(|e| format!("llama.cpp request failed: {}", e))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(format!("llama.cpp API error ({}): {}", status, &text[..text.len().min(200)]));
+            }
+
+            let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            let data = body["data"].as_array().cloned().unwrap_or_default();
+
+            Ok(data.iter().map(|m| {
+                let id = m["id"].as_str().unwrap_or("");
+                let name = m["name"].as_str().unwrap_or(id);
+                ModelListItem {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    is_free: true, // local models are always free
+                    zero_data_retention: true, // local = fully private
+                }
+            }).collect())
+        }
         _ => Ok(vec![]),
     }
 }
