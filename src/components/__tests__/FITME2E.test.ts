@@ -416,8 +416,9 @@ describe("FITM E2E — response realism", () => {
 
     // Should still produce a suggestion (truncated at logical boundary)
     expect(result.items).toHaveLength(1);
-    expect(result.items[0].insertText.length).toBeGreaterThan(0);
-    expect(result.items[0].insertText.length).toBeLessThanOrEqual(257); // 256 + boundary char
+    const insertText = result.items[0].insertText as string;
+    expect(insertText.length).toBeGreaterThan(0);
+    expect(insertText.length).toBeLessThanOrEqual(257); // 256 + boundary char
   });
 
   it("preserves suggestion quality through truncation", async () => {

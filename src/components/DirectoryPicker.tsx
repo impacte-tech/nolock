@@ -32,7 +32,7 @@ export default function DirectoryPicker({ sourcePath, sourceName, rootPath, onMo
 
   // Build flat list of focusable items: Go up (if present) + directory entries
   const focusableItems = useMemo(() => {
-    const items: { type: "go-up" } | { type: "entry"; entry: DirEntry }[] = [];
+    const items: ({ type: "go-up" } | { type: "entry"; entry: DirEntry })[] = [];
     if (dirHistory.length > 0) items.push({ type: "go-up" } as const);
     entries.forEach((entry) => items.push({ type: "entry" as const, entry }));
     return items;

@@ -19,7 +19,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   const [apiKey, setApiKey] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [temperature, setTemperature] = useState(0.7);
-  const [maxTokens, setMaxTokens] = useState(2048);
+  const [maxTokens, setMaxTokens] = useState(8192);
   const [showThinking, setShowThinking] = useState(false);
 
   useEffect(() => {
@@ -30,7 +30,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     const savedTemp = localStorage.getItem("nolock.chatTemperature");
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.7);
     const savedTokens = localStorage.getItem("nolock.chatMaxTokens");
-    setMaxTokens(savedTokens ? parseInt(savedTokens, 10) : 2048);
+    setMaxTokens(savedTokens ? parseInt(savedTokens, 10) : 8192);
     setBackend(localStorage.getItem("nolock.backend") || "ollama");
     const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
     setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
@@ -112,6 +112,11 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
             Maximum number of tokens in the model's response (64–32768).
+            When Agent Tools are enabled, the backend auto-scales this to 8192+ for thinking models.
+          </span>
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4, fontStyle: "italic" }}>
+            Thinking models (Qwen3, DeepSeek-R1, etc.) consume tokens for hidden reasoning.
+            Set this to at least 4096 (or leave it at 8192) when using tools, otherwise the response may be cut off.
           </span>
 
           <label className="field-label" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>

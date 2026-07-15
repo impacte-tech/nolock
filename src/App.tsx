@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileExplorer from "./components/FileExplorer";
@@ -756,15 +756,15 @@ export default function App() {
 
               <div className="editor-content">
                 {currentFile ? (
-                  <Editor
-                    key={currentFile.path}
-                    filePath={currentFile.path}
-                    content={currentFile.content}
-                    onChange={(content) => updateFileContent(currentFile.path, content)}
-                    onSave={() => saveFile(currentFile.path)}
-                    revealLine={revealLine?.filePath === currentFile.path ? revealLine.lineNumber : undefined}
-                    onRevealConsumed={() => setRevealLine(null)}
-                  />
+                    <Editor
+                      key={currentFile.path}
+                      filePath={currentFile.path}
+                      content={currentFile.content}
+                      onChange={(content) => updateFileContent(currentFile.path, content)}
+                      onSave={() => saveFile(currentFile.path)}
+                      revealLine={revealLine?.filePath === currentFile.path ? revealLine.lineNumber : undefined}
+                      onRevealConsumed={() => setRevealLine(null)}
+                    />
                 ) : (
                   <ShortcutsScreen />
                 )}
