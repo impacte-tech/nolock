@@ -111,7 +111,7 @@ describe("DirectoryPicker", () => {
   });
 
   it("disables buttons while moving", async () => {
-    const onMove = vi.fn(() => new Promise((r) => setTimeout(r, 100)));
+    const onMove = vi.fn(() => new Promise<void>((r) => setTimeout(r, 100)));
     render(<DirectoryPicker {...defaultProps} onMove={onMove} />);
     await waitFor(() => expect(screen.getByText("docs")).toBeInTheDocument());
 
