@@ -13,11 +13,13 @@ describe("ToolCallBlock", () => {
       name: "web_fetch",
       arguments: '{"url": "https://example.com"}',
       result_snippet: "Fetched 12345 bytes",
+      result_full: "Fetched 12345 bytes from https://example.com",
     },
     {
       name: "read_file",
       arguments: '{"path": "/src/main.rs"}',
       result_snippet: 'fn main() { println!("Hello"); }',
+      result_full: 'fn main() {\n    println!("Hello");\n}',
     },
   ];
 

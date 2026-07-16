@@ -19,7 +19,10 @@ interface ToolItem {
 const BUILTIN_TOOLS: ToolItem[] = [
   { id: "web_search", label: "web_search", description: "Search the internet for up-to-date information", path: "builtin:web_search", isBuiltin: true },
   { id: "web_fetch", label: "web_fetch", description: "Fetch and read web page content from a URL", path: "builtin:web_fetch", isBuiltin: true },
+  { id: "grep", label: "grep", description: "Search file contents for a regex pattern", path: "builtin:grep", isBuiltin: true },
   { id: "read_file", label: "read_file", description: "Read file contents from disk", path: "builtin:read_file", isBuiltin: true },
+  { id: "edit", label: "edit", description: "Targeted search-and-replace edits", path: "builtin:edit", isBuiltin: true },
+  { id: "write_file", label: "write_file", description: "Create and overwrite files on disk", path: "builtin:write_file", isBuiltin: true },
   { id: "list_directory", label: "list_directory", description: "Explore project structure", path: "builtin:list_directory", isBuiltin: true },
 ];
 

@@ -8,14 +8,17 @@ import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
 import {
-  saveRlhfFeedback,
-  saveDpoFeedback,
-  getModelContext,
-  getModelConfigurations,
-  readRlhfSettings,
-  type RlhfData,
-  type DpoEntry,
   type FeedbackType,
+  type KtoEntry,
+  type DpoEntry,
+  type RlhfData,
+  saveDpoFeedback,
+  saveKtoFeedback,
+  saveRlhfFeedback,
+  readRlhfSettings,
+  getModelConfigurations,
+  getModelContext,
+  serializeToolCalls,
 } from "../lib/rlhf";
 
 // ---------------------------------------------------------------------------
@@ -28,6 +31,7 @@ export interface ToolCallLog {
   name: string;
   arguments: string;
   result_snippet: string;
+  result_full: string;
 }
 
 interface Message {
@@ -46,6 +50,8 @@ interface Message {
   feedbackPending?: boolean;
   /** DPO mode: two alternative responses for pairwise comparison. */
   dpoResponses?: { responseA: string; responseB: string };
+  /** DPO mode: tool calls for each alternative response. */
+  dpoToolCalls?: { toolCallsA: import("../lib/rlhf").ToolCallLog[]; toolCallsB: import("../lib/rlhf").ToolCallLog[] };
   /** DPO mode: which response was chosen ('A' or 'B'), or null if pending. */
   dpoChoice?: "A" | "B";
 }
@@ -362,7 +368,7 @@ export function ThinkingIndicator({ text }: { text: string }) {
         <span className="thinking-indicator-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
         <span className="thinking-indicator-spinner" />
         <span className="thinking-indicator-label">Thinking...</span>
-        <span className="thinking-indicator-chars">{text.length.toLocaleString()} chars</span>
+        <span className="thinking-indicator-chars">{countTokens(text).toLocaleString()} tokens</span>
       </div>
       {expanded && (
         <div className="thinking-indicator-body" ref={contentRef}>
@@ -791,6 +797,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     const modelCtx = getModelContext();
     const configs = getModelConfigurations();
 
+    // Include tool calls in the answer for training data
+    const toolCallsText = serializeToolCalls(msg.toolCalls || []);
+    const answer = toolCallsText ? `${toolCallsText}\n${msg.content}` : msg.content;
+
     const data: RlhfData = {
       feedback_type: "good",
       model_provider: modelCtx.provider,
@@ -798,7 +808,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       model_configurations: configs,
       timestamp: new Date().toISOString(),
       question,
-      answer: msg.content,
+      answer,
       user_correction: "",
     };
 
@@ -849,6 +859,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     const modelCtx = getModelContext();
     const configs = getModelConfigurations();
 
+    // Include tool calls in the answer for training data
+    const toolCallsText = serializeToolCalls(msg.toolCalls || []);
+    const answer = toolCallsText ? `${toolCallsText}\n${msg.content}` : msg.content;
+
     const data: RlhfData = {
       feedback_type: "bad",
       model_provider: modelCtx.provider,
@@ -856,7 +870,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       model_configurations: configs,
       timestamp: new Date().toISOString(),
       question,
-      answer: msg.content,
+      answer,
       user_correction: correction.trim() || "(no correction provided)",
     };
 
@@ -887,8 +901,18 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     if (!msg || !msg.dpoResponses) return;
 
     const { responseA, responseB } = msg.dpoResponses;
-    const chosen = choice === "A" ? responseA : responseB;
-    const rejected = choice === "A" ? responseB : responseA;
+    const { toolCallsA, toolCallsB } = msg.dpoToolCalls || { toolCallsA: [], toolCallsB: [] };
+
+    // Include tool calls in chosen/rejected for training data
+    const toolCallsAText = serializeToolCalls(toolCallsA);
+    const toolCallsBText = serializeToolCalls(toolCallsB);
+    const chosenRaw = choice === "A" ? responseA : responseB;
+    const rejectedRaw = choice === "A" ? responseB : responseA;
+    const chosenToolCalls = choice === "A" ? toolCallsAText : toolCallsBText;
+    const rejectedToolCalls = choice === "A" ? toolCallsBText : toolCallsAText;
+    const chosen = chosenToolCalls ? `${chosenToolCalls}\n${chosenRaw}` : chosenRaw;
+    const rejected = rejectedToolCalls ? `${rejectedToolCalls}\n${rejectedRaw}` : rejectedRaw;
+
     const question = findQuestionForAssistant(msgIndex);
     const modelCtx = getModelContext();
     const configs = getModelConfigurations();
@@ -899,9 +923,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       if (msgs[msgIndex]) {
         msgs[msgIndex] = {
           ...msgs[msgIndex],
-          content: chosen,
+          content: chosenRaw,
           dpoChoice: choice,
-          dpoResponses: undefined, // clear DPO mode
+          dpoResponses: undefined,
+          dpoToolCalls: undefined,
         };
       }
       return msgs;
@@ -1110,10 +1135,24 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         dpoTriggered = messageCountRef.current % dpoSettings.dpoInterval === 0;
       }
 
-      // Build common API messages
+      // Build common API messages — include tool calls from previous assistant messages
       const apiMessages = [
         ...agentSystemMessages,
-        ...allMessages.map((m) => ({ role: m.role, content: m.content })),
+        ...allMessages.flatMap((m) => {
+          if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+            // Include tool calls and results as part of the assistant message
+            const toolText = m.toolCalls
+              .map((tc) => {
+                const args = tc.arguments || "{}";
+                const result = tc.result_full || tc.result_snippet || "";
+                return `<tool_call>${tc.name}${args}</tool_call>\n<tool_result>${result}</tool_result>`;
+              })
+              .join("\n");
+            const content = toolText ? `${toolText}\n${m.content}` : m.content;
+            return [{ role: m.role, content }];
+          }
+          return [{ role: m.role, content: m.content }];
+        }),
       ];
 
       // Shared request base
@@ -1136,19 +1175,23 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         // ---- DPO mode: generate TWO responses without streaming ----
         let respA = "";
         let respB = "";
+        let toolCallsA: import("../lib/rlhf").ToolCallLog[] = [];
+        let toolCallsB: import("../lib/rlhf").ToolCallLog[] = [];
 
         try {
           // First call: normal parameters
-          const resultA: { content: string } = await invoke("ai_chat", { req: reqBase });
+          const resultA: { content: string; tool_calls?: import("../lib/rlhf").ToolCallLog[] } = await invoke("ai_chat", { req: reqBase });
           respA = resultA.content || "(no response)";
+          toolCallsA = resultA.tool_calls || [];
 
           // Second call: slightly higher temperature for diversity
           const baseTemp = chatTemperature ? parseFloat(chatTemperature) : 0.7;
           const altTemp = Math.min(1, baseTemp + 0.2);
-          const resultB: { content: string } = await invoke("ai_chat", {
+          const resultB: { content: string; tool_calls?: import("../lib/rlhf").ToolCallLog[] } = await invoke("ai_chat", {
             req: { ...reqBase, temperature: altTemp },
           });
           respB = resultB.content || "(no response)";
+          toolCallsB = resultB.tool_calls || [];
         } catch (e: any) {
           // Fall back to a single error message
           setMessages((prev) => [
@@ -1167,6 +1210,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             role: "assistant",
             content: "",
             dpoResponses: { responseA: respA, responseB: respB },
+            dpoToolCalls: { toolCallsA, toolCallsB },
           },
         ]);
       } else {
