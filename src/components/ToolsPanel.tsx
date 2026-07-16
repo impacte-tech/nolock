@@ -31,7 +31,10 @@ const EXAMPLE_TOOL_FORM = {
 const AVAILABLE_TOOLS = [
   { id: "web_search", label: "Web Search", description: "Search the internet to discover relevant URLs before fetching them" },
   { id: "web_fetch", label: "Web Fetch", description: "Fetch and read web page content from a specific URL" },
-  { id: "read_file", label: "Read File", description: "Read file contents from disk" },
+  { id: "grep", label: "Grep", description: "Search file contents for a regex pattern — returns matching lines with file paths and line numbers" },
+  { id: "read_file", label: "Read File", description: "Read file contents from disk (truncated to 8KB for small models)" },
+  { id: "edit", label: "Edit File", description: "Targeted search-and-replace edits — much more token-efficient than rewriting entire files" },
+  { id: "write_file", label: "Write File", description: "Create and overwrite files on disk (prefer Edit for modifications)" },
   { id: "list_directory", label: "List Directory", description: "Explore project structure" },
 ];
 

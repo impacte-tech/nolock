@@ -12,6 +12,11 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import ChatPanel, { looksIncomplete, ThinkingIndicator } from "../ChatPanel";
 import { mockInvoke, mockListen, resetTauriMocks } from "../../test/tauri-mock";
 
+// Mock countTokens to return predictable values in tests
+vi.mock("../../lib/tokenizer", () => ({
+  countTokens: vi.fn((text: string) => Math.ceil(text.length / 4)),
+}));
+
 // =========================================================================
 // looksIncomplete — pure-function unit tests
 // =========================================================================
@@ -101,11 +106,11 @@ describe("ThinkingIndicator", () => {
     expect(container.querySelector(".thinking-indicator")).toBeNull();
   });
 
-  it("renders thinking header with label and character count", () => {
+  it("renders thinking header with label and token count", () => {
     render(<ThinkingIndicator text="Let me think about this..." />);
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
-    // "Let me think about this..." = 26 chars
-    expect(screen.getByText("26 chars")).toBeInTheDocument();
+    // "Let me think about this..." = 26 chars → 7 tokens (ceil(26/4))
+    expect(screen.getByText("7 tokens")).toBeInTheDocument();
   });
 
   it("is collapsed by default — body is not visible", () => {
@@ -136,10 +141,11 @@ describe("ThinkingIndicator", () => {
     expect(screen.getByText("\u25BC")).toBeInTheDocument();
   });
 
-  it("formats large character counts with locale separators", () => {
+  it("formats large token counts with locale separators", () => {
     const longText = "x".repeat(1500);
     render(<ThinkingIndicator text={longText} />);
-    expect(screen.getByText("1,500 chars")).toBeInTheDocument();
+    // 1500 chars → 375 tokens (ceil(1500/4))
+    expect(screen.getByText("375 tokens")).toBeInTheDocument();
   });
 });
 
@@ -210,7 +216,7 @@ describe("ChatPanel — thinking token streaming", () => {
 
     // ThinkingIndicator should appear (use the class to distinguish from send button)
     expect(document.querySelector(".thinking-indicator")).toBeInTheDocument();
-    expect(screen.getByText("18 chars")).toBeInTheDocument();
+    expect(screen.getByText("5 tokens")).toBeInTheDocument();
 
     // Resolve the invoke to finish loading
     await act(async () => {
@@ -278,7 +284,7 @@ describe("ChatPanel — thinking token streaming", () => {
       streamTokenHandler!({ payload: { token: "step 2. ", thinking: true } } as any);
     });
 
-    expect(screen.getByText("16 chars")).toBeInTheDocument();
+    expect(screen.getByText("4 tokens")).toBeInTheDocument();
 
     // Emit a content token
     await act(async () => {

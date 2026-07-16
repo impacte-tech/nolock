@@ -635,6 +635,12 @@ fn is_binary(path: &std::path::Path) -> bool {
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 const MAX_RESULTS: usize = 5000;
 
+// Tool result limits (for 9B model safety)
+const GREP_MAX_MATCHES: usize = 100;
+const GREP_MAX_OUTPUT_BYTES: usize = 50 * 1024; // 50KB
+const GREP_MAX_LINE_LENGTH: usize = 500;
+const READ_FILE_MAX_BYTES: usize = 8 * 1024; // 8KB
+
 /// Build a compiled Regex from the search request.
 fn build_search_regex(query: &str, use_regex: bool, match_case: bool) -> Result<Regex, String> {
     let pattern = if use_regex {
@@ -1423,6 +1429,7 @@ struct ToolCallLog {
     name: String,
     arguments: String,
     result_snippet: String,
+    result_full: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1510,6 +1517,130 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
                         }
                     },
                     "required": ["query"]
+                }
+            }
+        }));
+    }
+    if enabled.contains(&"grep".to_string()) {
+        let grep_desc = match root_path {
+            Some(rp) => format!(
+                "Search file contents for a regex pattern. Returns matching lines with file paths and line numbers. \
+                 Respects .gitignore. The open project folder is: {}. Search within it.", rp),
+            None => "Search file contents for a regex pattern. Returns matching lines with file paths and line numbers. \
+                     Respects .gitignore.".to_string(),
+        };
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": grep_desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex pattern to search for (e.g. 'fn main' or 'TODO.*fix')"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory or file to search in (default: project root)"
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "Filter files by glob, e.g. '*.tsx' or '*.rs'"
+                        },
+                        "ignore_case": {
+                            "type": "boolean",
+                            "description": "Case-insensitive search (default: false)"
+                        },
+                        "context": {
+                            "type": "integer",
+                            "description": "Lines of context before/after each match (default: 0)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max matches to return (default: 100)"
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }));
+    }
+    if enabled.contains(&"edit".to_string()) {
+        let edit_desc = match root_path {
+            Some(rp) => format!(
+                "Edit a file using exact text replacement. Each old_text must be unique in the file. \
+                 For multiple changes in one file, include them all in one call. \
+                 The open project folder is: {}. All paths must be within it.", rp),
+            None => "Edit a file using exact text replacement. Each old_text must be unique in the file. \
+                     NOTE: No folder is currently open — you need to open a folder to edit files.".to_string(),
+        };
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "edit",
+                "description": edit_desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path to edit (relative or absolute)"
+                        },
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_text": {
+                                        "type": "string",
+                                        "description": "Exact text to find (must be unique in the file)"
+                                    },
+                                    "new_text": {
+                                        "type": "string",
+                                        "description": "Replacement text"
+                                    }
+                                },
+                                "required": ["old_text", "new_text"]
+                            },
+                            "description": "One or more text replacements to apply"
+                        }
+                    },
+                    "required": ["path", "edits"]
+                }
+            }
+        }));
+    }
+    if enabled.contains(&"write_file".to_string()) {
+        let write_desc = match root_path {
+            Some(rp) => format!(
+                "Write content to a file on disk. Creates the file if it doesn't exist, overwrites if it does. \
+                 Automatically creates parent directories. \
+                 The open project folder is: {}. All file paths must be within this folder. \
+                 Use the edit tool instead of write_file when modifying existing files — it uses far fewer tokens.",
+                rp),
+            None => "Write content to a file on disk. Creates the file if it doesn't exist, overwrites if it does. \
+                     NOTE: No folder is currently open — you need to open a folder to write files.".to_string(),
+        };
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": write_desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path to write to"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write to the file"
+                        }
+                    },
+                    "required": ["path", "content"]
                 }
             }
         }));
@@ -1605,8 +1736,19 @@ async fn execute_tool(
                 .as_str()
                 .ok_or("Missing required parameter: path")?;
             eprintln!("[nolock] tool read_file path={}", path);
-            std::fs::read_to_string(path)
-                .map_err(|e| format!("Failed to read {}: {}", path, e))
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+            // Truncate to avoid overwhelming small models with large files
+            if text.len() > READ_FILE_MAX_BYTES {
+                Ok(format!(
+                    "{}\n\n... [truncated at {} chars, total {} chars — use grep to search, or edit for targeted changes]",
+                    &text[..READ_FILE_MAX_BYTES],
+                    READ_FILE_MAX_BYTES,
+                    text.len()
+                ))
+            } else {
+                Ok(text)
+            }
         }
         "list_directory" => {
             let path = args["path"]
@@ -1628,6 +1770,299 @@ async fn execute_tool(
             }
             entries.sort();
             Ok(entries.join("\n"))
+        }
+        "grep" => {
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or("Missing required parameter: pattern")?;
+            let search_path = args["path"]
+                .as_str()
+                .unwrap_or(root_path.unwrap_or("."));
+            let glob_pattern = args["glob"].as_str();
+            let ignore_case = args["ignore_case"].as_bool().unwrap_or(false);
+            let context_lines = args["context"].as_u64().unwrap_or(0) as usize;
+            let max_matches = args["limit"].as_u64().unwrap_or(GREP_MAX_MATCHES as u64) as usize;
+            eprintln!("[nolock] tool grep pattern={} path={}", pattern, search_path);
+
+            // Build regex
+            let re_str = if ignore_case {
+                format!("(?i){}", pattern)
+            } else {
+                pattern.to_string()
+            };
+            let re = Regex::new(&re_str).map_err(|e| format!("Invalid regex pattern: {}", e))?;
+
+            // Glob filter
+            let glob_re: Option<Regex> = glob_pattern.map(|g| {
+                // Convert simple glob to regex: *.ts -> .*\.ts, **/*.ts -> .*
+                let mut regex_str = String::from("(?s)");
+                let mut chars = g.chars().peekable();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '*' => {
+                            if chars.peek() == Some(&'*') {
+                                chars.next(); // skip second *
+                                if chars.peek() == Some(&'/') {
+                                    chars.next(); // skip /
+                                    regex_str.push_str(".*");
+                                } else {
+                                    regex_str.push_str(".*");
+                                }
+                            } else {
+                                regex_str.push_str("[^/]*");
+                            }
+                        }
+                        '?' => regex_str.push('.'),
+                        '.' => regex_str.push_str("\\."),
+                        '[' => regex_str.push('['),
+                        ']' => regex_str.push(']'),
+                        _ => regex_str.push(c),
+                    }
+                }
+                Regex::new(&regex_str).unwrap_or_else(|_| Regex::new(".*").unwrap())
+            });
+
+            let root = std::path::Path::new(search_path);
+            let mut output_lines: Vec<String> = Vec::new();
+            let mut match_count: usize = 0;
+            let mut total_bytes: usize = 0;
+            let mut truncated = false;
+            let mut dirs_to_visit = vec![root.to_path_buf()];
+            let mut post_context_remaining: usize = 0;
+
+            while let Some(dir) = dirs_to_visit.pop() {
+                if match_count >= max_matches || total_bytes >= GREP_MAX_OUTPUT_BYTES {
+                    truncated = true;
+                    break;
+                }
+                let read_dir = match std::fs::read_dir(&dir) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+
+                for entry in read_dir {
+                    if match_count >= max_matches || total_bytes >= GREP_MAX_OUTPUT_BYTES {
+                        truncated = true;
+                        break;
+                    }
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    let path = entry.path();
+                    let metadata = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+
+                    if metadata.is_dir() {
+                        if !should_skip_entry(&path, true) {
+                            dirs_to_visit.push(path);
+                        }
+                    } else if metadata.is_file() {
+                        if should_skip_entry(&path, false) {
+                            continue;
+                        }
+                        if metadata.len() > MAX_FILE_SIZE {
+                            continue;
+                        }
+                        if is_binary(&path) {
+                            continue;
+                        }
+                        // Apply glob filter
+                        if let Some(ref gr) = glob_re {
+                            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            if !gr.is_match(file_name) {
+                                continue;
+                            }
+                        }
+
+                        let content = match std::fs::read_to_string(&path) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        let file_path_str = path.strip_prefix(root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .to_string();
+                        let lines: Vec<&str> = content.lines().collect();
+
+                        for (idx, line) in lines.iter().enumerate() {
+                            if match_count >= max_matches || total_bytes >= GREP_MAX_OUTPUT_BYTES {
+                                truncated = true;
+                                break;
+                            }
+                            if re.is_match(line) {
+                                match_count += 1;
+                                let line_num = idx + 1;
+                                let truncated_line: String = line.chars().take(GREP_MAX_LINE_LENGTH).collect();
+                                let entry = format!("{}:{}:{}", file_path_str, line_num, truncated_line);
+                                total_bytes += entry.len() + 1;
+                                output_lines.push(entry);
+
+                                // Add context lines after match
+                                if context_lines > 0 {
+                                    post_context_remaining = context_lines;
+                                }
+                            } else if post_context_remaining > 0 && idx > 0 {
+                                // Output context line
+                                let line_num = idx + 1;
+                                let truncated_line: String = line.chars().take(GREP_MAX_LINE_LENGTH).collect();
+                                let entry = format!("{}-{}-{}", file_path_str, line_num, truncated_line);
+                                total_bytes += entry.len() + 1;
+                                output_lines.push(entry);
+                                post_context_remaining -= 1;
+                            } else {
+                                post_context_remaining = 0;
+                            }
+                        }
+                        post_context_remaining = 0;
+                    }
+                }
+            }
+
+            if output_lines.is_empty() {
+                Ok("No matches found".to_string())
+            } else {
+                let mut result = output_lines.join("\n");
+                if truncated {
+                    let notice = format!(
+                        "\n\n[Truncated: {} matches returned.{}]",
+                        match_count,
+                        if match_count >= max_matches {
+                            " Use limit parameter for more, or refine your pattern."
+                        } else {
+                            " Output too large."
+                        }
+                    );
+                    result.push_str(&notice);
+                }
+                Ok(result)
+            }
+        }
+        "edit" => {
+            let path = args["path"]
+                .as_str()
+                .ok_or("Missing required parameter: path")?;
+            let edits = args["edits"]
+                .as_array()
+                .ok_or("Missing required parameter: edits")?;
+            if edits.is_empty() {
+                return Err("edits must contain at least one replacement".into());
+            }
+            eprintln!("[nolock] tool edit path={} edits={}", path, edits.len());
+
+            // Resolve path — if relative, resolve against root_path
+            let abs_path = if std::path::Path::new(path).is_absolute() {
+                std::path::PathBuf::from(path)
+            } else {
+                let root = root_path.ok_or("No folder is open — cannot use relative paths")?;
+                std::path::Path::new(root).join(path)
+            };
+
+            // Ensure path is within root
+            if let Some(rp) = root_path {
+                let root_canonical = std::path::Path::new(rp).canonicalize()
+                    .map_err(|e| format!("Failed to resolve root path: {}", e))?;
+                let file_canonical = abs_path.canonicalize()
+                    .map_err(|_| format!("File does not exist: {}", path))?;
+                if !file_canonical.starts_with(&root_canonical) {
+                    return Err("Path is outside the open folder".into());
+                }
+            }
+
+            let content = std::fs::read_to_string(&abs_path)
+                .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+
+            let mut new_content = content.clone();
+            let mut replacements = 0usize;
+
+            for edit in edits {
+                let old_text = edit["old_text"].as_str()
+                    .ok_or("Each edit must have an old_text string")?;
+                let new_text = edit["new_text"].as_str()
+                    .ok_or("Each edit must have a new_text string")?;
+
+                // Check uniqueness
+                let count = new_content.matches(old_text).count();
+                if count == 0 {
+                    return Err(format!(
+                        "old_text not found in {}: {:?}",
+                        path,
+                        &old_text[..old_text.len().min(80)]
+                    ));
+                }
+                if count > 1 {
+                    return Err(format!(
+                        "old_text found {} times in {} — must be unique. Include more surrounding context.",
+                        count, path
+                    ));
+                }
+
+                new_content = new_content.replacen(old_text, new_text, 1);
+                replacements += 1;
+            }
+
+            std::fs::write(&abs_path, &new_content)
+                .map_err(|e| format!("Failed to write {}: {}", path, e))?;
+
+            Ok(format!(
+                "Successfully replaced {} block(s) in {}",
+                replacements, path
+            ))
+        }
+        "write_file" => {
+            let path = args["path"]
+                .as_str()
+                .ok_or("Missing required parameter: path")?;
+            let content = args["content"]
+                .as_str()
+                .ok_or("Missing required parameter: content")?;
+            eprintln!("[nolock] tool write_file path={}", path);
+
+            // Resolve path — if relative, resolve against root_path
+            let abs_path = if std::path::Path::new(path).is_absolute() {
+                std::path::PathBuf::from(path)
+            } else {
+                let root = root_path.ok_or("No folder is open — cannot use relative paths")?;
+                std::path::Path::new(root).join(path)
+            };
+
+            // Ensure path is within root
+            if let Some(rp) = root_path {
+                let root_canonical = std::path::Path::new(rp).canonicalize()
+                    .map_err(|e| format!("Failed to resolve root path: {}", e))?;
+                // Create parent dirs first so canonicalize works
+                if let Some(parent) = abs_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let file_canonical = abs_path.canonicalize()
+                    .or_else(|_| {
+                        // File might not exist yet — check parent
+                        abs_path.parent()
+                            .map(|p| p.join(abs_path.file_name().unwrap_or_default()))
+                            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent"))
+                    })
+                    .map_err(|e| format!("Failed to resolve path: {}", e))?;
+                if !file_canonical.starts_with(&root_canonical) {
+                    return Err("Path is outside the open folder".into());
+                }
+            }
+
+            // Create parent directories
+            if let Some(parent) = abs_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create directories: {}", e))?;
+            }
+
+            std::fs::write(&abs_path, content)
+                .map_err(|e| format!("Failed to write {}: {}", path, e))?;
+
+            Ok(format!(
+                "Successfully wrote {} bytes to {}",
+                content.len(),
+                path
+            ))
         }
         "web_search" => {
             let query = args["query"]
@@ -2113,6 +2548,7 @@ async fn ollama_chat_with_tools(
                     name: name.to_string(),
                     arguments: serde_json::to_string(args).unwrap_or_default(),
                     result_snippet: snippet,
+                    result_full: result.clone(),
                 });
 
                 // Add tool result message

@@ -22,6 +22,11 @@
  *     "model_configurations": { "temperature": ..., "max_tokens": ..., "system_prompt": "..." },
  *     "timestamp": "ISO 8601", "user_correction": "..." }
  *
+ * The `completion` field may include tool calls in XML format when the model
+ * used tools during generation:
+ *   <tool_call><name><json args></tool_call>
+ *   <tool_result><full result></tool_result>
+ *
  * ## DPO format (pairwise preference)
  *
  * JSONL line schema (DPO-compatible — see https://huggingface.co/docs/trl/v1.8.0/en/dpo_trainer):
@@ -29,6 +34,8 @@
  *     "model_provider": "...", "model_name": "...",
  *     "model_configurations": { ... },
  *     "timestamp": "ISO 8601" }
+ *
+ * The `chosen` and `rejected` fields may include tool calls in XML format.
  *
  * ## localStorage settings
  *   nolock.rlhf.enabled       - "true" | "false" (default "true")
@@ -103,6 +110,14 @@ export interface DpoEntry {
 }
 
 export type FeedbackType = "good" | "bad";
+
+/** Tool call log entry from the backend — matches the Rust ToolCallLog struct. */
+export interface ToolCallLog {
+  name: string;
+  arguments: string;
+  result_snippet: string;
+  result_full: string;
+}
 
 /**
  * @deprecated Use `KtoEntry` instead. Kept for backward compatibility.
@@ -197,6 +212,26 @@ export function getModelContext(): { provider: string; model: string } {
   const backend = localStorage.getItem("nolock.backend") || "ollama";
   const chatModel = localStorage.getItem("nolock.chatModel") || "";
   return { provider: backend, model: chatModel };
+}
+
+/**
+ * Serialize a list of tool calls into XML-tagged text for inclusion in
+ * KTO/DPO training data. Format:
+ *
+ *   <tool_call>name{"arg":"val"}</tool_call>
+ *   <tool_result>output</tool_result>
+ *
+ * This is parseable and works well with most training frameworks.
+ */
+export function serializeToolCalls(toolCalls: ToolCallLog[]): string {
+  if (!toolCalls || toolCalls.length === 0) return "";
+  return toolCalls
+    .map((tc) => {
+      const args = tc.arguments || "{}";
+      const result = tc.result_full || "";
+      return `<tool_call>${tc.name}${args}</tool_call>\n<tool_result>${result}</tool_result>`;
+    })
+    .join("\n");
 }
 
 // ---------------------------------------------------------------------------
