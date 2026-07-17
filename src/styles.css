@@ -454,9 +454,59 @@ html, body, #root {
   opacity: 1;
 }
 
+/* Markdown preview toggle icon in editor tabs */
+.editor-tab .md-preview-toggle {
+  display: flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+  color: var(--text-secondary);
+}
+
+.editor-tab:hover .md-preview-toggle {
+  opacity: 0.8;
+}
+
+.editor-tab .md-preview-toggle:hover {
+  opacity: 1 !important;
+  color: var(--text-primary);
+  background: var(--hover);
+}
+
+.editor-tab .md-preview-toggle.active {
+  opacity: 1;
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Markdown preview pane — right side of split view */
+.markdown-preview-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 24px;
+  background: var(--bg-primary);
+  border-left: 1px solid var(--border);
+}
+
 .editor-content {
   flex: 1;
   min-height: 0;
+}
+
+/* Split mode: editor left, markdown preview right */
+.editor-content.md-split {
+  display: flex;
+  flex-direction: row;
+}
+
+.editor-content.md-split > :first-child {
+  flex: 1;
+  min-width: 0;
 }
 
 /* ===== Browser panel ===== */

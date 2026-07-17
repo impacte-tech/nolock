@@ -19,6 +19,7 @@ import StatusBar from "./components/StatusBar";
 import ResizableHandle from "./components/ResizableHandle";
 import ShortcutsScreen from "./components/ShortcutsScreen";
 import SearchPanel from "./components/SearchPanel";
+import { MarkdownContent } from "./components/ChatPanel";
 import nolockLogo from "./assets/nolocklogo-white.svg";
 
 // ---------------------------------------------------------------------------
@@ -110,6 +111,9 @@ export default function App() {
 
   // --- Editor line navigation (from search results) ---
   const [revealLine, setRevealLine] = useState<{ filePath: string; lineNumber: number } | null>(null);
+
+  // --- Markdown preview: set of file paths currently showing rendered preview ---
+  const [markdownPreviewFiles, setMarkdownPreviewFiles] = useState<Set<string>>(new Set());
 
   // --- Browser panel ---
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
@@ -302,6 +306,22 @@ export default function App() {
     setOpenFiles((prev) =>
       prev.map((f) => (f.path === filePath ? { ...f, content, dirty: true } : f))
     );
+  }, []);
+
+  const isMarkdownFile = useCallback((filePath: string) => {
+    return filePath.split(".").pop()?.toLowerCase() === "md";
+  }, []);
+
+  const toggleMarkdownPreview = useCallback((filePath: string) => {
+    setMarkdownPreviewFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(filePath)) {
+        next.delete(filePath);
+      } else {
+        next.add(filePath);
+      }
+      return next;
+    });
   }, []);
 
   // --- Search result → open file and navigate to line ---
@@ -740,6 +760,20 @@ export default function App() {
                       onClick={() => setActiveFile(f.path)}
                     >
                       <span>{f.dirty ? "\u25CF " : ""}{f.name}</span>
+                      {isMarkdownFile(f.path) && (
+                        <span
+                          className={`md-preview-toggle ${markdownPreviewFiles.has(f.path) ? "active" : ""}`}
+                          title={markdownPreviewFiles.has(f.path) ? "Hide preview" : "Show preview"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleMarkdownPreview(f.path);
+                          }}
+                        >
+                          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M14.85 3H1.15C.52 3 0 3.52 0 4.15v7.7C0 12.48.52 13 1.15 13h13.7c.63 0 1.15-.52 1.15-1.15v-7.7C16 3.52 15.48 3 14.85 3zM9 11H7V8L5.5 9.92 4 8v3H2V5h2l1.5 2L7 5h2v6zm2.99.5L9.5 8H11V5h2v3h1.5l-2.51 3.5z"/>
+                          </svg>
+                        </span>
+                      )}
                       <span
                         className="close"
                         onClick={(e) => {
@@ -754,17 +788,24 @@ export default function App() {
                 </div>
               )}
 
-              <div className="editor-content">
+              <div className={`editor-content ${currentFile && markdownPreviewFiles.has(currentFile.path) ? "md-split" : ""}`}>
                 {currentFile ? (
-                    <Editor
-                      key={currentFile.path}
-                      filePath={currentFile.path}
-                      content={currentFile.content}
-                      onChange={(content) => updateFileContent(currentFile.path, content)}
-                      onSave={() => saveFile(currentFile.path)}
-                      revealLine={revealLine?.filePath === currentFile.path ? revealLine.lineNumber : undefined}
-                      onRevealConsumed={() => setRevealLine(null)}
-                    />
+                    <>
+                      <Editor
+                        key={currentFile.path}
+                        filePath={currentFile.path}
+                        content={currentFile.content}
+                        onChange={(content) => updateFileContent(currentFile.path, content)}
+                        onSave={() => saveFile(currentFile.path)}
+                        revealLine={revealLine?.filePath === currentFile.path ? revealLine.lineNumber : undefined}
+                        onRevealConsumed={() => setRevealLine(null)}
+                      />
+                      {markdownPreviewFiles.has(currentFile.path) && (
+                        <div className="markdown-preview-pane">
+                          <MarkdownContent text={currentFile.content} />
+                        </div>
+                      )}
+                    </>
                 ) : (
                   <ShortcutsScreen />
                 )}
