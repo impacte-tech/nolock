@@ -65,7 +65,7 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
             apiKey={apiKey}
             value={completionModel}
             onChange={setCompletionModel}
-            placeholder="e.g. qwen2.5-coder:1.5b"
+            placeholder="e.g. qwen2.5-coder:0.5b"
             label="Code Completion Model (FITM)"
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>

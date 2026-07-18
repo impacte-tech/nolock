@@ -43,17 +43,21 @@ python -c "import trl; print(f'TRL {trl.__version__}')"
 
 ## Data Layout
 
+**KTO and DPO data live in separate top-level directories** under `.rlhf/`, each with its own structure:
+
 ```
-.rlhf/
-  kto/
-    good/<provider>_<model>/data.jsonl  # KTO thumbs-up (label: true)
-    bad/<provider>_<model>/data.jsonl   # KTO thumbs-down (label: false)
-  dpo/
+.rlhfl/
+  kto/                          ← Thumbs-up/down (KTO) data
+    good/<provider>_<model>/data.jsonl  # KTO desirable (label: true)
+    bad/<provider>_<model>/data.jsonl   # KTO undesirable (label: false)
+  dpo/                          ← Pairwise preference (DPO) data
     <provider>_<model>/data.jsonl       # DPO chosen/rejected pairs
 ```
 
 Each model configuration gets its own subdirectory (e.g. `ollama_qwen3_8b`),
-so you can train on feedback from specific models or merge them all.
+so you can train on feedback from specific models or merge them all. KTO and DPO
+are independent — you can use either method on its own, or combine them
+sequentially (KTO first, then DPO for refined alignment).
 
 ### Field Reference
 
@@ -68,7 +72,7 @@ The JSONL schemas match the dataset formats expected by
 | `completion` | string | The AI's response |
 | `label` | boolean | `true` = desirable, `false` = undesirable |
 | `model_provider` | string | e.g. `"ollama"`, `"openrouter"` |
-| `model_name` | string | e.g. `"qwen3:8b"` |
+| `model_name` | string | e.g. `"qwen3.5:0.8b-mlx"` |
 | `model_configurations` | object | `{ temperature, max_tokens, system_prompt }` |
 | `timestamp` | string | ISO 8601 |
 | `user_correction` | string? | Optional correction from the user (thumbs-down only) |
@@ -81,7 +85,7 @@ The JSONL schemas match the dataset formats expected by
 | `chosen` | string | The response the user preferred |
 | `rejected` | string | The response the user rejected |
 | `model_provider` | string | e.g. `"ollama"` |
-| `model_name` | string | e.g. `"qwen3:8b"` |
+| `model_name` | string | e.g. `"qwen3.5:0.8b-mlx"` |
 | `model_configurations` | object | `{ temperature, max_tokens, system_prompt }` |
 | `timestamp` | string | ISO 8601 |
 
@@ -285,7 +289,8 @@ trainer.save_model(OUTPUT_DIR)
 ## Merging Data from Multiple Models
 
 Since nolock partitions data by provider and model, you can merge data from
-different backends to create a richer training set:
+different backends to create a richer training set. KTO and DPO data are stored
+independently, so you can merge within each method:
 
 ```python
 # Merge all DPO data across all models
@@ -294,6 +299,9 @@ dataset = load_dpo_data(".rlhf/dpo")
 # Or train on data from a specific model only
 from datasets import load_dataset
 dataset = load_dataset("json", data_files=".rlhf/dpo/ollama_qwen3_8b/data.jsonl", split="train")
+
+# KTO data is loaded separately from .rlhf/kto/{good,bad}/
+kto_dataset = load_kto_data(".rlhf/kto")
 ```
 
 ---
@@ -327,8 +335,7 @@ KTO trains on individual responses, so every rating counts. These are
 | Base Model Size | Min Examples | Comfortable | Notes |
 |-----------------|:------------:|:-----------:|-------|
 | **~0.5B** (e.g. `qwen2.5-coder:0.5b`) | 20 | 50–100 | Tiny model — converges fast, but overfits above ~200 epochs on small data. |
-| **~0.6B** (e.g. `qwen3:0.6b`) | 25 | 60–120 | Slightly more capacity; benefits from more diverse prompts. |
-| **~0.8B** (e.g. `qwen3:0.8b`) | 30 | 80–150 | Good balance of capacity and data efficiency. |
+| **~0.8B** (e.g. `qwen3.5:0.8b-mlx`) | 30 | 80–150 | Good balance of capacity and data efficiency. Recommended for most users. |
 | **1.5B** (e.g. `qwen2.5-1.5b`) | 50 | 100–200 | Only use LoRA/PEFT — full fine-tuning needs significantly more data. |
 | **3B+** | 150 | 300+ | Consider public alignment datasets to supplement your own. |
 
@@ -347,8 +354,7 @@ better.
 | Base Model Size | Min Pairs | Comfortable | Notes |
 |-----------------|:---------:|:-----------:|-------|
 | **~0.5B** | 15 | 40–80 | Very small model — even 20 high-quality pairs can shift behavior. |
-| **~0.6B** | 20 | 50–100 | Enough capacity to learn preference patterns reliably. |
-| **~0.8B** | 25 | 60–120 | Can handle more nuanced preferences (e.g. style, verbosity). |
+| **~0.8B** | 25 | 60–120 | Can handle more nuanced preferences (e.g. style, verbosity). Recommended base size. |
 | **1.5B** | 40 | 80–200 | Pair quality matters more than quantity at this scale. |
 | **3B+** | 100 | 200–500 | Use LoRA/PEFT; full fine-tuning is impractical with personal data. |
 
@@ -369,7 +375,8 @@ better.
 
 Most users collect thumbs-up/down naturally while coding (KTO). Pairwise
 comparisons (DPO) require the DPO prompt to fire every N messages, which is more
-deliberate. A practical workflow:
+deliberate. Since KTO and DPO data live in separate directories, you can use
+either method independently or combine them:
 
 1. **Start with KTO** — collect 30–50 thumbs-up/down responses during normal usage.
 2. **Enable DPO** — once you have enough KTO data, toggle DPO on (`Ctrl+A, R`)
