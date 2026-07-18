@@ -79,9 +79,9 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **Code Editor** — Full-featured Monaco editor with syntax highlighting for 100+ languages, bracket colorization, minimap, word wrap, and **inline linting** (ESLint for TypeScript/JavaScript, Ruff for Python, Clippy for Rust) with configurable rules via <kbd>Ctrl+E, S</kbd>.
 - **File Search & Replace** — Search across all workspace files with regex support, match-case toggles, debounced live results, grouped by file with inline match previews, and batch replace-all with confirmation.
 - **AI Inline Completions** — Fill-In-The-Middle (FITM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
-- **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing), and context token tracking.
-- **AI Agent Manager** — Create and manage specialized AI agents (e.g., code-reviewer, doc-writer) stored as `.json` files in the `.agents/` directory with custom system prompts.
-- **Human Feedback (RLHF)** — Collect thumbs-up/thumbs-down (KTO) and pairwise preference (DPO) feedback on AI chat responses. All data is saved as JSONL lines partitioned by model configuration under a configurable `dpo/` parent directory, ready for downstream RLHF training. Enable/disable via <kbd>Ctrl+A, R</kbd>.
+- **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing, grep, edit, write_file), custom tools via `.tools/`, and context token tracking.
+- **AI Agent Manager** — Create and manage specialized AI agents (e.g., code-reviewer, doc-writer) stored as `.md` files (Markdown with YAML frontmatter) in the `.agents/` directory with custom system prompts. Legacy `.json` format is still supported.
+- **Human Feedback (RLHF)** — Collect thumbs-up/thumbs-down (KTO) and pairwise preference (DPO) feedback on AI chat responses. KTO and DPO data live in separate top-level directories under `.rlhf/`, each partitioned by model configuration, ready for downstream RLHF training. Enable/disable via <kbd>Ctrl+A, R</kbd>.
 - **Integrated Terminal** — Real PTY-based shell sessions with multiple tabs, resize support, and command history tracking.
 - **Terminal Memory** — Automatically records commands, tracks frequency, and lets you organize commands into categories for quick recall.
 - **File Explorer** — Tree-based file browser with directory expansion, refresh, file-type color coding, and file/directory CRUD operations (create, rename, delete, copy).
@@ -127,16 +127,16 @@ DPO (Direct Preference Optimization) is a **pairwise preference** method that ca
 
 ### Storage Format
 
-All feedback is stored as **JSONL** (one JSON object per line) under the project's `.rlhf/` directory, which mirrors the structure used by popular training frameworks:
+All feedback is stored as **JSONL** (one JSON object per line) under the project's `.rlhf/` directory. **KTO and DPO data live in separate top-level directories** with independent structures, mirroring the formats expected by their respective training frameworks:
 
 ```
 <project>/.rlhf/
-  kto/
+  kto/                          ← Thumbs-up/down (KTO) data
     good/
-      <provider>_<model>/data.jsonl    ← KTO thumbs-up examples
+      <provider>_<model>/data.jsonl    ← KTO desirable examples
     bad/
-      <provider>_<model>/data.jsonl    ← KTO thumbs-down examples
-  dpo/
+      <provider>_<model>/data.jsonl    ← KTO undesirable examples
+  dpo/                          ← Pairwise preference (DPO) data
     <provider>_<model>/data.jsonl      ← DPO chosen/rejected pairs
 ```
 
@@ -149,7 +149,7 @@ Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), ma
   "completion": "Rust is a systems language.",
   "label": true,
   "model_provider": "ollama",
-  "model_name": "qwen3:8b",
+  "model_name": "qwen3.5:0.8b-mlx",
   "model_configurations": { "temperature": 0.7, "max_tokens": 2048, "system_prompt": "" },
   "timestamp": "2026-06-26T12:00:00.000Z"
 }
@@ -162,7 +162,7 @@ Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), ma
   "chosen": "Rust is a systems language focused on safety.",
   "rejected": "Rust is a programming language.",
   "model_provider": "ollama",
-  "model_name": "qwen3:8b",
+  "model_name": "qwen3.5:0.8b-mlx",
   "model_configurations": { "temperature": 0.7, "max_tokens": 2048, "system_prompt": "" },
   "timestamp": "2026-06-26T12:00:00.000Z"
 }
@@ -176,7 +176,7 @@ Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), ma
 
 3. **Portable and framework-ready**: The JSONL format matches the [DPO](https://huggingface.co/docs/trl/v1.8.0/en/dpo_trainer#expected-dataset-type-and-format) and [KTO](https://huggingface.co/docs/trl/v1.8.0/en/kto_trainer#expected-dataset-type-and-format) dataset schemas used by Hugging Face TRL (v1.8.0). Export your `.rlhf/` directory to TRL, Axolotl, or LLaMA Factory — no conversion needed.
 
-4. **Model-configuration aware**: Because data is partitioned by provider + model (e.g., `ollama_qwen3_8b` vs `openrouter_gpt-4o`), you can train separate adapters for different models or analyze which backends produce the most preferred responses.
+4. **Model-configuration aware**: Because data is partitioned by provider + model (e.g., `ollama_qwen3_8b` vs `openrouter_gpt-4o`), you can train separate adapters for different models or analyze which backends produce the most preferred responses. KTO and DPO data are stored independently, so you can use each method on its own or combine them sequentially.
 
 5. **Aligned with nolock's philosophy**: nolock is designed to keep you in the driver's seat. RLHF isn't about automating away your judgement — it's about amplifying it. The AI learns from *your* preferences, not from generic alignment data collected by a corporation.
 
@@ -302,7 +302,7 @@ After installation, configure your preferred AI backend:
    - **Ollama** — Default, runs locally at `http://localhost:11434`
    - **llama.cpp** — Runs locally at `http://localhost:8080`
    - **OpenRouter** — Requires an API key from [openrouter.ai](https://openrouter.ai)
-   - **OpenCode Zen** — Runs locally at `http://localhost:11435`
+   - **OpenCode Zen** — Remote at `https://opencode.ai/zen/v1`, some models available with a free tier
 3. Enter your model names and save.
 
 ### Recommended Ollama Models
@@ -312,20 +312,20 @@ For the best experience with nolock, here are the recommended Ollama models for 
 | Feature | Recommended Model | Size | Notes |
 |---|---|---|---|
 | **Code Completions (FITM)** | `qwen2.5-coder:0.5b` | 0.5B params | Fast, lightweight fill-in-the-middle completions. Runs on CPU or low-end GPU. |
-| **Agent Chat (Tool Calling)** | `qwen3:0.6b` | 0.6B params | Smallest model with reliable tool-calling capabilities. Good for basic web search, file read, and directory listing tasks. |
+| **Agent Chat (Tool Calling)** | `qwen3.5:0.8b-mlx` | 0.8B params | Reliable tool-calling with strong reasoning. Good for web search, file read, directory listing, and multi-step agent tasks. |
 
 **Installation:**
 
 ```bash
 ollama pull qwen2.5-coder:0.5b
-ollama pull qwen3:0.6b
+ollama pull qwen3.5:0.8b-mlx
 ```
 
 Then in nolock's AI Settings (`Ctrl+A, I`):
 - Set **Completion Model** to `qwen2.5-coder:0.5b`
-- Set **Chat Model** to `qwen3:0.6b`
+- Set **Chat Model** to `qwen3.5:0.8b-mlx`
 
-> **Note:** For agent chat with tool calling, the model must support the `tools` parameter in Ollama's `/api/chat` endpoint. The `qwen3:0.6b` model is the smallest tested model that supports this. Larger models (e.g., `qwen3.5-4b`) will provide better results at the cost of higher resource usage.
+> **Note:** For agent chat with tool calling, the model must support the `tools` parameter in Ollama's `/api/chat` endpoint. The `qwen3.5:0.8b-mlx` model provides a good balance of capability and resource usage. Larger models will provide better results at the cost of higher resource usage.
 
 ### Keyboard Shortcuts
 

@@ -62,7 +62,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
             apiKey={apiKey}
             value={chatModel}
             onChange={setChatModel}
-            placeholder="e.g. qwen3:8b"
+            placeholder="e.g. qwen3.5:0.8b-mlx"
             label="Chat Model"
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>

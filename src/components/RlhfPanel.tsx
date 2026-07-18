@@ -206,7 +206,7 @@ export default function RlhfPanel({ visible, onClose }: Props) {
             &lt;project&gt;/{root}/{dpoDir}/<strong>ollama_qwen3_8b</strong>/data.jsonl
             <br />
             <span style={{ fontSize: 10, opacity: 0.7 }}>
-              KTO and DPO data live in separate top-level directories, each partitioned by model configuration.
+              KTO and DPO data live in separate top-level directories, each partitioned by model configuration. They are independent and can be used separately or combined.
             </span>
           </div>
         </div>

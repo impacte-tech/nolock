@@ -193,7 +193,7 @@ export default function AISettings({ visible, onClose }: Props) {
               apiKey={config.apiKeys[config.backend] || ""}
               value={config.completionModel}
               onChange={(v) => setConfig({ ...config, completionModel: v })}
-              placeholder="e.g. qwen2.5-coder:1.5b"
+              placeholder="e.g. qwen2.5-coder:0.5b"
               label="Code Completion Model (FITM)"
             />
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
@@ -213,7 +213,7 @@ export default function AISettings({ visible, onClose }: Props) {
               apiKey={config.apiKeys[config.backend] || ""}
               value={config.chatModel}
               onChange={(v) => setConfig({ ...config, chatModel: v })}
-              placeholder="e.g. qwen3:8b"
+              placeholder="e.g. qwen3.5:0.8b-mlx"
               label="Chat Model"
             />
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>

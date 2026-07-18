@@ -43,7 +43,7 @@ export default function ModelSelector({
   apiKey,
   value,
   onChange,
-  placeholder = "e.g. qwen3:8b",
+  placeholder = "e.g. qwen3.5:0.8b-mlx",
   label,
 }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
