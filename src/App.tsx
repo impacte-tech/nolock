@@ -136,6 +136,17 @@ export default function App() {
   const mainAreaRef = useRef<HTMLDivElement>(null);
   const editorAreaRef = useRef<HTMLDivElement>(null);
   const editorMainRef = useRef<HTMLDivElement>(null);
+  const editorContentRef = useRef<HTMLDivElement>(null);
+
+  // --- Split editor ---
+  const [splitActiveFile, setSplitActiveFile] = useState<string | null>(null);
+  const [draggedTabPath, setDraggedTabPath] = useState<string | null>(null);
+  const [dropSide, setDropSide] = useState<"left" | "right" | null>(null);
+  const [splitRatio, setSplitRatio] = useState(50);
+
+  const isSplit = splitActiveFile !== null;
+  const leftFile = openFiles.find((f) => f.path === activeFile) ?? null;
+  const rightFile = isSplit ? (openFiles.find((f) => f.path === splitActiveFile) ?? null) : null;
 
   /**
    * Creates a resize handler for dragging a handle.
@@ -195,6 +206,24 @@ export default function App() {
       localStorage.removeItem("nolock.lastRootPath");
     }
   }, [rootPath]);
+
+  // --- Split editor: auto-cleanup when files are closed externally ---
+  useEffect(() => {
+    if (splitActiveFile && !openFiles.find((f) => f.path === splitActiveFile)) {
+      setSplitActiveFile(null);
+    }
+  }, [openFiles, splitActiveFile]);
+
+  useEffect(() => {
+    if (activeFile && !openFiles.find((f) => f.path === activeFile)) {
+      if (splitActiveFile) {
+        setActiveFile(splitActiveFile);
+        setSplitActiveFile(null);
+      } else {
+        setActiveFile(openFiles.length > 0 ? openFiles[openFiles.length - 1].path : null);
+      }
+    }
+  }, [openFiles, activeFile, splitActiveFile]);
 
   // --- Terminals ---
   const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
@@ -294,12 +323,23 @@ export default function App() {
   const closeFile = useCallback(
     (filePath: string) => {
       setOpenFiles((prev) => prev.filter((f) => f.path !== filePath));
+
+      if (splitActiveFile === filePath) {
+        setSplitActiveFile(null);
+        return;
+      }
+
       if (activeFile === filePath) {
-        const remaining = openFiles.filter((f) => f.path !== filePath);
-        setActiveFile(remaining.length > 0 ? remaining[remaining.length - 1].path : null);
+        if (splitActiveFile) {
+          setActiveFile(splitActiveFile);
+          setSplitActiveFile(null);
+        } else {
+          const remaining = openFiles.filter((f) => f.path !== filePath);
+          setActiveFile(remaining.length > 0 ? remaining[remaining.length - 1].path : null);
+        }
       }
     },
-    [openFiles, activeFile]
+    [openFiles, activeFile, splitActiveFile]
   );
 
   const updateFileContent = useCallback((filePath: string, content: string) => {
@@ -322,6 +362,81 @@ export default function App() {
       }
       return next;
     });
+  }, []);
+
+  // --- Split editor: custom drag via mouse events (avoids HTML5 drag issues with Monaco) ---
+  const draggedTabRef = useRef<string | null>(null);
+  const dropSideRef = useRef<"left" | "right" | null>(null);
+  const splitRef = useRef(isSplit);
+  splitRef.current = isSplit;
+  const activeFileRef = useRef(activeFile);
+  activeFileRef.current = activeFile;
+  const editorPaneRef = useRef<HTMLDivElement>(null);
+
+  const handleTabMouseDown = useCallback((filePath: string, e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let dragging = false;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!dragging) {
+        if (Math.abs(ev.clientX - startX) > 5 || Math.abs(ev.clientY - startY) > 5) {
+          dragging = true;
+          document.body.style.userSelect = "none";
+          document.body.style.cursor = "grabbing";
+          draggedTabRef.current = filePath;
+          setDraggedTabPath(filePath);
+        }
+      }
+      if (dragging) {
+        const pane = editorPaneRef.current;
+        if (pane) {
+          const rect = pane.getBoundingClientRect();
+          const midpoint = rect.left + rect.width / 2;
+          const side: "left" | "right" = ev.clientX < midpoint ? "left" : "right";
+          dropSideRef.current = side;
+          setDropSide(side);
+        }
+      }
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+
+      if (dragging) {
+        const tab = draggedTabRef.current;
+        const side = dropSideRef.current;
+        draggedTabRef.current = null;
+        dropSideRef.current = null;
+        setDraggedTabPath(null);
+        setDropSide(null);
+
+        if (tab && side) {
+          if (!splitRef.current) {
+            if (side === "right") {
+              setSplitActiveFile(tab);
+            } else {
+              setSplitActiveFile(activeFileRef.current);
+              setActiveFile(tab);
+            }
+          } else {
+            if (side === "right") {
+              setSplitActiveFile(tab);
+            } else {
+              setActiveFile(tab);
+            }
+          }
+        }
+      }
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
   }, []);
 
   // --- Search result → open file and navigate to line ---
@@ -747,69 +862,181 @@ export default function App() {
           >
             <div
               className="editor-pane"
+              ref={editorPaneRef}
               style={{
                 flex: hasBrowser ? ratioFlex(100 - browserPts) : "1 1 0",
               }}
             >
-              {openFiles.length > 0 && (
-                <div className="editor-tabs">
-                  {openFiles.map((f) => (
-                    <div
-                      key={f.path}
-                      className={`editor-tab ${f.path === activeFile ? "active" : ""}`}
-                      onClick={() => setActiveFile(f.path)}
-                    >
-                      <span>{f.dirty ? "\u25CF " : ""}{f.name}</span>
-                      {isMarkdownFile(f.path) && (
-                        <span
-                          className={`md-preview-toggle ${markdownPreviewFiles.has(f.path) ? "active" : ""}`}
-                          title={markdownPreviewFiles.has(f.path) ? "Hide preview" : "Show preview"}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleMarkdownPreview(f.path);
-                          }}
-                        >
-                          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                            <path d="M14.85 3H1.15C.52 3 0 3.52 0 4.15v7.7C0 12.48.52 13 1.15 13h13.7c.63 0 1.15-.52 1.15-1.15v-7.7C16 3.52 15.48 3 14.85 3zM9 11H7V8L5.5 9.92 4 8v3H2V5h2l1.5 2L7 5h2v6zm2.99.5L9.5 8H11V5h2v3h1.5l-2.51 3.5z"/>
-                          </svg>
-                        </span>
-                      )}
-                      <span
-                        className="close"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          closeFile(f.path);
-                        }}
-                      >
-                        &times;
-                      </span>
-                    </div>
-                  ))}
+              {/* Drop zone overlays */}
+              {draggedTabPath && (
+                <div className="editor-drop-zones">
+                  <div className={`editor-drop-zone ${dropSide === "left" ? "active" : ""}`}>
+                    <span className="editor-drop-zone-icon">&#8592;</span>
+                    <span>Drop left</span>
+                  </div>
+                  <div className={`editor-drop-zone ${dropSide === "right" ? "active" : ""}`}>
+                    <span>Drop right</span>
+                    <span className="editor-drop-zone-icon">&#8594;</span>
+                  </div>
                 </div>
               )}
 
-              <div className={`editor-content ${currentFile && markdownPreviewFiles.has(currentFile.path) ? "md-split" : ""}`}>
-                {currentFile ? (
-                    <>
-                      <Editor
-                        key={currentFile.path}
-                        filePath={currentFile.path}
-                        content={currentFile.content}
-                        onChange={(content) => updateFileContent(currentFile.path, content)}
-                        onSave={() => saveFile(currentFile.path)}
-                        revealLine={revealLine?.filePath === currentFile.path ? revealLine.lineNumber : undefined}
-                        onRevealConsumed={() => setRevealLine(null)}
-                      />
-                      {markdownPreviewFiles.has(currentFile.path) && (
-                        <div className="markdown-preview-pane">
-                          <MarkdownContent text={currentFile.content} />
-                        </div>
+              {isSplit ? (
+                <div className="editor-split-container" ref={editorContentRef}>
+                  {/* Left pane */}
+                  <div className="editor-split-pane" style={{ flex: ratioFlex(splitRatio) }}>
+                    {openFiles.length > 0 && (
+                      <div className="editor-tabs">
+                        {openFiles.map((f) => (
+                          <div
+                            key={f.path}
+                            className={`editor-tab ${f.path === activeFile ? "active" : ""}`}
+                            onClick={() => setActiveFile(f.path)}
+                            onMouseDown={(e) => handleTabMouseDown(f.path, e)}
+                          >
+                            <span>{f.dirty ? "\u25CF " : ""}{f.name}</span>
+                            <span
+                              className="close"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                closeFile(f.path);
+                              }}
+                            >
+                              &times;
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="editor-content-inner">
+                      {leftFile ? (
+                        <Editor
+                          key={leftFile.path}
+                          filePath={leftFile.path}
+                          content={leftFile.content}
+                          onChange={(content) => updateFileContent(leftFile.path, content)}
+                          onSave={() => saveFile(leftFile.path)}
+                          revealLine={revealLine?.filePath === leftFile.path ? revealLine.lineNumber : undefined}
+                          onRevealConsumed={() => setRevealLine(null)}
+                        />
+                      ) : (
+                        <ShortcutsScreen />
                       )}
-                    </>
-                ) : (
-                  <ShortcutsScreen />
-                )}
-              </div>
+                    </div>
+                  </div>
+
+                  <ResizableHandle
+                    direction="horizontal"
+                    onDrag={makeResizeHandler(setSplitRatio, 20, 80, editorContentRef, "width", 100, false)}
+                    onDragEnd={() => setResizeEpoch((e) => e + 1)}
+                  />
+
+                  {/* Right pane */}
+                  <div className="editor-split-pane" style={{ flex: ratioFlex(100 - splitRatio) }}>
+                    {openFiles.length > 0 && (
+                      <div className="editor-tabs">
+                        {openFiles.map((f) => (
+                          <div
+                            key={f.path}
+                            className={`editor-tab ${f.path === splitActiveFile ? "active" : ""}`}
+                            onClick={() => setSplitActiveFile(f.path)}
+                            onMouseDown={(e) => handleTabMouseDown(f.path, e)}
+                          >
+                            <span>{f.dirty ? "\u25CF " : ""}{f.name}</span>
+                            <span
+                              className="close"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                closeFile(f.path);
+                              }}
+                            >
+                              &times;
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="editor-content-inner">
+                      {rightFile ? (
+                        <Editor
+                          key={rightFile.path}
+                          filePath={rightFile.path}
+                          content={rightFile.content}
+                          onChange={(content) => updateFileContent(rightFile.path, content)}
+                          onSave={() => saveFile(rightFile.path)}
+                          revealLine={revealLine?.filePath === rightFile.path ? revealLine.lineNumber : undefined}
+                          onRevealConsumed={() => setRevealLine(null)}
+                        />
+                      ) : (
+                        <ShortcutsScreen />
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {openFiles.length > 0 && (
+                    <div className="editor-tabs">
+                      {openFiles.map((f) => (
+                        <div
+                          key={f.path}
+                          className={`editor-tab ${f.path === activeFile ? "active" : ""}`}
+                           onClick={() => setActiveFile(f.path)}
+                           onMouseDown={(e) => handleTabMouseDown(f.path, e)}
+                         >
+                          <span>{f.dirty ? "\u25CF " : ""}{f.name}</span>
+                          {isMarkdownFile(f.path) && (
+                            <span
+                              className={`md-preview-toggle ${markdownPreviewFiles.has(f.path) ? "active" : ""}`}
+                              title={markdownPreviewFiles.has(f.path) ? "Hide preview" : "Show preview"}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleMarkdownPreview(f.path);
+                              }}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                                <path d="M14.85 3H1.15C.52 3 0 3.52 0 4.15v7.7C0 12.48.52 13 1.15 13h13.7c.63 0 1.15-.52 1.15-1.15v-7.7C16 3.52 15.48 3 14.85 3zM9 11H7V8L5.5 9.92 4 8v3H2V5h2l1.5 2L7 5h2v6zm2.99.5L9.5 8H11V5h2v3h1.5l-2.51 3.5z"/>
+                              </svg>
+                            </span>
+                          )}
+                          <span
+                            className="close"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              closeFile(f.path);
+                            }}
+                          >
+                            &times;
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className={`editor-content ${currentFile && markdownPreviewFiles.has(currentFile.path) ? "md-split" : ""}`}>
+                    {currentFile ? (
+                        <>
+                          <Editor
+                            key={currentFile.path}
+                            filePath={currentFile.path}
+                            content={currentFile.content}
+                            onChange={(content) => updateFileContent(currentFile.path, content)}
+                            onSave={() => saveFile(currentFile.path)}
+                            revealLine={revealLine?.filePath === currentFile.path ? revealLine.lineNumber : undefined}
+                            onRevealConsumed={() => setRevealLine(null)}
+                          />
+                          {markdownPreviewFiles.has(currentFile.path) && (
+                            <div className="markdown-preview-pane">
+                              <MarkdownContent text={currentFile.content} />
+                            </div>
+                          )}
+                        </>
+                    ) : (
+                      <ShortcutsScreen />
+                    )}
+                  </div>
+                </>
+              )}
             </div>
 
             {hasBrowser && (
