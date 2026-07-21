@@ -416,6 +416,9 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
     // directly.
     //
     const preventNativeShortcuts = (e: KeyboardEvent) => {
+      // Only handle shortcuts if the event originated from this editor
+      if (!containerRef.current?.contains(e.target as Node)) return;
+
       // Native "Save Page" in webview
       if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
         e.preventDefault();
