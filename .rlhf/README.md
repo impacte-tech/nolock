@@ -1,8 +1,8 @@
 # Fine-Tuning with nolock's RLHF Data
 
 This guide walks you through fine-tuning language models using the preference data
-collected by nolock's built-in RLHF system. The JSONL files under `.rlhf/dpo/` are
-pre-formatted for [Hugging Face TRL](https://huggingface.co/docs/trl/v1.8.0)
+collected by nolock's built-in RLHF system. The JSONL files under `.rlhf/kto/` and
+`.rlhf/dpo/` are pre-formatted for [Hugging Face TRL](https://huggingface.co/docs/trl/v1.8.0)
 (v1.8.0) — no conversion needed.
 
 ---
@@ -46,7 +46,7 @@ python -c "import trl; print(f'TRL {trl.__version__}')"
 **KTO and DPO data live in separate top-level directories** under `.rlhf/`, each with its own structure:
 
 ```
-.rlhfl/
+.rlhf/
   kto/                          ← Thumbs-up/down (KTO) data
     good/<provider>_<model>/data.jsonl  # KTO desirable (label: true)
     bad/<provider>_<model>/data.jsonl   # KTO undesirable (label: false)
