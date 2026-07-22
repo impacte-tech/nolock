@@ -46,7 +46,7 @@ python -c "import trl; print(f'TRL {trl.__version__}')"
 **KTO and DPO data live in separate top-level directories** under `.rlhf/`, each with its own structure:
 
 ```
-.rlhfl/
+.rlhf/
   kto/                          ← Thumbs-up/down (KTO) data
     good/<provider>_<model>/data.jsonl  # KTO desirable (label: true)
     bad/<provider>_<model>/data.jsonl   # KTO undesirable (label: false)
