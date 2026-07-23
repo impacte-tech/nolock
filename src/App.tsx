@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileExplorer from "./components/FileExplorer";
 import Editor from "./components/Editor";
-import { TerminalPanel, type TerminalInstance } from "./components/Terminal";
+import { TerminalPanel, type TerminalInstance, type TerminalStackLayout } from "./components/Terminal";
 import ChatPanel from "./components/ChatPanel";
 import BrowserPanel from "./components/BrowserPanel";
 import MenuBar from "./components/MenuBar";
@@ -229,6 +229,11 @@ export default function App() {
   const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
+  // --- Terminal stacking (up to 3 terminals sharing vertical space) ---
+  const [stackedTermIds, setStackedTermIds] = useState<string[]>([]);
+  const [termStackRatios, setTermStackRatios] = useState<number[]>([]);
+  const terminalStackBodyRef = useRef<HTMLDivElement>(null);
+
   // --- Chord state: null | 'A' | 'T' | 'B' | 'E' | 'F'
   // 'A' = waiting for second key after Ctrl+A (AI shortcuts)
   // 'T' = waiting for second key after Ctrl+T (Terminal shortcuts)
@@ -265,7 +270,77 @@ export default function App() {
       const remaining = terminals.filter((t) => t.id !== id);
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
+    // Clean up stacking: remove closed terminal from stack
+    setStackedTermIds((prev) => {
+      const idx = prev.indexOf(id);
+      if (idx === -1) return prev;
+      const next = prev.filter((tid) => tid !== id);
+      if (next.length < 2) {
+        // Unstack everything when fewer than 2 remain
+        setTermStackRatios([]);
+        return [];
+      }
+      // Remove the corresponding ratio and re-normalize
+      setTermStackRatios((ratios) => {
+        const newRatios = ratios.filter((_, i) => i !== idx);
+        const total = newRatios.reduce((a, b) => a + b, 0);
+        return newRatios.map((r) => Math.round((r / total) * 100));
+      });
+      return next;
+    });
   }, [terminals]);
+
+  // --- Terminal toggle in/out of stack ---
+  const toggleTerminalStack = useCallback((id: string) => {
+    setStackedTermIds((prev) => {
+      const idx = prev.indexOf(id);
+      if (idx >= 0) {
+        // Remove from stack
+        const next = prev.filter((tid) => tid !== id);
+        if (next.length < 2) {
+          // Unstack everything when fewer than 2 remain
+          setTermStackRatios([]);
+          return [];
+        }
+        // Remove the corresponding ratio and re-normalize
+        setTermStackRatios((ratios) => {
+          const newRatios = ratios.filter((_, i) => i !== idx);
+          const total = newRatios.reduce((a, b) => a + b, 0);
+          return newRatios.map((r) => Math.round((r / total) * 100));
+        });
+        return next;
+      } else {
+        // Add to stack (max 3)
+        if (prev.length >= 3) return prev;
+        const next = [...prev, id];
+        const equalRatio = Math.floor(100 / next.length);
+        const newRatios = next.map((_, i) =>
+          i === next.length - 1 ? 100 - equalRatio * (next.length - 1) : equalRatio
+        );
+        setTermStackRatios(newRatios);
+        return next;
+      }
+    });
+  }, []);
+
+  // --- Terminal stack ratio change handler ---
+  const handleTermStackRatioChange = useCallback((index: number, newRatio: number) => {
+    setTermStackRatios((prev) => {
+      const next = [...prev];
+      const oldRatio = next[index];
+      const delta = newRatio - oldRatio;
+      // Distribute the delta to the next sibling, clamped
+      if (index + 1 < next.length) {
+        const newNext = Math.max(10, Math.min(80, next[index + 1] - delta));
+        next[index + 1] = newNext;
+      } else if (index - 1 >= 0) {
+        const newPrev = Math.max(10, Math.min(80, next[index - 1] - delta));
+        next[index - 1] = newPrev;
+      }
+      next[index] = Math.max(10, Math.min(80, newRatio));
+      return next;
+    });
+  }, []);
 
   // --- Open folder ---
   const openFolder = useCallback(async () => {
@@ -1068,6 +1143,14 @@ export default function App() {
                 onClose={closeTerminal}
                 style={{ flex: ratioFlex(terminalPts) }}
                 lastCommandRef={lastCommandRef}
+                stackLayout={
+                  stackedTermIds.length > 1
+                    ? { stackedIds: stackedTermIds, ratios: termStackRatios }
+                    : null
+                }
+                onToggleStack={toggleTerminalStack}
+                onStackRatioChange={handleTermStackRatioChange}
+                stackContainerRef={terminalStackBodyRef}
               />
             </>
           )}

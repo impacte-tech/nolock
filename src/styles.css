@@ -736,6 +736,97 @@ html, body, #root {
   position: relative;
 }
 
+.terminal-body.stacked {
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-tab.stacked {
+  opacity: 0.75;
+}
+
+.terminal-tab-stack-btn {
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+  line-height: 1;
+}
+
+.terminal-tab-stack-btn:hover {
+  color: var(--accent);
+  background: rgba(137, 180, 250, 0.12);
+}
+
+.terminal-tab-stack-btn.active {
+  color: var(--accent);
+  background: rgba(137, 180, 250, 0.15);
+}
+
+.terminal-stack-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.terminal-stack-pane.active {
+  /* Subtle highlight for the active stacked pane */
+}
+
+.terminal-stack-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  min-height: 22px;
+  padding: 0 8px;
+  flex-shrink: 0;
+}
+
+.terminal-stack-pane-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-stack-pane .terminal-stack-pane-header .terminal-tab-close {
+  font-size: 12px;
+}
+
+.terminal-stack-handle {
+  height: 5px;
+  cursor: row-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  position: relative;
+}
+
+.terminal-stack-handle:hover {
+  background: var(--accent);
+}
+
+.terminal-stack-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 30px;
+  height: 2px;
+  background: var(--text-muted);
+  border-radius: 1px;
+}
+
+.terminal-stack-handle:hover::after {
+  background: var(--bg-primary);
+}
+
 /* ===== Chat panel ===== */
 .chat-panel {
   width: 360px;
