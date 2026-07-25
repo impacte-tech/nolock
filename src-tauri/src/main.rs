@@ -1646,6 +1646,60 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
         }));
     }
 
+    if enabled.contains(&"rust_repl".to_string()) {
+        let repl_desc = match root_path {
+            Some(rp) => format!(
+                "Compile and run a Rust code snippet in a temporary Cargo project. \
+                 The code MUST include a `fn main()` entry point. \
+                 The code is compiled and executed — stdout, stderr, and compiler errors are returned as the result. \
+                 If compilation fails, the compiler errors are returned so you can fix the code and try again. \
+                 Use this to verify code answers, test algorithms, compute results, or debug issues. \
+                 You can optionally list crate dependencies. \
+                 The open project folder is: {}.", rp),
+            None => "Compile and run a Rust code snippet in a temporary Cargo project. \
+                     The code MUST include a `fn main()` entry point. \
+                     The code is compiled and executed — stdout, stderr, and compiler errors are returned as the result. \
+                     If compilation fails, the compiler errors are returned so you can fix the code and try again. \
+                     Use this to verify code answers, test algorithms, compute results, or debug issues. \
+                     You can optionally list crate dependencies.".to_string(),
+        };
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "rust_repl",
+                "description": repl_desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "The Rust code to compile and run. Must include a `fn main()` function."
+                        },
+                        "dependencies": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "The crate name (e.g. 'serde', 'rand', 'regex')"
+                                    },
+                                    "version": {
+                                        "type": "string",
+                                        "description": "The version requirement (e.g. '1', '0.8', '1.0.200')"
+                                    }
+                                },
+                                "required": ["name", "version"]
+                            },
+                            "description": "Optional Cargo crate dependencies needed by the code"
+                        }
+                    },
+                    "required": ["code"]
+                }
+            }
+        }));
+    }
+
     // Load custom tools from .tools/ directory
     if let Some(rp) = root_path {
         let tools_dir = std::path::Path::new(rp).join(".tools");
@@ -2225,6 +2279,93 @@ async fn execute_tool(
                     Ok(format!("{}\n\n[Results from DuckDuckGo]", output.trim()))
                 }
             }
+        }
+        "rust_repl" => {
+            let code = args["code"]
+                .as_str()
+                .ok_or("Missing required parameter: code")?;
+            let dependencies = args["dependencies"].as_array();
+            eprintln!("[nolock] tool rust_repl code_len={}", code.len());
+
+            // Create a temporary directory for the Cargo project.
+            // Use a nanosecond timestamp to avoid collisions if multiple
+            // repl calls happen concurrently.
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let temp_dir = std::env::temp_dir().join(format!("nolock_repl_{}", nanos));
+
+            // Build Cargo.toml
+            let mut cargo_toml = "[package]\nname = \"repl\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n".to_string();
+
+            if let Some(deps) = dependencies {
+                for dep in deps {
+                    if let (Some(name), Some(version)) =
+                        (dep["name"].as_str(), dep["version"].as_str())
+                    {
+                        // Only allow reasonable crate names (alphanumeric, underscore, hyphen)
+                        if name
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                            && !name.is_empty()
+                        {
+                            cargo_toml.push_str(&format!("{} = \"{}\"\n", name, version));
+                        }
+                    }
+                }
+            }
+
+            // Create the project structure
+            let src_dir = temp_dir.join("src");
+            std::fs::create_dir_all(&src_dir)
+                .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+            std::fs::write(temp_dir.join("Cargo.toml"), &cargo_toml)
+                .map_err(|e| format!("Failed to write Cargo.toml: {}", e))?;
+            std::fs::write(src_dir.join("main.rs"), code)
+                .map_err(|e| format!("Failed to write main.rs: {}", e))?;
+
+            // Run cargo run --quiet (compiles and executes)
+            let output = std::process::Command::new("cargo")
+                .args(["run", "--quiet"])
+                .current_dir(&temp_dir)
+                .output()
+                .map_err(|e| format!("Failed to execute cargo: {}", e))?;
+
+            // Clean up the temp directory regardless of outcome
+            let _ = std::fs::remove_dir_all(&temp_dir);
+
+            // Build result from stdout + stderr
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            let mut result = String::new();
+
+            if !stdout.is_empty() {
+                result.push_str(&stdout);
+            }
+            if !stderr.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(&stderr);
+            }
+
+            if result.is_empty() {
+                result = format!("(Program exited with code {})", exit_code);
+            }
+
+            // Truncate to avoid overwhelming the model
+            if result.len() > 15000 {
+                result = format!(
+                    "{}\n\n... [truncated at 15000 chars, total {} chars]",
+                    &result[..15000],
+                    result.len()
+                );
+            }
+
+            Ok(result)
         }
         _ => {
             // Try custom tool from .tools/ directory
@@ -3640,6 +3781,19 @@ mod tests {
         assert!(required.iter().any(|v| v == "url"));
     }
 
+    #[test]
+    fn test_rust_repl_schema_present() {
+        let schemas = build_tool_schemas(&["rust_repl".into()], None);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "rust_repl");
+        let required = schemas[0]["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|v| v == "code"));
+        // dependencies is optional (not in required)
+        assert!(!required.iter().any(|v| v == "dependencies"));
+    }
+
     // ---- execute_tool error paths (without network / fs) -----------------
     #[tokio::test]
     async fn test_execute_tool_unknown_name() {
@@ -3783,6 +3937,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- rust_repl tests ---------------------------------------------------
+    #[tokio::test]
+    async fn test_execute_tool_rust_repl_missing_code() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({});
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_rust_repl_hello_world() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({
+            "code": "fn main() { println!(\"Hello, world!\"); }"
+        });
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should compile and run, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            output.contains("Hello, world!"),
+            "expected Hello, world! in output, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_rust_repl_computation() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({
+            "code": "fn main() { let sum: u64 = (1..=100).sum(); println!(\"Sum = {}\", sum); }"
+        });
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should compile and run, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            output.contains("Sum = 5050"),
+            "expected Sum = 5050, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_rust_repl_compile_error() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({
+            "code": "fn main() { let x: i32 = \"not an int\"; println!(\"{}\", x); }"
+        });
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should return compile error, not Err: {:?}", result);
+        let output = result.unwrap();
+        // The output should contain compiler error messages
+        assert!(
+            output.contains("error") || output.contains("mismatched types"),
+            "expected compiler error in output, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_rust_repl_with_dependency() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({
+            "code": "fn main() { let mut v = vec![1, 2, 3]; v.sort(); println!(\"sorted: {:?}\", v); }",
+            "dependencies": []
+        });
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should compile and run, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            output.contains("sorted: [1, 2, 3]"),
+            "expected sorted output, got: {}",
+            output
+        );
     }
 
     // ---- tool_call_id fix: reproducing the bug and confirming the fix ----

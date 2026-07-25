@@ -36,6 +36,7 @@ const AVAILABLE_TOOLS = [
   { id: "edit", label: "Edit File", description: "Targeted search-and-replace edits — much more token-efficient than rewriting entire files" },
   { id: "write_file", label: "Write File", description: "Create and overwrite files on disk (prefer Edit for modifications)" },
   { id: "list_directory", label: "List Directory", description: "Explore project structure" },
+  { id: "rust_repl", label: "Rust REPL", description: "Compile and run Rust code snippets — verify answers, test algorithms, compute results" },
 ];
 
 const WEB_SEARCH_PROVIDERS = [
