@@ -1700,6 +1700,48 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
         }));
     }
 
+    if enabled.contains(&"bash_sandbox".to_string()) {
+        let sandbox_desc = match root_path {
+            Some(rp) => format!(
+                "Execute a shell command in a sandboxed environment and return its output. \
+                 The command runs in a temporary directory by default (or in the specified working_directory). \
+                 Use this to validate CLI commands, test shell scripts, run build tools, \
+                 or verify command-line answers before presenting them. \
+                 stdout and stderr are captured and returned. \
+                 The open project folder is: {}.", rp),
+            None => "Execute a shell command in a sandboxed environment and return its output. \
+                     The command runs in a temporary directory by default (or in the specified working_directory). \
+                     Use this to validate CLI commands, test shell scripts, run build tools, \
+                     or verify command-line answers before presenting them. \
+                     stdout and stderr are captured and returned.".to_string(),
+        };
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "bash_sandbox",
+                "description": sandbox_desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute (passed to /bin/bash -c)"
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "Maximum execution time in seconds (default: 30, max: 300)"
+                        },
+                        "working_directory": {
+                            "type": "string",
+                            "description": "Working directory for the command (default: a temporary sandbox directory)"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }
+        }));
+    }
+
     // Load custom tools from .tools/ directory
     if let Some(rp) = root_path {
         let tools_dir = std::path::Path::new(rp).join(".tools");
@@ -2367,6 +2409,167 @@ async fn execute_tool(
 
             Ok(result)
         }
+        "bash_sandbox" => {
+            let command = args["command"]
+                .as_str()
+                .ok_or("Missing required parameter: command")?;
+            let timeout_secs = args["timeout"]
+                .as_u64()
+                .unwrap_or(30)
+                .min(300); // cap at 5 minutes
+            let working_dir = args["working_directory"].as_str();
+            eprintln!(
+                "[nolock] tool bash_sandbox command={} timeout={}s",
+                &command[..command.len().min(120)],
+                timeout_secs
+            );
+
+            // Determine working directory — always restricted to within root_path
+            // when a project folder is open, to prevent filesystem escape.
+            let cwd = if let Some(wd) = working_dir {
+                let p = std::path::PathBuf::from(wd);
+                // If a project folder is open, ensure the working dir is within it
+                if let Some(rp) = root_path {
+                    let root_canonical = std::path::Path::new(rp).canonicalize()
+                        .map_err(|e| format!("Failed to resolve project root: {}", e))?;
+                    // Create the directory if it doesn't exist yet
+                    if !p.exists() {
+                        std::fs::create_dir_all(&p)
+                            .map_err(|e| format!("Failed to create working directory {}: {}", wd, e))?;
+                    }
+                    let dir_canonical = p.canonicalize()
+                        .map_err(|e| format!("Failed to resolve working directory {}: {}", wd, e))?;
+                    if !dir_canonical.starts_with(&root_canonical) {
+                        return Err(format!(
+                            "Working directory '{}' is outside the open project folder '{}'",
+                            wd, rp
+                        ));
+                    }
+                    p
+                } else {
+                    // No project open — still allow the requested directory
+                    if !p.exists() {
+                        std::fs::create_dir_all(&p)
+                            .map_err(|e| format!("Failed to create working directory {}: {}", wd, e))?;
+                    }
+                    p
+                }
+            } else if let Some(rp) = root_path {
+                std::path::PathBuf::from(rp)
+            } else {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let temp = std::env::temp_dir().join(format!("nolock_bash_{}", nanos));
+                std::fs::create_dir_all(&temp)
+                    .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+                temp
+            };
+
+            // Spawn the process and implement a real timeout by killing it
+            // after the deadline expires.
+            //
+            // IMPORTANT: We call `setsid()` via pre_exec to place the child
+            // in its own session/process group.  This is required so that
+            // `kill(-pid, SIGKILL)` targets the correct process group and
+            // kills the entire tree (bash + any children it spawns).
+            #[cfg(unix)]
+            let child = {
+                use std::os::unix::process::CommandExt;
+                let mut cmd = std::process::Command::new("/bin/bash");
+                cmd.arg("-c")
+                    .arg(command)
+                    .current_dir(&cwd)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                // SAFETY: pre_exec is safe when we only call async-signal-safe
+                // functions.  setsid() is async-signal-safe.
+                unsafe {
+                    cmd.pre_exec(|| {
+                        libc::setsid();
+                        Ok(())
+                    });
+                }
+                cmd.spawn()
+                    .map_err(|e| format!("Failed to spawn command: {}", e))?
+            };
+            #[cfg(not(unix))]
+            let child = std::process::Command::new("/bin/bash")
+                .arg("-c")
+                .arg(command)
+                .current_dir(&cwd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("Failed to spawn command: {}", e))?;
+
+            // Spawn a killer thread that waits for the timeout then kills the
+            // process group.  We use the child's PID to target the whole tree
+            // so that child processes (e.g. from `sleep &`) are also cleaned up.
+            let child_id = child.id();
+            let kill_handle = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
+                // Kill the entire process group by sending SIGKILL to -pid.
+                // On Unix this targets all processes in the group.
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(child_id as i32), libc::SIGKILL);
+                }
+                #[cfg(not(unix))]
+                let _ = child_id; // On non-Unix, just ignore (process groups don't exist)
+            });
+
+            // Wait for the process to finish
+            let output = child.wait_with_output()
+                .map_err(|e| format!("Failed to read command output: {}", e))?;
+
+            // Clean up the killer thread (it will either have fired or be a
+            // no-op now that the process is dead).
+            let _ = kill_handle.join();
+
+            // Build result
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            // Detect if we killed it due to timeout
+            let timed_out = exit_code == -1
+                || stderr.contains("Killed")
+                || stderr.contains("SIGKILL");
+
+            let mut result = String::new();
+            if timed_out {
+                result.push_str(&format!(
+                    "[Command killed after {} second timeout]\n",
+                    timeout_secs
+                ));
+            }
+            if !stdout.is_empty() {
+                result.push_str(&stdout);
+            }
+            if !stderr.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(&stderr);
+            }
+
+            if result.is_empty() {
+                result = format!("(Command exited with code {})", exit_code);
+            }
+
+            // Truncate to avoid overwhelming the model
+            if result.len() > 15000 {
+                result = format!(
+                    "{}\n\n... [truncated at 15000 chars, total {} chars]",
+                    &result[..15000],
+                    result.len()
+                );
+            }
+
+            Ok(result)
+        }
         _ => {
             // Try custom tool from .tools/ directory
             if let Some(rp) = root_path {
@@ -2422,29 +2625,93 @@ fn execute_custom_tool(name: &str, args: &serde_json::Value, root_path: &str) ->
     let program = parts[0];
     let cmd_args = &parts[1..];
 
-    eprintln!("[nolock] custom tool {} command: {}", name, command_str);
+    // Read optional timeout from tool definition (default 30s, max 300s)
+    let timeout_secs = parsed["timeout"].as_u64().unwrap_or(30).min(300);
 
-    match std::process::Command::new(program)
+    eprintln!("[nolock] custom tool {} command: {} timeout: {}s", name, command_str, timeout_secs);
+
+    // Spawn with timeout protection (same as bash_sandbox)
+    // Use setsid() so the child gets its own process group for reliable killing.
+    #[cfg(unix)]
+    let child = {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(cmd_args)
+            .current_dir(root_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // SAFETY: setsid() is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.spawn()
+            .map_err(|e| format!("Failed to execute tool '{}': {}", name, e))?
+    };
+    #[cfg(not(unix))]
+    let child = std::process::Command::new(program)
         .args(cmd_args)
         .current_dir(root_path)
-        .output()
-    {
-        Ok(out) => {
-            let mut result = String::new();
-            if !out.stdout.is_empty() {
-                result.push_str(&String::from_utf8_lossy(&out.stdout));
-            }
-            if !out.stderr.is_empty() {
-                if !result.is_empty() { result.push('\n'); }
-                result.push_str(&String::from_utf8_lossy(&out.stderr));
-            }
-            if result.is_empty() {
-                result = format!("(exit code: {})", out.status.code().unwrap_or(-1));
-            }
-            Ok(result)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to execute tool '{}': {}", name, e))?;
+
+    // Killer thread for timeout
+    let child_id = child.id();
+    let kill_handle = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-(child_id as i32), libc::SIGKILL);
         }
-        Err(e) => Err(format!("Failed to execute tool '{}': {}", name, e)),
+        #[cfg(not(unix))]
+        let _ = child_id;
+    });
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Failed to read tool output: {}", e))?;
+
+    let _ = kill_handle.join();
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    let timed_out = exit_code == -1
+        || stderr.contains("Killed")
+        || stderr.contains("SIGKILL");
+
+    let mut result = String::new();
+    if timed_out {
+        result.push_str(&format!(
+            "[Tool killed after {} second timeout]\n",
+            timeout_secs
+        ));
     }
+    if !stdout.is_empty() {
+        result.push_str(&stdout);
+    }
+    if !stderr.is_empty() {
+        if !result.is_empty() { result.push('\n'); }
+        result.push_str(&stderr);
+    }
+    if result.is_empty() {
+        result = format!("(exit code: {})", exit_code);
+    }
+
+    // Truncate to avoid overwhelming the model
+    if result.len() > 15000 {
+        result = format!(
+            "{}\n\n... [truncated at 15000 chars, total {} chars]",
+            &result[..15000],
+            result.len()
+        );
+    }
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -3794,6 +4061,20 @@ mod tests {
         assert!(!required.iter().any(|v| v == "dependencies"));
     }
 
+    #[test]
+    fn test_bash_sandbox_schema_present() {
+        let schemas = build_tool_schemas(&["bash_sandbox".into()], None);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "bash_sandbox");
+        let required = schemas[0]["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|v| v == "command"));
+        // timeout and working_directory are optional
+        assert!(!required.iter().any(|v| v == "timeout"));
+        assert!(!required.iter().any(|v| v == "working_directory"));
+    }
+
     // ---- execute_tool error paths (without network / fs) -----------------
     #[tokio::test]
     async fn test_execute_tool_unknown_name() {
@@ -4012,6 +4293,118 @@ mod tests {
             output.contains("sorted: [1, 2, 3]"),
             "expected sorted output, got: {}",
             output
+        );
+    }
+
+    // ---- bash_sandbox tests ------------------------------------------------
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_missing_command() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({});
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_echo() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({
+            "command": "echo hello from bash"
+        });
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should run, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            output.contains("hello from bash"),
+            "expected echo output, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_error_exit() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({
+            "command": "echo error_msg >&2; exit 1"
+        });
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should return output even on non-zero exit, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            output.contains("error_msg"),
+            "expected stderr output, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_pipeline() {
+        let client = reqwest::Client::new();
+        let args = serde_json::json!({
+            "command": "echo -e 'banana\\napple\\ncherry' | sort | head -2"
+        });
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should run pipeline, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            output.contains("apple") && output.contains("banana"),
+            "expected sorted head output, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_working_directory() {
+        let client = reqwest::Client::new();
+        let dir = std::env::temp_dir().join("nolock_bash_test_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let args = serde_json::json!({
+            "command": "pwd",
+            "working_directory": dir.to_string_lossy()
+        });
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should run in working dir, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            output.contains("nolock_bash_test_dir"),
+            "expected working directory in pwd output, got: {}",
+            output
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_timeout() {
+        let client = reqwest::Client::new();
+        // Use a very short timeout (2s) and a command that sleeps longer
+        let args = serde_json::json!({
+            "command": "sleep 60",
+            "timeout": 2
+        });
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        assert!(result.is_ok(), "should return output even on kill, got: {:?}", result);
+        let output = result.unwrap();
+        assert!(
+            output.contains("timeout") || output.contains("Killed"),
+            "expected timeout/killed message, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_working_directory_outside_root() {
+        let client = reqwest::Client::new();
+        // When root_path is set, working_directory outside it should be rejected
+        let args = serde_json::json!({
+            "command": "pwd",
+            "working_directory": "/tmp"
+        });
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), Some("/home")).await;
+        assert!(result.is_err(), "should reject working dir outside root, got: {:?}", result);
+        assert!(
+            result.unwrap_err().contains("outside"),
+            "expected 'outside' in error message"
         );
     }
 

@@ -37,6 +37,7 @@ const AVAILABLE_TOOLS = [
   { id: "write_file", label: "Write File", description: "Create and overwrite files on disk (prefer Edit for modifications)" },
   { id: "list_directory", label: "List Directory", description: "Explore project structure" },
   { id: "rust_repl", label: "Rust REPL", description: "Compile and run Rust code snippets — verify answers, test algorithms, compute results" },
+  { id: "bash_sandbox", label: "Bash Sandbox", description: "Execute shell commands in a sandbox — validate CLI answers, test scripts, run build tools" },
 ];
 
 const WEB_SEARCH_PROVIDERS = [

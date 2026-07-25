@@ -2485,6 +2485,7 @@ version = "0.1.0"
 dependencies = [
  "gtk",
  "keyring",
+ "libc",
  "portable-pty",
  "regex",
  "reqwest 0.12.28",

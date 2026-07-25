@@ -46,6 +46,7 @@ const AVAILABLE_TOOLS = [
   { id: "write_file", label: "Write File", description: "Create and overwrite files on disk" },
   { id: "list_directory", label: "List Directory", description: "Explore project structure" },
   { id: "rust_repl", label: "Rust REPL", description: "Compile and run Rust code snippets to verify answers" },
+  { id: "bash_sandbox", label: "Bash Sandbox", description: "Execute shell commands in a sandbox to validate CLI answers" },
 ];
 
 export default function AISettings({ visible, onClose }: Props) {
