@@ -1745,6 +1745,49 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                   return;
                 }
               }
+
+              // ---- Ctrl+ shortcuts for Linux/Windows (text editing) ----
+              // On macOS these are intercepted by the Rust NSEvent monitor
+              // before keydown fires, so they won't reach here.
+              // On Linux/Windows, handle them for the chat textarea.
+              if (e.ctrlKey || e.metaKey) {
+                // Ctrl+Z → Undo (custom undo stacks)
+                if (!e.shiftKey && (e.key === "z" || e.key === "Z")) {
+                  e.preventDefault();
+                  const prev = inputHistoryRef.current.pop();
+                  if (prev !== undefined) {
+                    inputRedoRef.current.push(inputRefForHistory.current);
+                    inputRefForHistory.current = prev;
+                    setInput(prev);
+                  }
+                  return;
+                }
+                // Ctrl+Y → Redo
+                if (e.key === "y" || e.key === "Y") {
+                  e.preventDefault();
+                  const next = inputRedoRef.current.pop();
+                  if (next !== undefined) {
+                    inputHistoryRef.current.push(inputRefForHistory.current);
+                    inputRefForHistory.current = next;
+                    setInput(next);
+                  }
+                  return;
+                }
+                // Ctrl+Shift+Z → Redo
+                if (e.shiftKey && (e.key === "z" || e.key === "Z")) {
+                  e.preventDefault();
+                  const next = inputRedoRef.current.pop();
+                  if (next !== undefined) {
+                    inputHistoryRef.current.push(inputRefForHistory.current);
+                    inputRefForHistory.current = next;
+                    setInput(next);
+                  }
+                  return;
+                }
+                // Ctrl+A / Ctrl+X: let the browser handle natively
+                // (selectAll / cut) — do not preventDefault.
+              }
+
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();

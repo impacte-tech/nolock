@@ -270,4 +270,67 @@ describe("App", () => {
     expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
   });
 
+  it("Ctrl+A on TEXTAREA does NOT set chord prefix (Linux)", () => {
+    render(<App />);
+
+    // Create a textarea and focus it to simulate chat input focus.
+    // Dispatch on the textarea so e.target is the textarea element.
+    const textarea = document.createElement("textarea");
+    document.body.appendChild(textarea);
+    textarea.focus();
+
+    // Ctrl+A on a textarea should NOT be intercepted by the chord system
+    fireEvent.keyDown(textarea, {
+      key: "a",
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+    });
+
+    // The chord hint must NOT appear — Ctrl+A belongs to the textarea
+    expect(screen.queryByText(/Waiting for second key/)).not.toBeInTheDocument();
+
+    document.body.removeChild(textarea);
+  });
+
+  it("Ctrl+Z on TEXTAREA does NOT trigger app shortcuts (Linux)", () => {
+    render(<App />);
+
+    const textarea = document.createElement("textarea");
+    document.body.appendChild(textarea);
+    textarea.focus();
+
+    // Ctrl+Z on Linux — should not trigger any visible side-effect
+    fireEvent.keyDown(textarea, {
+      key: "z",
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+    });
+
+    expect(screen.queryByText(/Waiting for second key/)).not.toBeInTheDocument();
+
+    document.body.removeChild(textarea);
+  });
+
+  it("Ctrl+X on TEXTAREA does NOT trigger app shortcuts (Linux)", () => {
+    render(<App />);
+
+    const textarea = document.createElement("textarea");
+    document.body.appendChild(textarea);
+    textarea.focus();
+
+    // Ctrl+X on Linux — should not trigger any visible side-effect
+    fireEvent.keyDown(textarea, {
+      key: "x",
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+    });
+
+    expect(screen.queryByText(/Waiting for second key/)).not.toBeInTheDocument();
+
+    document.body.removeChild(textarea);
+  });
+
 });
