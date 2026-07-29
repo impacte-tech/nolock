@@ -8,6 +8,7 @@ use regex::Regex;
 
 mod browser;
 mod linter;
+mod macos_keyboard;
 mod terminal_memory;
 
 // ---------------------------------------------------------------------------
@@ -3893,6 +3894,9 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 window.set_icon(icon)?;
             }
+            // On macOS, intercept Cmd+Z/A/Y at the native NSResponder level
+            // before WKWebView processes them, preventing native undo/redo/selectAll.
+            macos_keyboard::install(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

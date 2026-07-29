@@ -25,3 +25,8 @@ tokio = { version = "1", features = ["rt", "macros"] }
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
 gtk = { version = "=0.18.2", features = ["v3_24"] }
 wry = { version = "=0.55.1", default-features = false, features = ["protocol", "os-webview", "linux-body"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"

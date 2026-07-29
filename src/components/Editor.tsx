@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import * as monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getSecret } from "../lib/secrets";
 import { buildAiPrompt, processCompletionResponse } from "./fitm";
 
@@ -400,7 +401,7 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
       editor.trigger("keyboard", "redo", null);
     });
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyA, () => {
-      editor.trigger("keyboard", "selectAll", null);
+      editor.trigger("keyboard", "editor.action.selectAll", null);
     });
 
     // Ctrl+. — explicit FITM trigger (bypasses debounce)
@@ -415,9 +416,13 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
     // the capture phase, prevent the native action, and call editor.trigger
     // directly.
     //
+    // Guard: use editor.hasTextFocus() instead of containerRef containment.
+    // Monaco manages its own DOM tree internally; the event target may be a
+    // Monaco-owned element that is not a DOM child of the container ref,
+    // causing a containment check to silently fail.
+    //
     const preventNativeShortcuts = (e: KeyboardEvent) => {
-      // Only handle shortcuts if the event originated from this editor
-      if (!containerRef.current?.contains(e.target as Node)) return;
+      if (!editor.hasTextFocus()) return;
 
       // Native "Save Page" in webview
       if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
@@ -430,7 +435,8 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
         return;
       }
       // Cmd+Z — undo (macOS WKWebView intercepts natively)
-      if ((e.metaKey && !e.ctrlKey && (e.key === "z" || e.key === "Z"))) {
+      // Guard with !e.shiftKey so Cmd+Shift+Z (redo) is not caught here.
+      if ((e.metaKey && !e.ctrlKey && !e.shiftKey && (e.key === "z" || e.key === "Z"))) {
         e.preventDefault();
         e.stopPropagation();
         editor.trigger("keyboard", "undo", null);
@@ -454,14 +460,55 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
       if ((e.metaKey && !e.ctrlKey && (e.key === "a" || e.key === "A"))) {
         e.preventDefault();
         e.stopPropagation();
-        editor.trigger("keyboard", "selectAll", null);
+        editor.trigger("keyboard", "editor.action.selectAll", null);
         return;
       }
     };
     document.addEventListener("keydown", preventNativeShortcuts, true);
 
+    // ---- Prevent native undo/redo at the input level ----------------------
+    //
+    // On macOS WKWebView, Cmd+Z triggers native undo at the NSResponder level
+    // BEFORE the keydown event fires and before the beforeinput event reaches
+    // Monaco's internal handlers.  We use capture phase so our handler fires
+    // on the way DOWN to the textarea, before Monaco can stop propagation.
+    //
+    const preventNativeHistory = (e: Event) => {
+      const inputType = (e as InputEvent).inputType;
+      if (inputType === "historyUndo" || inputType === "historyRedo") {
+        e.preventDefault();
+      }
+    };
+    containerRef.current?.addEventListener("beforeinput", preventNativeHistory, true);
+
     // Run linter on file open
     runLinter(model, filePath);
+
+    // ---- Tauri native event listeners (macOS only) -----------------------
+    //
+    // On macOS, the Rust layer installs an NSEvent monitor that intercepts
+    // Cmd+Z/A/Y before WKWebView's NSResponder can process them.  The monitor
+    // consumes the native event and emits Tauri events to the webview.
+    // We listen for those events here and call editor.trigger directly.
+    //
+    // On Linux/Windows these events are never emitted, so this is a no-op.
+    //
+    const nativeUndo = listen("native-cmd-z", () => {
+      const ed = editorRef.current;
+      if (ed?.hasTextFocus()) ed.trigger("keyboard", "undo", null);
+    });
+    const nativeRedoY = listen("native-cmd-y", () => {
+      const ed = editorRef.current;
+      if (ed?.hasTextFocus()) ed.trigger("keyboard", "redo", null);
+    });
+    const nativeRedoShiftZ = listen("native-cmd-shift-z", () => {
+      const ed = editorRef.current;
+      if (ed?.hasTextFocus()) ed.trigger("keyboard", "redo", null);
+    });
+    const nativeSelectAll = listen("native-cmd-a", () => {
+      const ed = editorRef.current;
+      if (ed?.hasTextFocus()) ed.trigger("keyboard", "editor.action.selectAll", null);
+    });
 
     editor.focus();
 
@@ -471,6 +518,11 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
       editor.dispose();
       model.dispose();
       document.removeEventListener("keydown", preventNativeShortcuts, true);
+      containerRef.current?.removeEventListener("beforeinput", preventNativeHistory, true);
+      nativeUndo.then((fn) => fn());
+      nativeRedoY.then((fn) => fn());
+      nativeRedoShiftZ.then((fn) => fn());
+      nativeSelectAll.then((fn) => fn());
     };
   }, [filePath]);
 

@@ -196,4 +196,78 @@ describe("App", () => {
     expect(screen.queryByText("Terminal Memory")).not.toBeInTheDocument();
   });
 
+  // ---- macOS Cmd+key shortcuts must NOT be captured at app level --------
+
+  it("does NOT set chord prefix on Cmd+A (macOS)", () => {
+    render(<App />);
+
+    // Cmd+A on macOS sends metaKey=true, ctrlKey=false
+    fireEvent.keyDown(window, {
+      key: "a",
+      metaKey: true,
+      ctrlKey: false,
+      shiftKey: false,
+    });
+
+    // The chord hint must NOT appear — Cmd+A belongs to the editor
+    expect(screen.queryByText(/Waiting for second key/)).not.toBeInTheDocument();
+  });
+
+  it("does NOT trigger any app shortcut on Cmd+Z (macOS)", () => {
+    render(<App />);
+
+    // Cmd+Z on macOS sends metaKey=true, ctrlKey=false
+    const spy = vi.fn();
+    window.addEventListener("keydown", spy, { capture: true });
+    fireEvent.keyDown(window, {
+      key: "z",
+      metaKey: true,
+      ctrlKey: false,
+    });
+    window.removeEventListener("keydown", spy, { capture: true });
+
+    // Cmd+Z must not produce any visible side-effect in the App
+    // (no overlays open, no chord prefix set)
+    expect(screen.queryByText(/Waiting for second key/)).not.toBeInTheDocument();
+  });
+
+  it("does NOT trigger any app shortcut on Cmd+Y (macOS)", () => {
+    render(<App />);
+
+    fireEvent.keyDown(window, {
+      key: "y",
+      metaKey: true,
+      ctrlKey: false,
+    });
+
+    expect(screen.queryByText(/Waiting for second key/)).not.toBeInTheDocument();
+  });
+
+  it("does NOT trigger any app shortcut on Cmd+Shift+Z (macOS)", () => {
+    render(<App />);
+
+    fireEvent.keyDown(window, {
+      key: "z",
+      metaKey: true,
+      ctrlKey: false,
+      shiftKey: true,
+    });
+
+    expect(screen.queryByText(/Waiting for second key/)).not.toBeInTheDocument();
+  });
+
+  it("Ctrl+A still sets chord prefix (Linux/Windows)", () => {
+    render(<App />);
+
+    // Ctrl+A on Linux/Windows sends ctrlKey=true, metaKey=false
+    fireEvent.keyDown(window, {
+      key: "a",
+      ctrlKey: true,
+      metaKey: false,
+      shiftKey: false,
+    });
+
+    expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
+  });
+
 });
