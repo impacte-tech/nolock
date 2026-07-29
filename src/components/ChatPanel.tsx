@@ -408,6 +408,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [mentionType, setMentionType] = useState<"file" | "skill" | "tool" | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // ---- Undo/redo stacks for chat input ---------------------------------
+  const inputHistoryRef = useRef<string[]>([]);
+  const inputRedoRef = useRef<string[]>([]);
+  const inputRefForHistory = useRef("");
+
   /** Tracks total context tokens sent across the conversation (persists after fileRefs are cleared). */
   const [accumulatedContextTokens, setAccumulatedContextTokens] = useState(0);
 
@@ -420,6 +425,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   /** Detect @mention (files/agents) or /mention (skills) patterns as the user types. */
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
+    // Save previous value for undo (only trusted user input)
+    if (e.isTrusted) {
+      inputHistoryRef.current.push(inputRefForHistory.current);
+      inputRedoRef.current = [];
+    }
+    inputRefForHistory.current = value;
     setInput(value);
 
     const cursorPos = e.target.selectionStart;
@@ -642,6 +653,56 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     };
     fetchContextLength();
   }, []);
+
+  // ---- Tauri native event listeners for chat input (macOS) -------------
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+
+    const unUndo = listen("native-cmd-z", () => {
+      if (document.activeElement !== textareaRef.current) return;
+      const prev = inputHistoryRef.current.pop();
+      if (prev === undefined) return;
+      inputRedoRef.current.push(inputRefForHistory.current);
+      inputRefForHistory.current = prev;
+      setInput(prev);
+    });
+
+    const unRedoY = listen("native-cmd-y", () => {
+      if (document.activeElement !== textareaRef.current) return;
+      const next = inputRedoRef.current.pop();
+      if (next === undefined) return;
+      inputHistoryRef.current.push(inputRefForHistory.current);
+      inputRefForHistory.current = next;
+      setInput(next);
+    });
+
+    const unRedoShiftZ = listen("native-cmd-shift-z", () => {
+      if (document.activeElement !== textareaRef.current) return;
+      const next = inputRedoRef.current.pop();
+      if (next === undefined) return;
+      inputHistoryRef.current.push(inputRefForHistory.current);
+      inputRefForHistory.current = next;
+      setInput(next);
+    });
+
+    const unSelectAll = listen("native-cmd-a", () => {
+      if (document.activeElement !== textareaRef.current) return;
+      textareaRef.current?.select();
+    });
+
+    return () => {
+      unUndo.then((fn) => fn());
+      unRedoY.then((fn) => fn());
+      unRedoShiftZ.then((fn) => fn());
+      unSelectAll.then((fn) => fn());
+    };
+  }, []);
+
+  /** Keep inputRefForHistory in sync when input changes programmatically. */
+  useEffect(() => {
+    inputRefForHistory.current = input;
+  }, [input]);
 
   /** Compute total context size: accumulated (from prior sends) + pending (current chips). */
   const contextSize = accumulatedContextTokens

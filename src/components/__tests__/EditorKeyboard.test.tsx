@@ -11,6 +11,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
 import { mockInvoke, mockListen } from "../../test/tauri-mock";
 
+// Save original execCommand so we can restore it
+const origExecCommand = document.execCommand;
+
+function mockExecCommand() {
+  document.execCommand = vi.fn(() => true) as unknown as typeof document.execCommand;
+}
+
+function restoreExecCommand() {
+  document.execCommand = origExecCommand;
+}
+
 // ---------------------------------------------------------------------------
 // We capture the mock editor instance returned by monaco.editor.create so
 // we can assert on .trigger() calls.
@@ -328,12 +339,21 @@ describe("Editor — macOS keyboard shortcuts", () => {
       return entry![1] as (...args: any[]) => void;
     }
 
+    beforeEach(() => {
+      mockExecCommand();
+    });
+
+    afterEach(() => {
+      restoreExecCommand();
+    });
+
     it("native-cmd-z triggers editor undo when editor has focus", () => {
       renderEditor();
       const cb = findListener("native-cmd-z");
       mockEditor.trigger.mockClear();
       cb();
       expect(mockEditor.trigger).toHaveBeenCalledWith("keyboard", "undo", null);
+      expect(document.execCommand).not.toHaveBeenCalled();
     });
 
     it("native-cmd-y triggers editor redo when editor has focus", () => {
@@ -342,6 +362,7 @@ describe("Editor — macOS keyboard shortcuts", () => {
       mockEditor.trigger.mockClear();
       cb();
       expect(mockEditor.trigger).toHaveBeenCalledWith("keyboard", "redo", null);
+      expect(document.execCommand).not.toHaveBeenCalled();
     });
 
     it("native-cmd-shift-z triggers editor redo when editor has focus", () => {
@@ -350,6 +371,7 @@ describe("Editor — macOS keyboard shortcuts", () => {
       mockEditor.trigger.mockClear();
       cb();
       expect(mockEditor.trigger).toHaveBeenCalledWith("keyboard", "redo", null);
+      expect(document.execCommand).not.toHaveBeenCalled();
     });
 
     it("native-cmd-a triggers editor selectAll when editor has focus", () => {
@@ -362,13 +384,19 @@ describe("Editor — macOS keyboard shortcuts", () => {
         "editor.action.selectAll",
         null,
       );
+      expect(document.execCommand).not.toHaveBeenCalled();
     });
 
-    it("does NOT trigger when editor lacks focus", () => {
+    it("does nothing when editor lacks focus", () => {
       renderEditor(false);
-      const cb = findListener("native-cmd-z");
+
+      const cbZ = findListener("native-cmd-z");
       mockEditor.trigger.mockClear();
-      cb();
+      cbZ();
+      expect(mockEditor.trigger).not.toHaveBeenCalled();
+
+      const cbA = findListener("native-cmd-a");
+      cbA();
       expect(mockEditor.trigger).not.toHaveBeenCalled();
     });
   });
