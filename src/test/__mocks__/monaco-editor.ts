@@ -69,6 +69,8 @@ export const editor = {
     getModel: () => null,
     getValue: () => "",
     layout: () => {},
+    hasTextFocus: () => true,
+    hasWidgetFocus: () => true,
   }),
   setTheme: () => {},
   defineTheme: () => {},

@@ -2483,9 +2483,12 @@ dependencies = [
 name = "nolock"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "gtk",
  "keyring",
  "libc",
+ "objc2",
+ "objc2-foundation",
  "portable-pty",
  "regex",
  "reqwest 0.12.28",
