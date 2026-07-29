@@ -168,4 +168,103 @@ describe("ChatPanel", () => {
     // No messages should appear
     expect(screen.getByText(/Ask anything about your code/)).toBeInTheDocument();
   });
+
+  // ---- Keyboard shortcut tests (Linux/Windows) --------------------------
+  // NOTE: These tests verify the keyboard event routing (preventDefault behavior).
+  // Full undo/redo state updates require trusted (isTrusted=true) input events,
+  // which synthetic fireEvent.change() cannot produce. The undo/redo logic itself
+  // is exercised by the macOS Tauri event listener tests.
+
+  it("Ctrl+Z calls preventDefault (intercepts for custom undo)", () => {
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
+
+    const input = screen.getByPlaceholderText(/Ask the AI/) as HTMLTextAreaElement;
+
+    const keyDownEvent = new KeyboardEvent("keydown", {
+      key: "z",
+      ctrlKey: true,
+      shiftKey: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefaultSpy = vi.spyOn(keyDownEvent, "preventDefault");
+    input.dispatchEvent(keyDownEvent);
+
+    // Ctrl+Z should be intercepted (preventDefault called) to stop native undo
+    expect(preventDefaultSpy).toHaveBeenCalled();
+  });
+
+  it("Ctrl+Y calls preventDefault (intercepts for custom redo)", () => {
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
+
+    const input = screen.getByPlaceholderText(/Ask the AI/) as HTMLTextAreaElement;
+
+    const keyDownEvent = new KeyboardEvent("keydown", {
+      key: "y",
+      ctrlKey: true,
+      shiftKey: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefaultSpy = vi.spyOn(keyDownEvent, "preventDefault");
+    input.dispatchEvent(keyDownEvent);
+
+    // Ctrl+Y should be intercepted (preventDefault called)
+    expect(preventDefaultSpy).toHaveBeenCalled();
+  });
+
+  it("Ctrl+Shift+Z calls preventDefault (intercepts for custom redo)", () => {
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
+
+    const input = screen.getByPlaceholderText(/Ask the AI/) as HTMLTextAreaElement;
+
+    const keyDownEvent = new KeyboardEvent("keydown", {
+      key: "z",
+      ctrlKey: true,
+      shiftKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefaultSpy = vi.spyOn(keyDownEvent, "preventDefault");
+    input.dispatchEvent(keyDownEvent);
+
+    // Ctrl+Shift+Z should be intercepted (preventDefault called)
+    expect(preventDefaultSpy).toHaveBeenCalled();
+  });
+
+  it("Ctrl+X does NOT call preventDefault (lets browser handle cut)", () => {
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
+
+    const input = screen.getByPlaceholderText(/Ask the AI/) as HTMLTextAreaElement;
+
+    const keyDownEvent = new KeyboardEvent("keydown", {
+      key: "x",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefaultSpy = vi.spyOn(keyDownEvent, "preventDefault");
+    input.dispatchEvent(keyDownEvent);
+
+    // Ctrl+X should NOT be intercepted — let browser handle cut natively
+    expect(preventDefaultSpy).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+A does NOT call preventDefault (lets browser handle selectAll)", () => {
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
+
+    const input = screen.getByPlaceholderText(/Ask the AI/) as HTMLTextAreaElement;
+
+    const keyDownEvent = new KeyboardEvent("keydown", {
+      key: "a",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    const preventDefaultSpy = vi.spyOn(keyDownEvent, "preventDefault");
+    input.dispatchEvent(keyDownEvent);
+
+    // Ctrl+A should NOT be intercepted — let browser handle selectAll natively
+    expect(preventDefaultSpy).not.toHaveBeenCalled();
+  });
 });

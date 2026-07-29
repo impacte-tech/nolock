@@ -551,6 +551,35 @@ export default function App() {
   // --- Global keyboard shortcuts ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // ---- Defensive: always prevent Ctrl+S / Cmd+S from reaching ----
+      // the webview's native "Save Page" handler, which can cause the
+      // app to close in some Tauri v2 environments (notably Linux/GTK).
+      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        return;
+      }
+
+      const tag = (e.target as HTMLElement).tagName;
+      const isInput = tag === "INPUT" || tag === "TEXTAREA";
+
+      // When focus is in an input/textarea, skip chord prefixes and app
+      // shortcuts so the input gets native handling (e.g. Ctrl+A selectAll,
+      // Ctrl+Z undo, Ctrl+X cut). Only Escape goes through to close overlays.
+      if (isInput) {
+        if (e.key === "Escape") {
+          if (showSearch) { setShowSearch(false); return; }
+          if (showAgentManager) setShowAgentManager(false);
+          if (showModelProviders) setShowModelProviders(false);
+          if (showChatModel) setShowChatModel(false);
+          if (showFITMModel) setShowFITMModel(false);
+          if (showTools) setShowTools(false);
+          if (showSettings) setShowSettings(false);
+          if (showTermMemory) { setShowTermMemory(false); }
+          return;
+        }
+        return; // Let all other keys reach the input/textarea
+      }
+
       // ---- Chord dispatch -------------------------------------------------
       // If we're waiting for a second chord key, handle it first (regardless
       // of modifier keys on the second press — that matches the existing
@@ -693,17 +722,6 @@ export default function App() {
 
       // ---- Direct shortcuts (with Ctrl held) ------------------------------
 
-      // ---- Defensive: always prevent Ctrl+S / Cmd+S from reaching ----
-      // the webview's native "Save Page" handler, which can cause the
-      // app to close in some Tauri v2 environments (notably Linux/GTK).
-      if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
-        e.preventDefault();
-        return;
-      }
-
-      const tag = (e.target as HTMLElement).tagName;
-      const isInput = tag === "INPUT" || tag === "TEXTAREA";
-
       // Ctrl+O — Open Folder
       if (e.ctrlKey && !e.shiftKey && e.key === "o") {
         e.preventDefault();
@@ -801,8 +819,6 @@ export default function App() {
         }
         return;
       }
-
-      if (isInput) return;
     };
 
     // Use capture phase so the handler fires BEFORE xterm.js and other
