@@ -1024,6 +1024,170 @@ html, body, #root {
   word-break: break-word;
 }
 
+/* ===== Hook run cards (shown in the chat panel) ===== */
+.hook-runs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.hook-run-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.hook-run-card.running,
+.hook-run-card.queued {
+  border-color: var(--accent);
+}
+
+.hook-run-card.error {
+  border-color: #e06c75;
+}
+
+.hook-run-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+}
+
+.hook-run-card-header:hover {
+  background: var(--hover);
+}
+
+.hook-run-card-chevron {
+  font-size: 8px;
+  flex-shrink: 0;
+}
+
+.hook-run-card-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: thinking-spin 0.8s linear infinite;
+}
+
+.hook-run-card-name {
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.hook-run-card-status {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
+
+.hook-run-card-reason {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+}
+
+.hook-run-card-body {
+  max-height: 300px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+  background: var(--bg-primary);
+}
+
+.hook-run-card-error {
+  color: #e06c75;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 6px;
+}
+
+.hook-run-card-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ===== Hook result messages (surfaced into the main chat thread) ===== */
+.hook-result-block {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  padding: 8px 12px;
+  margin: 4px 0;
+}
+
+.hook-result-block.error {
+  border-left-color: #e06c75;
+}
+
+.hook-result-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.hook-result-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.hook-result-name.error {
+  color: #e06c75;
+}
+
+.hook-result-reason {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.hook-result-error {
+  font-size: 12px;
+  color: #e06c75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.hook-result-block .chat-markdown {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+/* ===== Hook editor checkboxes ===== */
+.hook-check-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.hook-check-item:hover {
+  background: var(--hover);
+}
+
+.hook-check-label {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+
 /* ===== Continue button (shown on incomplete responses) ===== */
 .continue-btn {
   display: inline-flex;

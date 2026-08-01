@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { checkCommandTrigger } from "../lib/hooks";
 
 export interface TerminalInstance {
   id: string;
@@ -85,6 +86,10 @@ export default function TerminalView({ instance, rootPath, lastCommandRef }: Ter
           const cmd = lineBuffer.current.trim();
           if (cmd.length > 0) {
             invoke("record_command", { command: cmd }).catch(() => {});
+            // Fire command-triggered hooks when the user runs a CLI command.
+            if (rootPath) {
+              void checkCommandTrigger(rootPath, cmd, "terminal");
+            }
             if (lastCommandRef) {
               lastCommandRef.current = cmd;
             }
