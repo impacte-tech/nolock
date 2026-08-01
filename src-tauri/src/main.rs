@@ -7,6 +7,7 @@ use tauri::Emitter;
 use regex::Regex;
 
 mod browser;
+mod hooks;
 mod linter;
 mod macos_keyboard;
 mod terminal_memory;
@@ -3904,6 +3905,9 @@ pub fn run() {
             write_file,
             list_directory,
             list_files_recursive,
+            hooks::list_hooks,
+            hooks::read_hook,
+            hooks::save_hook,
             rename_file,
             move_file,
             delete_file,

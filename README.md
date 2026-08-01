@@ -81,6 +81,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **AI Inline Completions** — Fill-In-The-Middle (FITM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
 - **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing, grep, edit, write_file), custom tools via `.tools/`, and context token tracking.
 - **AI Agent Manager** — Create and manage specialized AI agents (e.g., code-reviewer, doc-writer) stored as `.md` files (Markdown with YAML frontmatter) in the `.agents/` directory with custom system prompts. Legacy `.json` format is still supported.
+- **Hooks** — Project-local automation rules (`.hooks/`) that trigger AI agent runs on CLI commands (e.g. `git commit`), cron schedules, or manual `!hook-name` signals. Open via <kbd>Ctrl+A, H</kbd>.
 - **Human Feedback (RLHF)** — Collect thumbs-up/thumbs-down (KTO) and pairwise preference (DPO) feedback on AI chat responses. KTO and DPO data live in separate top-level directories under `.rlhf/`, each partitioned by model configuration, ready for downstream RLHF training. Enable/disable via <kbd>Ctrl+A, R</kbd>.
 - **Integrated Terminal** — Real PTY-based shell sessions with multiple tabs, resize support, and command history tracking.
 - **Terminal Memory** — Automatically records commands, tracks frequency, and lets you organize commands into categories for quick recall.
@@ -194,6 +195,68 @@ Every AI chat response will then show thumbs-up and thumbs-down buttons. If DPO 
 ### Training with Your Data
 
 The collected JSONL data is ready for fine-tuning with [Hugging Face TRL](https://huggingface.co/docs/trl/v1.8.0) (`trl==1.8.0`). See **[.rlhf/README.md](.rlhf/README.md)** for complete DPO and KTO training guides with example scripts.
+
+---
+
+## Hooks — Automated Agent Runs
+
+### What Are Hooks?
+
+Hooks are project-local YAML files in `.hooks/` that automatically invoke an AI agent run when a **trigger** fires. They let you automate repetitive agentic workflows without leaving the editor — for example, reviewing your code right after `git commit`, generating a daily standup summary, or running a custom routine whenever you type a particular command.
+
+Hooks come in three trigger flavors:
+
+| Trigger | When it fires |
+|---|---|
+| **Command** | After a CLI command whose leading words match a pattern — whether **you** run it in the terminal or the **AI agent** runs it via its `bash_sandbox` tool. |
+| **Cron** | On a repeating schedule (5-field cron expression) while nolock is open. |
+| **Manual** | When you type `!hook-name` in the chat panel, or press **Run now** in the Hooks panel. |
+
+### Creating a Hook
+
+Open the Hooks panel with **`Ctrl+A, H`** (AI Integrations → Hooks) and click **New Hook**. Give it a name, choose a trigger, optionally attach an agent/prompt/skills/tools, and save. The backend writes a `.hooks/<name>.yaml` file into your project.
+
+```yaml
+name: commit-review
+description: Review what you are about to commit.
+trigger:
+  type: command        # command | cron
+  command: git commit
+  # type: cron
+  # schedule: "0 9 * * 1-5"
+agent:
+  name: code-reviewer  # optional: reuse an existing agent's system prompt
+  prompt: |            # optional: inline system prompt (takes precedence)
+    You are a git-review hook...
+  skills: [code-review]
+  tools: [read_file, grep]
+```
+
+Field reference:
+
+| Field | Description |
+|---|---|
+| `name` | Hook identifier (letters, numbers, `-`, `_`, `.`). Becomes the file name. |
+| `description` | Optional human-readable description. |
+| `trigger.type` | `command` or `cron`. |
+| `trigger.command` | (command) Word-prefix pattern — `git commit` matches `git commit -m "x"`, not `git committed`. |
+| `trigger.schedule` | (cron) 5-field cron: `minute hour day-of-month month day-of-week`. |
+| `agent.name` | Optional existing agent from `.agents/` whose system prompt is reused. |
+| `agent.prompt` | Optional inline system prompt; takes precedence over `agent.name`. |
+| `agent.skills` | Skill names from `.skills/` to inject into the run context. |
+| `agent.tools` | Explicit tool ids to enable. Empty = use your currently enabled tools. |
+
+### How Hook Runs Work
+
+- Runs execute through the **`ai_chat`** command using your configured chat model and backend. They are **non-streamed** — while a hook runs you'll see a live "hook run card" (spinner) in the chat panel, and the chat input is temporarily disabled.
+- Hook runs and chat generations are **serialized**: a hook waits in the queue while a chat response is in flight, and chat is paused while a hook runs. This avoids collisions on the shared stream event.
+- A finished run's output is appended to the chat thread as a **"Hook result"** message (showing the hook name, trigger reason, and the agent's output rendered as markdown). Failed runs appear as a **"Hook failed"** error block. These messages stay in the conversation and are sent back to the model as system context on later messages, so you can ask follow-up questions about what a hook produced.
+- **Cron** hooks are checked every ~10 seconds while the app is open and fire **at most once per matching minute**. They do not run when nolock is closed.
+
+### Tips
+
+- Command triggers match **whole leading words**, so scope them deliberately: `git push` matches `git push origin main`, while a hook for `git` alone would fire on every git command.
+- Use `!hook-name` in the chat panel to trigger any hook manually without opening the Hooks panel.
 
 ---
 
@@ -372,6 +435,7 @@ Within the search panel (`Ctrl+F, S`):
 | `Ctrl+A, G` | Manage AI agents |
 | `Ctrl+A, K` | Manage skills |
 | `Ctrl+A, R` | Human feedback (RLHF) |
+| `Ctrl+A, H` | Manage hooks |
 | `Ctrl+A, I` | Open AI settings |
 
 #### Browser (Ctrl+B chord)

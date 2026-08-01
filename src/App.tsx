@@ -15,6 +15,8 @@ import RlhfPanel from "./components/RlhfPanel";
 import EditorSettings from "./components/EditorSettings";
 import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import AgentManager from "./components/AgentManager";
+import HooksPanel from "./components/HooksPanel";
+import { startHookScheduler, subscribeHooks } from "./lib/hooks";
 import StatusBar from "./components/StatusBar";
 import ResizableHandle from "./components/ResizableHandle";
 import ShortcutsScreen from "./components/ShortcutsScreen";
@@ -105,6 +107,9 @@ export default function App() {
   const [showAgentManager, setShowAgentManager] = useState(false);
   const [agentManagerInitialTab, setAgentManagerInitialTab] = useState<"agents" | "skills" | undefined>(undefined);
   const [agentRefreshKey, setAgentRefreshKey] = useState(0);
+
+  // --- Hooks ---
+  const [showHooks, setShowHooks] = useState(false);
 
   // --- Search ---
   const [showSearch, setShowSearch] = useState(false);
@@ -206,6 +211,22 @@ export default function App() {
       localStorage.removeItem("nolock.lastRootPath");
     }
   }, [rootPath]);
+
+  // --- Hooks: in-app cron scheduler (restarts when the root folder changes) ---
+  useEffect(() => {
+    if (!rootPath) return;
+    const stopScheduler = startHookScheduler(rootPath);
+    return stopScheduler;
+  }, [rootPath]);
+
+  // --- Hooks: auto-open the chat panel so hook feedback is visible ---
+  useEffect(() => {
+    return subscribeHooks((event) => {
+      if (event.type === "run-start") {
+        setShowChat(true);
+      }
+    });
+  }, []);
 
   // --- Split editor: auto-cleanup when files are closed externally ---
   useEffect(() => {
@@ -631,6 +652,12 @@ export default function App() {
             setShowAgentManager(true);
             return;
           }
+          if (e.key === "h") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowHooks(true);
+            return;
+          }
           if (e.key === "r") {
             e.preventDefault();
             setChordPrefix(null);
@@ -868,6 +895,7 @@ export default function App() {
         { label: "Tools...", action: () => setShowTools(true), shortcut: "Ctrl+A, T" },
         { label: "Agents...", action: () => { setAgentManagerInitialTab("agents"); setShowAgentManager(true); }, shortcut: "Ctrl+A, G" },
         { label: "Skills...", action: () => { setAgentManagerInitialTab("skills"); setShowAgentManager(true); }, shortcut: "Ctrl+A, K" },
+        { label: "Hooks...", action: () => setShowHooks(true), shortcut: "Ctrl+A, H" },
         { label: "Human Feedback (RLHF)...", action: () => setShowRlhf(true), shortcut: "Ctrl+A, R" },
       ],
     },
@@ -901,7 +929,7 @@ export default function App() {
       {chordPrefix && (
         <div className="chord-hint">
           {chordPrefix === "A" ? (
-            <>Waiting for second key... (press <strong>O</strong> for Chat, <strong>G</strong> for Agents, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF)</>
+            <>Waiting for second key... (press <strong>O</strong> for Chat, <strong>G</strong> for Agents, <strong>H</strong> for Hooks, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF)</>
           ) : chordPrefix === "T" ? (
             <>Waiting for second key... (press <strong>O</strong> for Terminal, <strong>M</strong> for Memory)</>
           ) : chordPrefix === "B" ? (
@@ -1190,6 +1218,7 @@ export default function App() {
       <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />
       <FITMModelPanel visible={showFITMModel} onClose={() => setShowFITMModel(false)} />
       <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} rootPath={rootPath} />
+      <HooksPanel visible={showHooks} onClose={() => setShowHooks(false)} rootPath={rootPath} />
       <RlhfPanel visible={showRlhf} onClose={() => setShowRlhf(false)} />
       <EditorSettings visible={showSettings} onClose={() => setShowSettings(false)} />
 

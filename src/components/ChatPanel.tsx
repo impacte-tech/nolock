@@ -8,6 +8,16 @@ import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
 import {
+  type HookRunState,
+  type ToolCallLog as HookToolCallLog,
+  subscribeHooks,
+  getHookRuns,
+  runHook,
+  setChatBusy,
+  listHookEntriesWithConfig,
+  checkCommandTrigger,
+} from "../lib/hooks";
+import {
   type FeedbackType,
   type KtoEntry,
   type DpoEntry,
@@ -54,6 +64,9 @@ interface Message {
   dpoToolCalls?: { toolCallsA: import("../lib/rlhf").ToolCallLog[]; toolCallsB: import("../lib/rlhf").ToolCallLog[] };
   /** DPO mode: which response was chosen ('A' or 'B'), or null if pending. */
   dpoChoice?: "A" | "B";
+  /** Completed hook run surfaced into the main chat conversation. Shown as a
+   *  distinct "hook result" block and sent to the model as a system message. */
+  hookResult?: { name: string; reason: string; output?: string; error?: string };
 }
 
 export interface FileRef {
@@ -379,6 +392,79 @@ export function ThinkingIndicator({ text }: { text: string }) {
   );
 }
 
+/** Short human-readable reason text shown on a hook run card. */
+function hookReasonLabel(run: HookRunState): string {
+  switch (run.reason.kind) {
+    case "command":
+      return `Triggered by command: ${run.reason.command}`;
+    case "cron":
+      return `Scheduled trigger (${run.reason.schedule})`;
+    case "manual":
+      return "Triggered manually";
+  }
+}
+
+/**
+ * Hook run card — shows hook execution feedback in the chat. A spinner header
+ * while the hook is queued/running, then the final agent output once done.
+ */
+export function HookRunCard({ run }: { run: HookRunState }) {
+  const [expanded, setExpanded] = useState(run.status === "done" || run.status === "error");
+  const active = run.status === "queued" || run.status === "running";
+
+  return (
+    <div className={`hook-run-card ${run.status}`}>
+      <div className="hook-run-card-header" onClick={() => setExpanded(!expanded)}>
+        <span className="hook-run-card-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        {active && <span className="hook-run-card-spinner" />}
+        <span className="hook-run-card-name">Hook: {run.hookName}</span>
+        <span className="hook-run-card-status">
+          {run.status === "queued" ? "Queued..." : run.status === "running" ? "Running..." : run.status === "done" ? "Done" : "Error"}
+        </span>
+      </div>
+      <div className="hook-run-card-reason">{hookReasonLabel(run)}</div>
+      {expanded && run.status !== "queued" && (
+        <div className="hook-run-card-body">
+          {run.status === "error" ? (
+            <div className="hook-run-card-error">Error: {run.error}</div>
+          ) : run.toolCalls.length > 0 ? (
+            <ToolCallBlock calls={run.toolCalls as unknown as ToolCallLog[]} />
+          ) : null}
+          {run.output ? (
+            <MarkdownContent text={run.output} />
+          ) : (
+            <div className="hook-run-card-empty">(no output)</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Extract CLI commands from a finished agent run's tool calls so command-triggered
+ * hooks can fire when the AI runs a command (e.g. `git commit` via bash_sandbox).
+ * Custom tools are reported by name — a hook can match on the tool name.
+ */
+function extractCommandsFromToolCalls(toolCalls: HookToolCallLog[] | undefined): string[] {
+  const commands: string[] = [];
+  for (const tc of toolCalls || []) {
+    if (tc.name === "bash_sandbox") {
+      try {
+        const args = JSON.parse(tc.arguments);
+        if (typeof args.command === "string" && args.command.trim()) {
+          commands.push(args.command.trim());
+        }
+      } catch {
+        // Not JSON — ignore.
+      }
+    } else if (tc.name.trim()) {
+      commands.push(tc.name.trim());
+    }
+  }
+  return commands;
+}
+
 export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, onOpenAgentManager }: Props) {
   // Wire up global ref so MarkdownContent can open URLs
   useEffect(() => {
@@ -397,6 +483,63 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   /** Live thinking text from thinking-capable models — shown transiently, never persisted. */
   const [thinkingText, setThinkingText] = useState("");
   const showThinking = localStorage.getItem("nolock.showThinking") === "true";
+
+  // ---- Hooks: run cards + concurrency ----
+  const [hookRuns, setHookRuns] = useState<HookRunState[]>(() => getHookRuns());
+  const hookBusy = hookRuns.some((r) => r.status === "queued" || r.status === "running");
+
+  // Once a hook finishes, its output becomes a visible message in the chat
+  // thread — and, from there, part of the model context on later turns.
+  const appendedHookRunIdsRef = useRef<Set<string>>(new Set());
+
+  const appendHookResultMessage = useCallback((run: HookRunState) => {
+    if (appendedHookRunIdsRef.current.has(run.id)) return;
+    if (run.status !== "done" && run.status !== "error") return;
+    appendedHookRunIdsRef.current.add(run.id);
+    setMessages((prev) => {
+      if (run.status === "error") {
+        return [
+          ...prev,
+          {
+            role: "user",
+            content: "",
+            // `run.error` is String(Error) and already includes an "Error: "
+            // prefix — strip it so the block/system context don't double it.
+            hookResult: { name: run.hookName, reason: hookReasonLabel(run), error: (run.error || "").replace(/^Error:\s*/, "") },
+          },
+        ];
+      }
+      if (!run.output.trim()) return prev;
+      return [
+        ...prev,
+        {
+          role: "user",
+          content: "",
+          hookResult: { name: run.hookName, reason: hookReasonLabel(run), output: run.output },
+        },
+      ];
+    });
+  }, []);
+
+  useEffect(() => {
+    // Replay runs that already finished before this panel mounted.
+    for (const run of getHookRuns()) {
+      appendHookResultMessage(run);
+    }
+    return subscribeHooks((event) => {
+      const run = event.run;
+      setHookRuns((prev) => {
+        const idx = prev.findIndex((r) => r.id === run.id);
+        if (idx === -1) return [...prev, run];
+        const next = [...prev];
+        next[idx] = run;
+        return next;
+      });
+      if (event.type === "run-done" || event.type === "run-error") {
+        appendHookResultMessage(run);
+      }
+    });
+  }, [appendHookResultMessage]);
 
   // ---- Mention state (@ for files/agents, / for skills) ----
   const [fileRefs, setFileRefs] = useState<FileRef[]>([]);
@@ -733,7 +876,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   /** Continue the last assistant response — appends new tokens to the existing message. */
   const continueResponse = useCallback(async () => {
-    if (loading || sendingRef.current) return;
+    if (loading || sendingRef.current || hookBusy) return;
     // Need at least one assistant message to continue
     const lastMsg = messages[messages.length - 1];
     if (!lastMsg || lastMsg.role !== "assistant") return;
@@ -741,6 +884,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     sendingRef.current = true;
     setLoading(true);
     setThinkingText("");
+    setChatBusy(true);
 
     let unlisten: (() => void) | null = null;
     try {
@@ -755,9 +899,21 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
 
-      // Build API messages from existing conversation history
+      // Build API messages from existing conversation history — completed hook
+      // runs appear as system context so the model can reference what hooks
+      // produced earlier in the conversation.
       const apiMessages = [
-        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        ...messages.map((m) => {
+          if (m.hookResult) {
+            return {
+              role: "system" as const,
+              content: m.hookResult.error
+                ? `[Hook run: ${m.hookResult.name}] failed.\nTrigger: ${m.hookResult.reason}\n\nError: ${m.hookResult.error}`
+                : `[Hook run: ${m.hookResult.name}]\nTrigger: ${m.hookResult.reason}\n\n${m.hookResult.output ?? ""}`,
+            };
+          }
+          return { role: m.role, content: m.content };
+        }),
         // Append a system instruction to continue
         { role: "system" as const, content: "Continue your previous response exactly where you left off. Do not repeat any content. Do not add any preamble or explanation — just continue the text." },
       ];
@@ -835,14 +991,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       sendingRef.current = false;
       setLoading(false);
       setThinkingText("");
+      setChatBusy(false);
     }
-  }, [loading, messages, rootPath, showThinking]);
+  }, [loading, messages, rootPath, showThinking, hookBusy]);
 
   /** Find the question (user message) that precedes an assistant message at a given index. */
   const findQuestionForAssistant = useCallback((assistantIndex: number): string => {
     // Walk backwards from the assistant message to find the preceding user message
     for (let i = assistantIndex - 1; i >= 0; i--) {
-      if (messages[i].role === "user") {
+      if (messages[i].role === "user" && !messages[i].hookResult) {
         // Prefer displayContent (what the user saw) over full API content
         return messages[i].displayContent || messages[i].content;
       }
@@ -1015,7 +1172,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
-    if (!trimmed || loading || sendingRef.current) return;
+    if (!trimmed || loading || sendingRef.current || hookBusy) return;
 
     // Prevent sending while a DPO response choice is pending
     if (messages.some((m) => m.dpoResponses !== undefined)) return;
@@ -1027,6 +1184,36 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       setInput("");
       clearAllRefs();
       setMessages((prev) => [...prev, { role: "assistant", content: "_Context cleared._ All file references have been removed." }]);
+      sendingRef.current = false;
+      return;
+    }
+
+    // ---- !hook-name manual trigger ----
+    const bangMatch = trimmed.match(/^!([\w.-]+)$/);
+    if (bangMatch) {
+      const hookName = bangMatch[1];
+      setInput("");
+      if (!rootPath) {
+        setMessages((prev) => [...prev, { role: "assistant", content: "Open a folder first to run hooks." }]);
+        sendingRef.current = false;
+        return;
+      }
+      try {
+        const hooks = await listHookEntriesWithConfig(rootPath);
+        const match = hooks.find((h) => h.config.name === hookName);
+        if (match) {
+          // The run continues in the background; its card appears below.
+          void runHook(rootPath, match.config, { kind: "manual" });
+          setMessages((prev) => [...prev, { role: "assistant", content: `_Running hook \`${hookName}\`..._` }]);
+        } else {
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `No hook named "${hookName}". Create one in Hooks (Ctrl+A, H).` },
+          ]);
+        }
+      } catch (e) {
+        setMessages((prev) => [...prev, { role: "assistant", content: `Error running hook: ${e}` }]);
+      }
       sendingRef.current = false;
       return;
     }
@@ -1154,6 +1341,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setSkillRefs([]); // Clear pending skill refs after sending
     setToolRefs([]); // Clear pending tool refs after sending
     setLoading(true);
+    setChatBusy(true);
+
+    // Fire command-triggered hooks for any commands the agent ran via tools.
+    const scanAgentCommands = (calls: HookToolCallLog[] | undefined) => {
+      if (!rootPath) return;
+      for (const cmd of extractCommandsFromToolCalls(calls)) {
+        void checkCommandTrigger(rootPath, cmd, "agent");
+      }
+    };
 
     let unlisten: (() => void) | null = null;
     try {
@@ -1196,10 +1392,20 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         dpoTriggered = messageCountRef.current % dpoSettings.dpoInterval === 0;
       }
 
-      // Build common API messages — include tool calls from previous assistant messages
+      // Build common API messages — completed hook runs become system context,
+      // then any agent system prompts, then the conversation history (with tool
+      // calls from previous assistant messages).
       const apiMessages = [
         ...agentSystemMessages,
-        ...allMessages.flatMap((m) => {
+        ...allMessages.flatMap((m): { role: "user" | "assistant" | "system"; content: string }[] => {
+          if (m.hookResult) {
+            return [{
+              role: "system" as const,
+              content: m.hookResult.error
+                ? `[Hook run: ${m.hookResult.name}] failed.\nTrigger: ${m.hookResult.reason}\n\nError: ${m.hookResult.error}`
+                : `[Hook run: ${m.hookResult.name}]\nTrigger: ${m.hookResult.reason}\n\n${m.hookResult.output ?? ""}`,
+            }];
+          }
           if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
             // Include tool calls and results as part of the assistant message
             const toolText = m.toolCalls
@@ -1274,6 +1480,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             dpoToolCalls: { toolCallsA, toolCallsB },
           },
         ]);
+        scanAgentCommands(toolCallsA as unknown as HookToolCallLog[]);
+        scanAgentCommands(toolCallsB as unknown as HookToolCallLog[]);
       } else {
         // ---- Normal mode: stream a single response ----
         unlisten = await listen<{ token: string; thinking: boolean }>("stream-token", (event) => {
@@ -1331,6 +1539,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           }
           return msgs;
         });
+        scanAgentCommands(result.tool_calls as unknown as HookToolCallLog[]);
       }
     } catch (e: any) {
       // On error, replace the placeholder/partial message with the error.
@@ -1358,8 +1567,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       sendingRef.current = false;
       setLoading(false);
       setThinkingText("");
+      setChatBusy(false);
     }
-  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking]);
+  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy]);
 
   return (
     <div className="chat-panel" style={style}>
@@ -1387,17 +1597,36 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             Ask anything about your code...<br />
             Use <strong>@agent-name</strong> to invoke an AI agent.<br />
             Use <strong>/skill-name</strong> to run a skill command.<br />
-            Use <strong>#tool-name</strong> to force the AI to use a specific tool.
+            Use <strong>#tool-name</strong> to force the AI to use a specific tool.<br />
+            Use <strong>!hook-name</strong> to run a hook.
 
           </div>
         )}
         {messages.map((m, i) => (
           <div key={i} className={`chat-msg ${m.role}`}>
-            <div className="role">{m.role}</div>
-            {m.toolCalls && m.toolCalls.length > 0 && (
-              <ToolCallBlock calls={m.toolCalls} />
-            )}
-            {m.role === "assistant" ? (
+            {m.hookResult ? (
+              <div className={`hook-result-block${m.hookResult.error ? " error" : ""}`}>
+                <div className="hook-result-header">
+                  <span className="hook-result-name">
+                    {m.hookResult.error ? `Hook failed: ${m.hookResult.name}` : `Hook result: ${m.hookResult.name}`}
+                  </span>
+                  {m.hookResult.reason && (
+                    <span className="hook-result-reason">{m.hookResult.reason}</span>
+                  )}
+                </div>
+                {m.hookResult.error ? (
+                  <div className="hook-result-error">Error: {m.hookResult.error}</div>
+                ) : m.hookResult.output ? (
+                  <MarkdownContent text={m.hookResult.output} />
+                ) : null}
+              </div>
+            ) : (
+              <>
+                <div className="role">{m.role}</div>
+                {m.toolCalls && m.toolCalls.length > 0 && (
+                  <ToolCallBlock calls={m.toolCalls} />
+                )}
+                {m.role === "assistant" ? (
               <div className="assistant-content">
                 {/* Thinking indicator — shown transiently while thinking tokens stream in */}
                 {i === messages.length - 1 && thinkingText && showThinking && (
@@ -1532,8 +1761,21 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 )}
               </>
             )}
+            </>
+          )}
+        </div>
+      ))}
+        {/* Hook run cards — live feedback for hooks still queued/running.
+            Completed runs are surfaced as "Hook result" messages in the thread. */}
+        {hookRuns.some((r) => r.status === "queued" || r.status === "running") && (
+          <div className="hook-runs">
+            {hookRuns
+              .filter((r) => r.status === "queued" || r.status === "running")
+              .map((run) => (
+                <HookRunCard key={run.id} run={run} />
+              ))}
           </div>
-        ))}
+        )}
         <div ref={messagesEndRef} />
       </div>
       <div className="chat-input-area">
@@ -1730,11 +1972,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             ref={textareaRef}
             className="chat-input"
             rows={2}
-            placeholder={dpoPending ? "Please choose a response above to continue..." : "Type @ to reference a file or agent, / to run a skill, # to use a tool... Ask the AI..."}
+            placeholder={dpoPending ? "Please choose a response above to continue..." : hookBusy ? "Hook running..." : "Type @ to reference a file or agent, / to run a skill, # to use a tool... Ask the AI..."}
             value={input}
             onChange={handleInputChange}
             onKeyDown={(e) => {
-              if (dpoPending) {
+              if (dpoPending || hookBusy) {
                 e.preventDefault();
                 return;
               }
@@ -1793,11 +2035,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 sendMessage();
               }
             }}
-            disabled={dpoPending}
+            disabled={dpoPending || hookBusy}
           />
         </div>
-        <button className="chat-send" onClick={() => sendMessage()} disabled={loading || dpoPending}>
-          {loading ? "Thinking..." : dpoPending ? "Choose response..." : "Send"}
+        <button className="chat-send" onClick={() => sendMessage()} disabled={loading || dpoPending || hookBusy}>
+          {loading ? "Thinking..." : dpoPending ? "Choose response..." : hookBusy ? "Hook running..." : "Send"}
         </button>
       </div>
     </div>
