@@ -1,17 +1,12 @@
 import { useState, useEffect } from "react";
 import ModelSelector from "./ModelSelector";
+import Select from "./Select";
+import { BACKENDS, resolveBackendUrl, getFitmBackend } from "../lib/backends";
 
 interface Props {
   visible: boolean;
   onClose: () => void;
 }
-
-const BACKEND_DEFAULTS: Record<string, { url: string }> = {
-  ollama: { url: "http://localhost:11434" },
-  llamacpp: { url: "http://localhost:8080" },
-  openrouter: { url: "https://openrouter.ai/api/v1" },
-  opencode: { url: "https://opencode.ai/zen/v1" },
-};
 
 export default function FITMModelPanel({ visible, onClose }: Props) {
   const [completionModel, setCompletionModel] = useState("");
@@ -35,12 +30,19 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.2);
     const savedTokens = localStorage.getItem("nolock.fitmMaxTokens");
     setMaxTokens(savedTokens ? parseInt(savedTokens, 10) : 64);
-    setBackend(localStorage.getItem("nolock.backend") || "ollama");
-    const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
-    setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
+    // FITM uses its own provider (falls back to the global one).
+    const fitmBackend = getFitmBackend();
+    setBackend(fitmBackend);
+    setApiKey(localStorage.getItem(`nolock.apiKey.${fitmBackend}`) || "");
   }, [visible]);
 
+  const selectBackend = (value: string) => {
+    setBackend(value);
+    setApiKey(localStorage.getItem(`nolock.apiKey.${value}`) || "");
+  };
+
   const save = () => {
+    localStorage.setItem("nolock.fitmBackend", backend);
     localStorage.setItem("nolock.completionModel", completionModel);
     localStorage.setItem("nolock.model", completionModel); // legacy sync
     localStorage.setItem("nolock.fitmSystemPrompt", systemPrompt);
@@ -59,9 +61,16 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
           <button onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
+          <label className="field-label">Provider</label>
+          <Select
+            value={backend}
+            onChange={selectBackend}
+            options={BACKENDS.map((b) => ({ value: b.value, label: b.label }))}
+          />
+
           <ModelSelector
             provider={backend}
-            url={localStorage.getItem("nolock.url") || BACKEND_DEFAULTS[backend]?.url || "http://localhost:11434"}
+            url={resolveBackendUrl(backend)}
             apiKey={apiKey}
             value={completionModel}
             onChange={setCompletionModel}

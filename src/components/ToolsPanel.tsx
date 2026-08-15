@@ -59,7 +59,7 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
 
   // Determine if current backend supports tools
   const backend = (typeof window !== "undefined" ? localStorage.getItem("nolock.backend") : null) || "ollama";
-  const supportsTools = backend === "ollama" || backend === "openrouter";
+  const supportsTools = backend === "ollama" || backend === "openrouter" || backend === "digitalocean";
 
   const loadCustomTools = useCallback(async () => {
     if (!rootPath) return;
