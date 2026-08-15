@@ -17,7 +17,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 // ---- @tauri-apps/api/event -----------------------------------------------
-export const mockListen = vi.fn(() => Promise.resolve(vi.fn()));
+export const mockListen = vi.fn(
+  (_event: string, _handler: (...args: any[]) => void) => Promise.resolve(vi.fn()),
+);
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: any[]) => (mockListen as any)(...args),

@@ -54,3 +54,12 @@ export function formatModelLabel(backend: string, model: string): string {
   }
   return model;
 }
+
+/**
+ * Whether the DigitalOcean Inference Router should be pinned to a single model
+ * across the agent tool loop (the `X-Model-Affinity` header). Enabled by
+ * default; the user can turn it off in the Model Providers panel.
+ */
+export function getDigitalOceanModelAffinity(): boolean {
+  return localStorage.getItem("nolock.digitaloceanModelAffinity") !== "false";
+}

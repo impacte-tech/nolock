@@ -15,7 +15,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { parseCron, cronMatches } from "./cron";
 import { getSecret } from "./secrets";
-import { getChatBackend, resolveBackendUrl } from "./backends";
+import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity } from "./backends";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the Rust serde structures in src-tauri/src/hooks.rs)
@@ -408,6 +408,7 @@ async function executeHookRun(
     systemPrompt: undefined,
     rootPath: rootPath || undefined,
     maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
+    modelAffinity: getDigitalOceanModelAffinity(),
   };
 
   return invoke<{ content: string; tool_calls: ToolCallLog[] }>("ai_chat", { req });

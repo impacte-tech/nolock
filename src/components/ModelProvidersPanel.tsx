@@ -24,6 +24,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
   const [loadingRouters, setLoadingRouters] = useState(false);
   const [routerError, setRouterError] = useState<string | null>(null);
   const [routersLoaded, setRoutersLoaded] = useState(false);
+  const [modelAffinity, setModelAffinity] = useState(true);
 
   useEffect(() => {
     if (!visible) return;
@@ -48,6 +49,8 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     setRouters([]);
     setRouterError(null);
     setRoutersLoaded(false);
+    // Model affinity (session pinning) is enabled by default.
+    setModelAffinity(localStorage.getItem("nolock.digitaloceanModelAffinity") !== "false");
 
     // Upgrade from OS keychain if available
     (async () => {
@@ -110,6 +113,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.url", url);
     setSecret(`apiKey.${backend}`, apiKey);
     localStorage.setItem("nolock.routerName", routerName);
+    localStorage.setItem("nolock.digitaloceanModelAffinity", String(modelAffinity));
     onClose();
   };
 
@@ -209,6 +213,23 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
                   <code>genai:read</code> scope.
                 </div>
               )}
+
+              <label style={{ marginTop: 10, display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: 12, color: "var(--text-secondary)" }}>
+                <input
+                  type="checkbox"
+                  checked={modelAffinity}
+                  onChange={(e) => setModelAffinity(e.target.checked)}
+                  style={{ accentColor: "var(--accent)", marginTop: 2, flexShrink: 0 }}
+                />
+                <span>
+                  Pin model across agent tool calls (Model Affinity)
+                  <span style={{ display: "block", fontSize: 10, color: "var(--text-muted)" }}>
+                    Keeps the Inference Router on a single model during multi-step tool usage,
+                    preventing mid-session model switches that can break tool-call formats.
+                    Recommended for agentic workflows.
+                  </span>
+                </span>
+              </label>
 
               <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4 }}>
                 Selecting a router sets it as your chat and completion model (e.g.{" "}

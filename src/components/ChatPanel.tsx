@@ -7,7 +7,7 @@ import SkillAutocomplete from "./SkillAutocomplete";
 import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
-import { getChatBackend, resolveBackendUrl } from "../lib/backends";
+import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity } from "../lib/backends";
 import {
   type HookRunState,
   type ToolCallLog as HookToolCallLog,
@@ -937,6 +937,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         systemPrompt: chatSystemPrompt || undefined,
         rootPath: rootPath || undefined,
         maxIterations: 1,
+        modelAffinity: getDigitalOceanModelAffinity(),
       };
 
       // Stream tokens — they get appended to the existing last assistant message
@@ -1437,6 +1438,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         systemPrompt: chatSystemPrompt || undefined,
         rootPath: rootPath || undefined,
         maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
+        modelAffinity: getDigitalOceanModelAffinity(),
       };
 
       if (dpoTriggered) {
