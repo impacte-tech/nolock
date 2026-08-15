@@ -7,6 +7,7 @@ import SkillAutocomplete from "./SkillAutocomplete";
 import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
+import { getChatBackend, resolveBackendUrl } from "../lib/backends";
 import {
   type HookRunState,
   type ToolCallLog as HookToolCallLog,
@@ -774,8 +775,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   // Fetch the model's actual context length from the backend on mount
   useEffect(() => {
     const fetchContextLength = async () => {
-      const backend = localStorage.getItem("nolock.backend") || "ollama";
-      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const backend = getChatBackend();
+      const url = resolveBackendUrl(backend);
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
       if (!chatModel) return;
 
@@ -888,8 +889,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     let unlisten: (() => void) | null = null;
     try {
-      const backend = localStorage.getItem("nolock.backend") || "ollama";
-      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const backend = getChatBackend();
+      const url = resolveBackendUrl(backend);
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
       if (!chatModel) return;
 
@@ -1353,8 +1354,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     let unlisten: (() => void) | null = null;
     try {
-      const backend = localStorage.getItem("nolock.backend") || "ollama";
-      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const backend = getChatBackend();
+      const url = resolveBackendUrl(backend);
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
 
       if (!chatModel) {

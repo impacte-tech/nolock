@@ -57,7 +57,9 @@ export default function ModelSelector({
   const browseRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
 
-  // Whether model listing + filtering is supported for this provider
+  // Whether model listing + filtering is supported for this provider.
+  // DigitalOcean is excluded from listing — its "model" is an inference router
+  // (selected separately), not a conventional model list.
   const supportsListing = provider === "openrouter" || provider === "opencode" || provider === "ollama" || provider === "llamacpp";
   // Whether this provider supports pricing/privacy filters (only remote providers)
   const supportsFilters = provider === "openrouter" || provider === "opencode";

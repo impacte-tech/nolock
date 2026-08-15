@@ -3,6 +3,7 @@ import * as monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getSecret } from "../lib/secrets";
+import { getFitmBackend, resolveBackendUrl } from "../lib/backends";
 import { buildAiPrompt, processCompletionResponse } from "./fitm";
 
 // Configure Monaco workers
@@ -162,8 +163,8 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
     const requestId = ++this._requestCounter;
 
     try {
-      const backend = localStorage.getItem("nolock.backend") || "ollama";
-      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const backend = getFitmBackend();
+      const url = resolveBackendUrl(backend);
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
       const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
 

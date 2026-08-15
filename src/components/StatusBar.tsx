@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getChatBackend, getFitmBackend, formatModelLabel } from "../lib/backends";
 
 interface Props {
   showChat: boolean;
@@ -20,13 +21,14 @@ export default function StatusBar({ showChat, onToggleChat }: Props) {
     const check = async () => {
       const b = localStorage.getItem("nolock.backend") || "ollama";
       const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      const chatBackend = getChatBackend();
+      const fitmBackend = getFitmBackend();
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
 
       try {
         let ok = false;
         // Health-check by poking the backend with a trivial request using the configured model
-        const testModel = completionModel || chatModel || "test";
         if (b === "ollama") {
           // Just check if ollama is reachable
           const resp = await fetch(`${url}/api/tags`);
@@ -35,11 +37,21 @@ export default function StatusBar({ showChat, onToggleChat }: Props) {
           const resp = await fetch(`${url}/health`);
           ok = resp.ok;
         } else {
-          ok = true; // openrouter / opencode assumed OK
+          ok = true; // openrouter / opencode / digitalocean assumed OK
         }
-        setBackend({ ok, name: b, completionModel, chatModel });
+        setBackend({
+          ok,
+          name: b,
+          completionModel: formatModelLabel(fitmBackend, completionModel),
+          chatModel: formatModelLabel(chatBackend, chatModel),
+        });
       } catch {
-        setBackend({ ok: false, name: b, completionModel, chatModel });
+        setBackend({
+          ok: false,
+          name: b,
+          completionModel: formatModelLabel(fitmBackend, completionModel),
+          chatModel: formatModelLabel(chatBackend, chatModel),
+        });
       }
     };
     check();

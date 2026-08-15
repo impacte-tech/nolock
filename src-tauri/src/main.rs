@@ -1354,8 +1354,96 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                 }
             }).collect())
         }
+        "digitalocean" => {
+            // DigitalOcean Inference Router — return empty list, routers are fetched separately
+            // Models are associated with routers, not listed directly
+            Ok(vec![])
+        }
         _ => Ok(vec![]),
     }
+}
+
+// ---------------------------------------------------------------------------
+// DigitalOcean Inference Router commands
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct FetchRoutersRequest {
+    api_key: String,
+}
+
+#[derive(serde::Serialize)]
+struct RouterItem {
+    /// Router name — used to build the `router:{name}` model reference.
+    id: String,
+    /// Display name.
+    name: String,
+    /// Router description.
+    description: String,
+}
+
+#[tauri::command]
+async fn fetch_digitalocean_routers(req: FetchRoutersRequest) -> Result<Vec<RouterItem>, String> {
+    let client = reqwest::Client::new();
+    // DigitalOcean Inference Router management API — lists the routers in the
+    // authenticated account. Requires a personal access token (dop_v1_...) with
+    // the `genai:read` scope.
+    let endpoint = "https://api.digitalocean.com/v2/gen-ai/models/routers?per_page=200";
+
+    eprintln!("[nolock] fetch_digitalocean_routers GET {}", endpoint);
+    let resp = client
+        .get(endpoint)
+        .header("Authorization", format!("Bearer {}", req.api_key))
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("DigitalOcean routers request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "DigitalOcean API error ({}): {}",
+            status,
+            &text[..text.len().min(300)]
+        ));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    // The list endpoint returns the routers under the `model_routers` key
+    // (per the OpenAPI spec `apiListModelRoutersOutput`). Fall back to other
+    // plausible keys in case the shape changes between API versions.
+    let routers = body["model_routers"]
+        .as_array()
+        .or_else(|| body["routers"].as_array())
+        .or_else(|| body["data"].as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(routers
+        .iter()
+        .filter_map(|r| {
+            // `name` is the router reference used in `router:{name}`. Fall back
+            // to `uuid`/`id` (the unique identifier) in case `name` is absent.
+            let name = r["name"]
+                .as_str()
+                .or_else(|| r["uuid"].as_str())
+                .or_else(|| r["id"].as_str())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let description = r["description"].as_str().unwrap_or("").to_string();
+            Some(RouterItem {
+                id: name.clone(),
+                name,
+                description,
+            })
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -3293,6 +3381,77 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 Ok(data["response"].as_str().unwrap_or("").to_string())
             }
         }
+        "digitalocean" => {
+            let api_key = req.api_key.unwrap_or_default();
+
+            // Build a structured prompt that includes both prefix and suffix context.
+            // DigitalOcean Inference Router uses the chat completions API which doesn't natively support
+            // suffix/FITM, so we encode both sides of the cursor in the message content.
+            let user_content = if let Some(ref suffix) = req.suffix {
+                if !suffix.is_empty() {
+                    format!(
+                        "Complete the code at the cursor position marked by <CURSOR>.\n\n\
+                         Before cursor:\n```\n{}\n```\n\n\
+                         After cursor:\n```\n{}\n```\n\n\
+                         Output ONLY the code that should replace <CURSOR>. No explanations, \
+                         no markdown formatting, no conversational text.",
+                        req.prompt, suffix
+                    )
+                } else {
+                    format!(
+                        "Complete the following code at the cursor. Output ONLY the code that \
+                         belongs at the cursor. No explanations, no markdown, no conversational text.\n\n```\n{}\n```",
+                        req.prompt
+                    )
+                }
+            } else {
+                format!(
+                    "Complete the following code at the cursor. Output ONLY the code that \
+                     belongs at the cursor. No explanations, no markdown, no conversational text.\n\n```\n{}\n```",
+                    req.prompt
+                )
+            };
+
+            let body = serde_json::json!({
+                "model": req.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    { "role": "user", "content": user_content }
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"]
+            });
+            // DigitalOcean serverless inference endpoint — a fixed host (like
+            // OpenRouter's). We ignore `req.url` here because the inference API
+            // lives at `inference.do-ai.run`, not `api.digitalocean.com`. The
+            // model field carries either a model id or "router:{router_name}".
+            let full_url = "https://inference.do-ai.run/v1/chat/completions".to_string();
+            eprintln!("[nolock] digitalocean POST {} model={}", full_url, req.model);
+            let resp = client
+                .post(&full_url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await
+                .map_err(|e| {
+                    eprintln!("[nolock] digitalocean error: {}", e);
+                    e.to_string()
+                })?;
+            let status = resp.status();
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            eprintln!("[nolock] digitalocean status={} body={}", status, &text[..text.len().min(200)]);
+            let data: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
+            Ok(data["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string())
+        }
         _ => Err(format!("Unknown backend: {}", req.backend)),
     }
 }
@@ -3868,6 +4027,131 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 })
             }
         }
+        "digitalocean" => {
+            let api_key = req.api_key.clone().unwrap_or_default();
+
+            let mut do_msgs: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+                .collect();
+
+            if has_tools {
+                let tool_names: Vec<&str> = tools
+                    .iter()
+                    .filter_map(|t| t["function"]["name"].as_str())
+                    .collect();
+                let tool_list = tool_names.join(", ");
+                do_msgs.insert(0, serde_json::json!({
+                    "role": "system",
+                    "content": format!(
+                        "You have access to the following tools: {}. \
+                         Use them when the user's request requires looking up external information. \
+                         You may call multiple tools if needed.",
+                        tool_list
+                    )
+                }));
+            }
+
+            let mut body = serde_json::json!({
+                "model": req.model,
+                "messages": do_msgs,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stream": true
+            });
+            if has_tools {
+                body["tools"] = serde_json::json!(tools);
+            }
+
+            // DigitalOcean serverless inference endpoint — a fixed host (like
+            // OpenRouter's). We ignore `req.url` because the inference API lives
+            // at `inference.do-ai.run`, not `api.digitalocean.com`. The model
+            // field carries either a model id or "router:{router_name}".
+            let full_url = "https://inference.do-ai.run/v1/chat/completions".to_string();
+            eprintln!("[nolock] digitalocean POST {} (streaming)", full_url);
+            let mut resp = client
+                .post(&full_url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(60))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.map_err(|e| e.to_string())?;
+                eprintln!("[nolock] digitalocean chat status={} body={}", status, &text[..text.len().min(200)]);
+                let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"].as_str().map(String::from))
+                    .or_else(|| {
+                        serde_json::from_str::<serde_json::Value>(&text)
+                            .ok()
+                            .and_then(|v| v["message"].as_str().map(String::from))
+                    })
+                    .unwrap_or_else(|| text.clone());
+                return Err(format!("DigitalOcean API error ({}): {}", status, error_detail));
+            }
+
+            // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
+            let mut full_content = String::new();
+            let mut buf = String::new();
+            loop {
+                match resp.chunk().await.map_err(|e| e.to_string())? {
+                    None => break,
+                    Some(chunk) => {
+                        let s = String::from_utf8_lossy(&chunk);
+                        buf.push_str(&s);
+                        while let Some(pos) = buf.find("\n\n") {
+                            let event = buf[..pos].to_string();
+                            buf = buf[pos + 2..].to_string();
+                            for line in event.lines() {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    let data = data.trim();
+                                    if data == "[DONE]" { continue; }
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                            if !content.is_empty() {
+                                                full_content.push_str(content);
+                                                app_handle.emit("stream-token", StreamPayload {
+                                                    token: content.to_string(),
+                                                    thinking: false,
+                                                }).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Drain trailing buffer (last chunk may not end with '\n\n')
+            if !buf.trim().is_empty() {
+                for line in buf.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data == "[DONE]" { continue; }
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                if !content.is_empty() {
+                                    full_content.push_str(content);
+                                    app_handle.emit("stream-token", StreamPayload {
+                                        token: content.to_string(),
+                                        thinking: false,
+                                    }).ok();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(ChatResult {
+                content: full_content,
+                tool_calls: vec![],
+            })
+        }
         _ => Err(format!("Unknown backend: {}", req.backend)),
     }
 }
@@ -3927,6 +4211,7 @@ pub fn run() {
             get_rlhf_dir,
             get_model_info,
             fetch_models,
+            fetch_digitalocean_routers,
             ai_complete,
             ai_chat,
             pty_spawn,

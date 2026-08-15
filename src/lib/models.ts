@@ -57,6 +57,8 @@ export async function fetchModels(
   apiKey?: string,
   filters?: ModelFilters,
 ): Promise<ModelInfo[]> {
+  // DigitalOcean is intentionally excluded — its "models" are inference routers
+  // selected via a dedicated dropdown, not a conventional model list.
   const supportedProviders = ["openrouter", "opencode", "ollama", "llamacpp"];
   if (!supportedProviders.includes(provider)) {
     return [];

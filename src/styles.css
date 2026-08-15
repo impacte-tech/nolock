@@ -2348,6 +2348,96 @@ html, body, #root {
   border-color: var(--accent);
 }
 
+select.field-input {
+  cursor: pointer;
+}
+
+/* ===== Custom Select =====
+   Replaces the native <select>, whose popup is rendered by the GTK theme on
+   Linux (WebKitGTK) and ignores CSS `option` styling. Rendering the menu in
+   plain DOM lets us fully theme it against the dark theme. */
+.field-select {
+  position: relative;
+  width: 100%;
+}
+
+.field-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 7px 10px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+  text-align: left;
+}
+
+.field-select-trigger:hover,
+.field-select-trigger:focus {
+  border-color: var(--accent);
+}
+
+.field-select-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field-select-placeholder {
+  color: var(--text-muted);
+}
+
+.field-select-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+}
+
+.field-select-chevron.open {
+  transform: rotate(180deg);
+}
+
+.field-select-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  padding: 4px 0;
+}
+
+.field-select-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  transition: background 0.1s;
+}
+
+.field-select-item:hover {
+  background: var(--hover);
+  color: var(--text-primary);
+}
+
+.field-select-item.selected {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  border-left: 3px solid var(--accent);
+}
+
 .backend-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

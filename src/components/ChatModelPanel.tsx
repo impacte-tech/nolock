@@ -1,17 +1,12 @@
 import { useState, useEffect } from "react";
 import ModelSelector from "./ModelSelector";
+import Select from "./Select";
+import { BACKENDS, resolveBackendUrl, getChatBackend } from "../lib/backends";
 
 interface Props {
   visible: boolean;
   onClose: () => void;
 }
-
-const BACKEND_DEFAULTS: Record<string, { url: string }> = {
-  ollama: { url: "http://localhost:11434" },
-  llamacpp: { url: "http://localhost:8080" },
-  openrouter: { url: "https://openrouter.ai/api/v1" },
-  opencode: { url: "https://opencode.ai/zen/v1" },
-};
 
 export default function ChatModelPanel({ visible, onClose }: Props) {
   const [chatModel, setChatModel] = useState("");
@@ -31,13 +26,20 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.7);
     const savedTokens = localStorage.getItem("nolock.chatMaxTokens");
     setMaxTokens(savedTokens ? parseInt(savedTokens, 10) : 8192);
-    setBackend(localStorage.getItem("nolock.backend") || "ollama");
-    const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
-    setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
+    // Chat uses its own provider (falls back to the global one).
+    const chatBackend = getChatBackend();
+    setBackend(chatBackend);
+    setApiKey(localStorage.getItem(`nolock.apiKey.${chatBackend}`) || "");
     setShowThinking(localStorage.getItem("nolock.showThinking") === "true");
   }, [visible]);
 
+  const selectBackend = (value: string) => {
+    setBackend(value);
+    setApiKey(localStorage.getItem(`nolock.apiKey.${value}`) || "");
+  };
+
   const save = () => {
+    localStorage.setItem("nolock.chatBackend", backend);
     localStorage.setItem("nolock.chatModel", chatModel);
     localStorage.setItem("nolock.chatSystemPrompt", systemPrompt);
     localStorage.setItem("nolock.chatTemperature", String(temperature));
@@ -56,9 +58,16 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           <button onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
+          <label className="field-label">Provider</label>
+          <Select
+            value={backend}
+            onChange={selectBackend}
+            options={BACKENDS.map((b) => ({ value: b.value, label: b.label }))}
+          />
+
           <ModelSelector
             provider={backend}
-            url={localStorage.getItem("nolock.url") || BACKEND_DEFAULTS[backend]?.url || "http://localhost:11434"}
+            url={resolveBackendUrl(backend)}
             apiKey={apiKey}
             value={chatModel}
             onChange={setChatModel}

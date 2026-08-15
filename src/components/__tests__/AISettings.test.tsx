@@ -96,7 +96,7 @@ describe("ChatModelPanel", () => {
     render(<ChatModelPanel visible={true} onClose={vi.fn()} />);
     // The title appears in both the header and the label
     expect(screen.getAllByText("Chat Model").length).toBeGreaterThanOrEqual(2);
-    const input = screen.getByPlaceholderText("e.g. qwen3:8b");
+    const input = screen.getByPlaceholderText("e.g. qwen3.5:0.8b-mlx");
     expect(input).toBeInTheDocument();
   });
 
@@ -109,7 +109,7 @@ describe("ChatModelPanel", () => {
   it("saves chat model on Save", () => {
     const onClose = vi.fn();
     render(<ChatModelPanel visible={true} onClose={onClose} />);
-    const input = screen.getByPlaceholderText("e.g. qwen3:8b");
+    const input = screen.getByPlaceholderText("e.g. qwen3.5:0.8b-mlx");
     fireEvent.change(input, { target: { value: "my-chat-model" } });
     fireEvent.click(screen.getByText("Save"));
 
@@ -134,7 +134,7 @@ describe("FITMModelPanel", () => {
   it("renders with title and input", () => {
     render(<FITMModelPanel visible={true} onClose={vi.fn()} />);
     expect(screen.getByText("FITM Model")).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("e.g. qwen2.5-coder:1.5b");
+    const input = screen.getByPlaceholderText("e.g. qwen2.5-coder:0.5b");
     expect(input).toBeInTheDocument();
   });
 
@@ -147,7 +147,7 @@ describe("FITMModelPanel", () => {
   it("saves completion model on Save", () => {
     const onClose = vi.fn();
     render(<FITMModelPanel visible={true} onClose={onClose} />);
-    const input = screen.getByPlaceholderText("e.g. qwen2.5-coder:1.5b");
+    const input = screen.getByPlaceholderText("e.g. qwen2.5-coder:0.5b");
     fireEvent.change(input, { target: { value: "my-fitm-model" } });
     fireEvent.click(screen.getByText("Save"));
 
@@ -194,7 +194,7 @@ describe("ToolsPanel", () => {
     render(<ToolsPanel visible={true} onClose={vi.fn()} />);
     expect(screen.getByText("Search the internet to discover relevant URLs before fetching them")).toBeInTheDocument();
     expect(screen.getByText("Fetch and read web page content from a specific URL")).toBeInTheDocument();
-    expect(screen.getByText("Read file contents from disk")).toBeInTheDocument();
+    expect(screen.getByText("Read file contents from disk (truncated to 8KB for small models)")).toBeInTheDocument();
     expect(screen.getByText("Explore project structure")).toBeInTheDocument();
   });
 

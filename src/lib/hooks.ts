@@ -15,6 +15,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { parseCron, cronMatches } from "./cron";
 import { getSecret } from "./secrets";
+import { getChatBackend, resolveBackendUrl } from "./backends";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the Rust serde structures in src-tauri/src/hooks.rs)
@@ -350,8 +351,8 @@ async function executeHookRun(
   hook: HookConfig,
   reason: TriggerInfo,
 ): Promise<{ content: string; tool_calls: ToolCallLog[] }> {
-  const backend = localStorage.getItem("nolock.backend") || "ollama";
-  const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+  const backend = getChatBackend();
+  const url = resolveBackendUrl(backend);
   const chatModel = localStorage.getItem("nolock.chatModel") || "";
   if (!chatModel) {
     throw new Error("No chat model configured. Open AI Integrations settings to set one.");

@@ -49,6 +49,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { getChatBackend } from "./backends";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -209,7 +210,7 @@ export function getModelConfigurations(): ModelConfig {
  * Build the model context by reading current settings from localStorage.
  */
 export function getModelContext(): { provider: string; model: string } {
-  const backend = localStorage.getItem("nolock.backend") || "ollama";
+  const backend = getChatBackend();
   const chatModel = localStorage.getItem("nolock.chatModel") || "";
   return { provider: backend, model: chatModel };
 }
