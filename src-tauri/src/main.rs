@@ -3156,6 +3156,21 @@ async fn stream_openai_response(
                             full_content: &mut String|
      -> Result<(), String> {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+            // Reasoning trace (thinking-capable models) — stream with a
+            // `thinking` flag so the frontend can display it transiently.
+            if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
+                if !thinking.is_empty() {
+                    app_handle
+                        .emit(
+                            "stream-token",
+                            StreamPayload {
+                                token: thinking.to_string(),
+                                thinking: true,
+                            },
+                        )
+                        .ok();
+                }
+            }
             // Content delta
             if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                 if !content.is_empty() {
@@ -3283,20 +3298,26 @@ async fn run_openai_tool_loop(
         .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
         .collect();
 
-    // Add system message listing available tools (like Ollama does)
+    // Add a system message instructing the model on tool usage, including each
+    // tool's own description so the model knows when to call which one.
     if !tools.is_empty() {
-        let tool_names: Vec<&str> = tools
+        let tool_block: Vec<String> = tools
             .iter()
-            .filter_map(|t| t["function"]["name"].as_str())
+            .filter_map(|t| {
+                let name = t["function"]["name"].as_str()?;
+                let desc = t["function"]["description"].as_str().unwrap_or("");
+                Some(format!("- {name}: {desc}"))
+            })
             .collect();
-        let tool_list = tool_names.join(", ");
         openai_msgs.insert(0, serde_json::json!({
             "role": "system",
             "content": format!(
-                "You have access to the following tools: {}. \
-                 Use them when the user's request requires looking up external information. \
-                 You may call multiple tools if needed.",
-                tool_list
+                "You are a helpful assistant with access to tools. Use them whenever they help: \
+                 call web_search or web_fetch for current information, documentation, or anything \
+                 outside your training data instead of guessing; use read_file/list_directory/grep \
+                 to inspect files and code; use edit/write_file to make changes. You may call \
+                 multiple tools and then use their results in your answer.\n\nAvailable tools:\n{}",
+                tool_block.join("\n")
             )
         }));
     }
@@ -3316,11 +3337,14 @@ async fn run_openai_tool_loop(
         .to_string();
 
     for iteration in 0..max_iterations {
-        // Build request body
+        // Build request body. DigitalOcean deprecates `max_tokens` in favor of
+        // `max_completion_tokens`, which is scoped across the whole run (i.e. all
+        // tool-call iterations) rather than per completion — the right budget for
+        // a multi-turn agent loop.
         let mut body = serde_json::json!({
             "model": model,
             "messages": openai_msgs,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": max_tokens,
             "temperature": temperature,
             "stream": true
         });
