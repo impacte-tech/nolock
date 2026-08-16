@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { setSecret } from "../lib/secrets";
+import { getChatBackend } from "../lib/backends";
 
 interface Props {
   visible: boolean;
@@ -57,8 +58,8 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
   const [toolFormError, setToolFormError] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // Determine if current backend supports tools
-  const backend = (typeof window !== "undefined" ? localStorage.getItem("nolock.backend") : null) || "ollama";
+  // Determine if the current chat backend supports tools
+  const backend = (typeof window !== "undefined" ? getChatBackend() : null) || "ollama";
   const supportsTools = backend === "ollama" || backend === "openrouter" || backend === "digitalocean";
 
   const loadCustomTools = useCallback(async () => {

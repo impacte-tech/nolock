@@ -333,10 +333,10 @@ describe("Editor — macOS keyboard shortcuts", () => {
     /** Find the callback registered for a given Tauri event name. */
     function findListener(eventName: string): (...args: any[]) => void {
       const entry = mockListen.mock.calls.find(
-        ([name]: [string]) => name === eventName,
+        ([name]) => name === eventName,
       );
       expect(entry).toBeDefined();
-      return entry![1] as (...args: any[]) => void;
+      return entry![1];
     }
 
     beforeEach(() => {

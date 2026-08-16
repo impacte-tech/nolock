@@ -1501,6 +1501,11 @@ struct ChatRequest {
     /// Maximum number of tool call iterations before the agent stops.
     #[serde(default = "default_max_iterations")]
     max_iterations: usize,
+    /// Whether to pin the DigitalOcean Inference Router to a single model for
+    /// the whole agent/tool loop (via the `X-Model-Affinity` header). Defaults
+    /// to enabled when absent.
+    #[serde(default)]
+    model_affinity: Option<bool>,
 }
 
 fn default_max_iterations() -> usize {
@@ -3119,13 +3124,411 @@ fn build_ollama_chat_body(
     if !tools.is_empty() {
         body["tools"] = serde_json::json!(tools);
     }
-    body
+body
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI-compatible tool calling (for DigitalOcean, OpenRouter, etc.)
+// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Ollama request body construction (extracted for testability)
-// ---------------------------------------------------------------------------
+/// Result from streaming a single OpenAI-compatible response.
+struct OpenAIStreamResult {
+    /// Content emitted by the model in this iteration.
+    iter_content: String,
+    /// Tool calls detected, if any.
+    tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+/// Stream an OpenAI-compatible SSE response, emitting tokens to the frontend
+/// and accumulating content. Returns iteration-scoped content and any tool calls.
+async fn stream_openai_response(
+    mut resp: reqwest::Response,
+    app_handle: &tauri::AppHandle,
+    full_content: &mut String,
+) -> Result<OpenAIStreamResult, String> {
+    let mut iter_content = String::new();
+    let mut tool_calls: Option<Vec<serde_json::Value>> = None;
+    let mut buf = String::new();
+
+    let process_sse_data = |data: &str,
+                            iter_content: &mut String,
+                            tool_calls: &mut Option<Vec<serde_json::Value>>,
+                            full_content: &mut String|
+     -> Result<(), String> {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+            // Reasoning trace (thinking-capable models) — stream with a
+            // `thinking` flag so the frontend can display it transiently.
+            if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
+                if !thinking.is_empty() {
+                    app_handle
+                        .emit(
+                            "stream-token",
+                            StreamPayload {
+                                token: thinking.to_string(),
+                                thinking: true,
+                            },
+                        )
+                        .ok();
+                }
+            }
+            // Content delta
+            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                if !content.is_empty() {
+                    iter_content.push_str(content);
+                    full_content.push_str(content);
+                    app_handle
+                        .emit(
+                            "stream-token",
+                            StreamPayload {
+                                token: content.to_string(),
+                                thinking: false,
+                            },
+                        )
+                        .ok();
+                }
+            }
+            // Tool calls delta (OpenAI format: delta.tool_calls)
+            if let Some(calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
+                if !calls.is_empty() {
+                    // Accumulate tool calls - they may come in chunks
+                    let mut accumulated = tool_calls.take().unwrap_or_default();
+                    for call in calls {
+                        let index = call["index"].as_u64().unwrap_or(0) as usize;
+                        // Ensure we have space for this index
+                        while accumulated.len() <= index {
+                            accumulated.push(serde_json::json!({
+                                "id": "",
+                                "type": "function",
+                                "function": { "name": "", "arguments": "" }
+                            }));
+                        }
+                        // Merge the delta into the accumulated call
+                        if let Some(id) = call["id"].as_str() {
+                            accumulated[index]["id"] = serde_json::json!(id);
+                        }
+                        if let Some(name) = call["function"]["name"].as_str() {
+                            accumulated[index]["function"]["name"] = serde_json::json!(name);
+                        }
+                        if let Some(args) = call["function"]["arguments"].as_str() {
+                            let existing = accumulated[index]["function"]["arguments"].as_str().unwrap_or("");
+                            accumulated[index]["function"]["arguments"] = serde_json::json!(format!("{}{}", existing, args));
+                        }
+                    }
+                    *tool_calls = Some(accumulated);
+                }
+            }
+        }
+        Ok(())
+    };
+
+    loop {
+        match resp.chunk().await.map_err(|e| e.to_string())? {
+            None => break,
+            Some(chunk) => {
+                let s = String::from_utf8_lossy(&chunk);
+                buf.push_str(&s);
+                while let Some(pos) = buf.find("\n\n") {
+                    let event = buf[..pos].to_string();
+                    buf = buf[pos + 2..].to_string();
+                    for line in event.lines() {
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            let data = data.trim();
+                            if data == "[DONE]" { continue; }
+                            process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Drain trailing buffer
+    if !buf.trim().is_empty() {
+        for line in buf.lines() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                let data = data.trim();
+                if data == "[DONE]" { continue; }
+                process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
+            }
+        }
+    }
+
+    Ok(OpenAIStreamResult { iter_content, tool_calls })
+}
+
+/// Normalize tool-call arguments to a JSON object.
+///
+/// OpenAI-compatible APIs (DigitalOcean, OpenRouter, etc.) return
+/// `function.arguments` as a JSON-encoded *string*, whereas Ollama returns it as
+/// a JSON *object*. Some models also emit leading/trailing whitespace or extra
+/// quoting around the JSON. This normalizes both forms (trimming whitespace) so
+/// `execute_tool` always receives a plain object keyed by parameter name.
+fn normalize_tool_args(raw: &serde_json::Value) -> serde_json::Value {
+    match raw {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return serde_json::json!({});
+            }
+            serde_json::from_str::<serde_json::Value>(trimmed)
+                .unwrap_or_else(|_| serde_json::json!({ "value": trimmed }))
+        }
+        other => other.clone(),
+    }
+}
+
+/// Run an OpenAI-compatible tool-calling loop (DigitalOcean, OpenRouter, etc.).
+async fn run_openai_tool_loop(
+    client: &reqwest::Client,
+    app_handle: &tauri::AppHandle,
+    url: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[serde_json::Value],
+    tool_configs: &HashMap<String, serde_json::Value>,
+    root_path: Option<&str>,
+    temperature: f64,
+    max_tokens: u32,
+    max_iterations: usize,
+    extra_headers: Option<Vec<(&str, &str)>>,
+    use_model_affinity: bool,
+) -> Result<ChatResult, String> {
+    let mut openai_msgs: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+        .collect();
+
+    // Add a system message instructing the model on tool usage, including each
+    // tool's own description so the model knows when to call which one.
+    if !tools.is_empty() {
+        let tool_block: Vec<String> = tools
+            .iter()
+            .filter_map(|t| {
+                let name = t["function"]["name"].as_str()?;
+                let desc = t["function"]["description"].as_str().unwrap_or("");
+                Some(format!("- {name}: {desc}"))
+            })
+            .collect();
+        openai_msgs.insert(0, serde_json::json!({
+            "role": "system",
+            "content": format!(
+                "You are a helpful assistant with access to tools. Use them whenever they help: \
+                 call web_search or web_fetch for current information, documentation, or anything \
+                 outside your training data instead of guessing; use read_file/list_directory/grep \
+                 to inspect files and code; use edit/write_file to make changes. You may call \
+                 multiple tools and then use their results in your answer.\n\nAvailable tools:\n{}",
+                tool_block.join("\n")
+            )
+        }));
+    }
+
+    let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
+    let mut full_content = String::new();
+
+    // Generate a stable session ID for the model-affinity header. This pins the
+    // DigitalOcean Inference Router to a single model across the whole tool loop,
+    // preventing mid-session model switches (which break tool-calling formats and
+    // invalidate the KV cache). Without it the router may route each iteration to
+    // a different model, so tool_calls from one turn don't parse in the next.
+    let session_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string();
+
+    for iteration in 0..max_iterations {
+        // Build request body. DigitalOcean deprecates `max_tokens` in favor of
+        // `max_completion_tokens`, which is scoped across the whole run (i.e. all
+        // tool-call iterations) rather than per completion — the right budget for
+        // a multi-turn agent loop.
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": openai_msgs,
+            "max_completion_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": true
+        });
+        if !tools.is_empty() {
+            body["tools"] = serde_json::json!(tools);
+            body["tool_choice"] = serde_json::json!("auto");
+        }
+
+        eprintln!(
+            "[nolock] openai-tool-loop iteration={}, POST {} (streaming, tools={}, affinity={})",
+            iteration, url, tools.len(), session_id
+        );
+
+        let mut req_builder = client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(300));
+        if use_model_affinity {
+            req_builder = req_builder.header("X-Model-Affinity", &session_id);
+        }
+
+        if let Some(headers) = &extra_headers {
+            for (k, v) in headers {
+                req_builder = req_builder.header(*k, *v);
+            }
+        }
+
+        let resp = req_builder
+            .send()
+            .await
+            .map_err(|e| {
+                eprintln!("[nolock] openai-tool-loop network error: {}", e);
+                e.to_string()
+            })?;
+
+        let status = resp.status();
+        // Log the routed task/model for debugging (DigitalOcean router headers)
+        if let Some(route) = resp.headers().get("x-model-router-selected-route") {
+            if let Ok(route) = route.to_str() {
+                eprintln!("[nolock] openai-tool-loop routed route={}", route);
+            }
+        }
+        if let Some(m) = resp.headers().get("x-model-router-selected-model") {
+            if let Ok(m) = m.to_str() {
+                eprintln!("[nolock] openai-tool-loop routed model={}", m);
+            }
+        }
+        if !status.is_success() {
+            let text = resp.text().await.map_err(|e| e.to_string())?;
+            eprintln!(
+                "[nolock] openai-tool-loop status={} body={}",
+                status,
+                &text[..text.len().min(300)]
+            );
+            let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v["error"].as_str().map(String::from))
+                .or_else(|| {
+                    serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| v["message"].as_str().map(String::from))
+                })
+                .unwrap_or_else(|| text.clone());
+            if !tools.is_empty() && error_detail.to_lowercase().contains("tool") {
+                return Err(format!(
+                    "Model '{}' does not support tool calling (HTTP {}). Try disabling Agent Tools in AI Settings.",
+                    model, status
+                ));
+            }
+            return Err(format!("API error ({}): {}", status, error_detail));
+        }
+
+        // Stream the response
+        let stream = stream_openai_response(resp, app_handle, &mut full_content).await?;
+
+        // Handle tool calls or return final response
+        if let Some(calls) = stream.tool_calls {
+            let names: Vec<&str> = calls
+                .iter()
+                .filter_map(|c| c["function"]["name"].as_str())
+                .collect();
+            eprintln!(
+                "[nolock] openai-tool-loop iteration={} detected {} tool_calls: {:?}",
+                iteration,
+                calls.len(),
+                names
+            );
+
+            // Filter out incomplete tool calls (missing name or id)
+            let complete_calls: Vec<serde_json::Value> = calls
+                .into_iter()
+                .filter(|c| {
+                    c["function"]["name"].as_str().map_or(false, |n| !n.is_empty())
+                        && c["id"].as_str().map_or(false, |i| !i.is_empty())
+                })
+                .collect();
+
+            if complete_calls.is_empty() {
+                // No complete tool calls, continue
+                continue;
+            }
+
+            // Push assistant message with tool calls
+            let assistant_msg = serde_json::json!({
+                "role": "assistant",
+                "content": stream.iter_content,
+                "tool_calls": complete_calls
+            });
+            openai_msgs.push(assistant_msg);
+
+            // Execute each tool call and add results
+            for call in &complete_calls {
+                let name = call["function"]["name"].as_str().unwrap_or("unknown");
+                let args = normalize_tool_args(&call["function"]["arguments"]);
+
+                let result = execute_tool(name, &args, client, tool_configs, root_path)
+                    .await
+                    .unwrap_or_else(|e| format!("Tool error: {}", e));
+
+                let snippet = if result.len() > 200 {
+                    format!("{}...", &result[..200])
+                } else {
+                    result.clone()
+                };
+
+                all_tool_calls.push(ToolCallLog {
+                    name: name.to_string(),
+                    arguments: serde_json::to_string(&args).unwrap_or_default(),
+                    result_snippet: snippet,
+                    result_full: result.clone(),
+                });
+
+                // Add tool result message
+                let tool_call_id = call["id"].as_str().unwrap_or("call_unknown");
+                openai_msgs.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": result
+                }));
+            }
+
+            // Add separator between iterations
+            if !full_content.is_empty() {
+                full_content.push('\n');
+            }
+        } else {
+            // No tool calls — final response
+            eprintln!(
+                "[nolock] openai-tool-loop iteration={} no tool_calls, returning: content_len={} tool_calls={}",
+                iteration,
+                full_content.len(),
+                all_tool_calls.len()
+            );
+            if full_content.is_empty() && all_tool_calls.is_empty() {
+                eprintln!("[nolock] WARNING: empty response from model in tool loop");
+            }
+            return Ok(ChatResult {
+                content: if full_content.is_empty() {
+                    "(no response)".to_string()
+                } else {
+                    full_content
+                },
+                tool_calls: all_tool_calls,
+            });
+        }
+    }
+
+    // Exhausted iterations
+    eprintln!(
+        "[nolock] openai-tool-loop exhausted after {} iterations: content_len={} tool_calls={}",
+        max_iterations,
+        full_content.len(),
+        all_tool_calls.len()
+    );
+    Ok(ChatResult {
+        content: if full_content.is_empty() {
+            "(max tool iterations reached, no response)".to_string()
+        } else {
+            full_content
+        },
+        tool_calls: all_tool_calls,
+    })
+}
 
 /// Builds the JSON body for an Ollama `/api/generate` request.
 ///
@@ -4030,127 +4433,35 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
         "digitalocean" => {
             let api_key = req.api_key.clone().unwrap_or_default();
 
-            let mut do_msgs: Vec<serde_json::Value> = messages
-                .iter()
-                .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-                .collect();
-
-            if has_tools {
-                let tool_names: Vec<&str> = tools
-                    .iter()
-                    .filter_map(|t| t["function"]["name"].as_str())
-                    .collect();
-                let tool_list = tool_names.join(", ");
-                do_msgs.insert(0, serde_json::json!({
-                    "role": "system",
-                    "content": format!(
-                        "You have access to the following tools: {}. \
-                         Use them when the user's request requires looking up external information. \
-                         You may call multiple tools if needed.",
-                        tool_list
-                    )
-                }));
-            }
-
-            let mut body = serde_json::json!({
-                "model": req.model,
-                "messages": do_msgs,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stream": true
-            });
-            if has_tools {
-                body["tools"] = serde_json::json!(tools);
-            }
-
             // DigitalOcean serverless inference endpoint — a fixed host (like
             // OpenRouter's). We ignore `req.url` because the inference API lives
             // at `inference.do-ai.run`, not `api.digitalocean.com`. The model
             // field carries either a model id or "router:{router_name}".
             let full_url = "https://inference.do-ai.run/v1/chat/completions".to_string();
-            eprintln!("[nolock] digitalocean POST {} (streaming)", full_url);
-            let mut resp = client
-                .post(&full_url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(60))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[nolock] digitalocean chat status={} body={}", status, &text[..text.len().min(200)]);
-                let error_detail = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| v["error"].as_str().map(String::from))
-                    .or_else(|| {
-                        serde_json::from_str::<serde_json::Value>(&text)
-                            .ok()
-                            .and_then(|v| v["message"].as_str().map(String::from))
-                    })
-                    .unwrap_or_else(|| text.clone());
-                return Err(format!("DigitalOcean API error ({}): {}", status, error_detail));
-            }
+            // Model affinity (session pinning) keeps the router on a single model
+            // across the whole tool loop. Defaults to enabled; the user can disable
+            // it in the DigitalOcean provider settings.
+            let use_model_affinity = req.model_affinity.unwrap_or(true);
 
-            // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
-            let mut full_content = String::new();
-            let mut buf = String::new();
-            loop {
-                match resp.chunk().await.map_err(|e| e.to_string())? {
-                    None => break,
-                    Some(chunk) => {
-                        let s = String::from_utf8_lossy(&chunk);
-                        buf.push_str(&s);
-                        while let Some(pos) = buf.find("\n\n") {
-                            let event = buf[..pos].to_string();
-                            buf = buf[pos + 2..].to_string();
-                            for line in event.lines() {
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    let data = data.trim();
-                                    if data == "[DONE]" { continue; }
-                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                            if !content.is_empty() {
-                                                full_content.push_str(content);
-                                                app_handle.emit("stream-token", StreamPayload {
-                                                    token: content.to_string(),
-                                                    thinking: false,
-                                                }).ok();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // Drain trailing buffer (last chunk may not end with '\n\n')
-            if !buf.trim().is_empty() {
-                for line in buf.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        let data = data.trim();
-                        if data == "[DONE]" { continue; }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                if !content.is_empty() {
-                                    full_content.push_str(content);
-                                    app_handle.emit("stream-token", StreamPayload {
-                                        token: content.to_string(),
-                                        thinking: false,
-                                    }).ok();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(ChatResult {
-                content: full_content,
-                tool_calls: vec![],
-            })
+            // Use the OpenAI-compatible tool calling loop
+            run_openai_tool_loop(
+                &client,
+                &app_handle,
+                &full_url,
+                &api_key,
+                &req.model,
+                &messages,
+                &tools,
+                &req.tool_configs,
+                req.root_path.as_deref(),
+                temperature,
+                max_tokens,
+                req.max_iterations,
+                None, // no extra headers needed for DigitalOcean
+                use_model_affinity,
+            )
+            .await
         }
         _ => Err(format!("Unknown backend: {}", req.backend)),
     }
@@ -4278,6 +4589,50 @@ mod tests {
             .collect();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "visible");
+    }
+
+    // ---- normalize_tool_args ---------------------------------------------
+    #[test]
+    fn test_normalize_tool_args_parses_json_string() {
+        // OpenAI-compatible APIs return arguments as a JSON-encoded string.
+        let raw = serde_json::json!("{\"query\": \"Rust docs\"}");
+        let args = normalize_tool_args(&raw);
+        assert!(args.is_object());
+        assert_eq!(args["query"], "Rust docs");
+    }
+
+    #[test]
+    fn test_normalize_tool_args_trims_whitespace() {
+        // Some models emit leading/trailing whitespace around the JSON.
+        let raw = serde_json::json!("  {\"url\": \"https://doc.rust-lang.org/\"}  ");
+        let args = normalize_tool_args(&raw);
+        assert!(args.is_object());
+        assert_eq!(args["url"], "https://doc.rust-lang.org/");
+    }
+
+    #[test]
+    fn test_normalize_tool_args_passes_object_through() {
+        // Ollama-compatible APIs return arguments as an object directly.
+        let raw = serde_json::json!({ "path": "/tmp/foo.rs" });
+        let args = normalize_tool_args(&raw);
+        assert!(args.is_object());
+        assert_eq!(args["path"], "/tmp/foo.rs");
+    }
+
+    #[test]
+    fn test_normalize_tool_args_empty_string_is_empty_object() {
+        let raw = serde_json::json!("");
+        let args = normalize_tool_args(&raw);
+        assert!(args.is_object());
+        assert!(args.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_normalize_tool_args_invalid_json_falls_back() {
+        let raw = serde_json::json!("not-json{{{");
+        let args = normalize_tool_args(&raw);
+        assert!(args.is_object());
+        assert_eq!(args["value"], "not-json{{{");
     }
 
     // ---- build_tool_schemas ----------------------------------------------
