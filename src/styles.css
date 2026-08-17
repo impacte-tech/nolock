@@ -1401,87 +1401,83 @@ html, body, #root {
 /* ===== Tool calls in chat ===== */
 .tool-calls {
   margin-bottom: 6px;
-}
-
-.tool-calls-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 11px;
-}
-
-.tool-calls-header:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.tool-calls-chevron {
-  font-size: 8px;
-  color: var(--text-muted);
-  width: 12px;
-  text-align: center;
-  flex-shrink: 0;
-}
-
-.tool-calls-label {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.tool-calls-names {
-  color: var(--text-muted);
-  margin-left: auto;
-}
-
-.tool-calls-list {
-  margin-top: 4px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.tool-call-item {
-  padding: 6px 8px;
+/* Collapsible tool-call window (styled like the Thinking indicator). */
+.tool-call-window {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.tool-call-window-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+}
+
+.tool-call-window-header:hover {
+  background: var(--hover);
+}
+
+.tool-call-window-chevron {
+  font-size: 8px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.tool-call-window-name {
+  font-weight: 600;
+  color: var(--accent);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.tool-call-window-summary {
+  margin-left: auto;
+  max-width: 60%;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-call-window-body {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-call-window-args,
+.tool-call-window-result {
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-size: 11px;
-}
-
-.tool-call-name {
-  font-weight: 600;
-  color: var(--accent);
-  margin-bottom: 3px;
-}
-
-.tool-call-args {
-  color: var(--text-muted);
-  margin-bottom: 3px;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.tool-call-args code {
-  font-size: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  padding: 1px 4px;
-  border-radius: 2px;
-  word-break: break-all;
-}
-
-.tool-call-result {
-  color: var(--text-secondary);
+.tool-call-window-pre {
+  margin: 0;
+  padding: 6px 8px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 80px;
-  overflow: hidden;
-  border-top: 1px solid var(--border);
-  padding-top: 3px;
+  max-height: 240px;
+  overflow: auto;
 }
 
 /* ---- File changes block (Part C) ---- */
@@ -1791,6 +1787,153 @@ html, body, #root {
   font-size: 11px;
   color: var(--text-muted);
   text-align: center;
+}
+
+/* ---- Sub-agent windows (live, inspectable) ---- */
+.subagents {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.subagent-block {
+  border: 1px solid var(--border);
+  border-left: 3px solid #64b4ff;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.subagent-block.running {
+  border-left-color: #e5c07b;
+}
+
+.subagent-block-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.subagent-block-header:hover {
+  background: var(--hover);
+}
+
+.subagent-chevron {
+  font-size: 8px;
+  color: var(--text-muted);
+  width: 12px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.subagent-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: nolock-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes nolock-spin {
+  to { transform: rotate(360deg); }
+}
+
+.subagent-status-done {
+  color: #98c379;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.subagent-name {
+  font-weight: 600;
+  color: #64b4ff;
+}
+
+.subagent-model {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.subagent-task {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.subagent-block-body {
+  padding: 6px 10px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.subagent-toolcalls {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 6px;
+}
+
+.subagent-toolcall {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 8px;
+}
+
+.subagent-toolcall-done {
+  color: #98c379;
+}
+
+.subagent-toolcall-error {
+  color: #e06c75;
+}
+
+.subagent-toolcall-status {
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+
+.subagent-toolcall-name {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: var(--text-secondary);
+}
+
+.subagent-toolcall-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-thinking {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
 }
 
 /* ---- Context-nearly-full warning ---- */

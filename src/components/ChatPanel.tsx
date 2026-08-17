@@ -7,7 +7,7 @@ import SkillAutocomplete from "./SkillAutocomplete";
 import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
-import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity, isCloudBackend } from "../lib/backends";
+import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity, isCloudBackend, BACKENDS } from "../lib/backends";
 import {
   type HookRunState,
   type ToolCallLog as HookToolCallLog,
@@ -50,6 +50,19 @@ import {
 // ---------------------------------------------------------------------------
 const marked = new Marked({ gfm: true, breaks: true });
 
+/** Build the provider config map (url + api key per backend) sent to the
+ *  backend so sub-agents can run on a different provider than the main agent. */
+function buildProvidersMap(): Record<string, { url: string; apiKey: string }> {
+  const providers: Record<string, { url: string; apiKey: string }> = {};
+  for (const b of BACKENDS) {
+    providers[b.value] = {
+      url: resolveBackendUrl(b.value),
+      apiKey: localStorage.getItem(`nolock.apiKey.${b.value}`) || "",
+    };
+  }
+  return providers;
+}
+
 export interface FileChangeEdit {
   old_text: string;
   new_text: string;
@@ -63,12 +76,41 @@ export interface FileChange {
   edits?: FileChangeEdit[];
 }
 
+export interface SubAgentTrace {
+  id: string;
+  agent: string;
+  task: string;
+  model: string;
+  result: string;
+  tool_calls?: ToolCallLog[];
+}
+
+/** A tool call observed in a live sub-agent window. */
+interface SubAgentLiveToolCall {
+  name: string;
+  status: "start" | "done" | "error";
+  path?: string;
+}
+
+/** Live state for a sub-agent window, accumulated from `subagent-*` events. */
+interface SubAgentLiveState {
+  id: string;
+  agent: string;
+  task: string;
+  model: string;
+  status: "running" | "done";
+  content: string;
+  thinking: string;
+  toolCalls: SubAgentLiveToolCall[];
+}
+
 export interface ToolCallLog {
   name: string;
   arguments: string;
   result_snippet: string;
   result_full: string;
   file_changes?: FileChange[];
+  subagent?: SubAgentTrace;
 }
 
 interface Message {
@@ -141,9 +183,62 @@ const PROVIDER_META: Record<string, { label: string; url: string }> = {
   brave: { label: "Brave Search", url: "https://brave.com/search/" },
 };
 
-export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
-  const [expanded, setExpanded] = useState(false);
+function truncateText(s: string, max: number): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
 
+function prettyJson(s: string): string {
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
+}
+
+/** A short human-readable summary of a tool call's arguments (e.g. the path). */
+function summarizeToolArgs(call: ToolCallLog): string {
+  let args: Record<string, unknown> | null = null;
+  try { args = JSON.parse(call.arguments); } catch {}
+  if (!args || typeof args !== "object") {
+    return call.arguments ? truncateText(call.arguments, 60) : "";
+  }
+  const a = args as Record<string, unknown>;
+  if (typeof a.path === "string" && a.path) return a.path;
+  if (typeof a.query === "string" && a.query) return truncateText(a.query, 60);
+  if (typeof a.url === "string" && a.url) return a.url;
+  if (typeof a.command === "string" && a.command) return truncateText(a.command, 60);
+  if (typeof a.pattern === "string" && a.pattern) return truncateText(a.pattern, 60);
+  return truncateText(JSON.stringify(args), 60);
+}
+
+/** A single tool call, rendered as a collapsible window (Thinking-style). */
+function ToolCallItem({ call }: { call: ToolCallLog }) {
+  const [expanded, setExpanded] = useState(false);
+  const summary = summarizeToolArgs(call);
+  return (
+    <div className="tool-call-window">
+      <div className="tool-call-window-header" onClick={() => setExpanded(!expanded)}>
+        <span className="tool-call-window-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        <span className="tool-call-window-name">{call.name}</span>
+        {summary && <span className="tool-call-window-summary" title={summary}>{summary}</span>}
+      </div>
+      {expanded && (
+        <div className="tool-call-window-body">
+          {call.arguments && (
+            <div className="tool-call-window-args">
+              <pre className="tool-call-window-pre">{prettyJson(call.arguments)}</pre>
+            </div>
+          )}
+          <div className="tool-call-window-result">
+            <pre className="tool-call-window-pre">{call.result_full || call.result_snippet}</pre>
+          </div>
+          {call.file_changes && call.file_changes.length > 0 && (
+            <FileChangesBlock changes={call.file_changes} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
   const hasWebSearch = calls.some((c) => c.name === "web_search");
 
   let providerLabel = "DuckDuckGo";
@@ -164,28 +259,9 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
 
   return (
     <div className="tool-calls">
-      <div className="tool-calls-header" onClick={() => setExpanded(!expanded)}>
-        <span className="tool-calls-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
-        <span className="tool-calls-label">
-          {calls.length} tool {calls.length === 1 ? "call" : "calls"}
-        </span>
-        <span className="tool-calls-names">
-          {calls.map((c) => c.name).join(", ")}
-        </span>
-      </div>
-      {expanded && (
-        <div className="tool-calls-list">
-          {calls.map((call, i) => (
-            <div key={i} className="tool-call-item">
-              <div className="tool-call-name">{call.name}</div>
-              <div className="tool-call-args">
-                <code>{call.arguments}</code>
-              </div>
-              <div className="tool-call-result">{call.result_snippet}</div>
-            </div>
-          ))}
-        </div>
-      )}
+      {calls.map((call, i) => (
+        <ToolCallItem key={i} call={call} />
+      ))}
       {hasWebSearch && (
         <div className="tool-attribution">
           <a
@@ -392,6 +468,47 @@ function FileChangesBlock({ changes }: { changes: FileChange[] }) {
       {changes.map((change, i) => (
         <FileChangeItem key={`${change.path}-${i}`} change={change} />
       ))}
+    </div>
+  );
+}
+
+/** A single sub-agent "window" — collapsible, live-streamed, inspectable. */
+function SubAgentBlock({ sa }: { sa: SubAgentLiveState }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className={`subagent-block${sa.status === "running" ? " running" : ""}`}>
+      <div className="subagent-block-header" onClick={() => setExpanded((e) => !e)}>
+        <span className="subagent-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        {sa.status === "running" ? (
+          <span className="subagent-spinner" />
+        ) : (
+          <span className="subagent-status-done">&#10003;</span>
+        )}
+        <span className="subagent-name">@{sa.agent}</span>
+        <span className="subagent-model">{sa.model}</span>
+        <span className="subagent-task" title={sa.task}>{sa.task}</span>
+      </div>
+      {expanded && (
+        <div className="subagent-block-body">
+          {sa.toolCalls.length > 0 && (
+            <div className="subagent-toolcalls">
+              {sa.toolCalls.map((tc, i) => (
+                <div key={i} className={`subagent-toolcall subagent-toolcall-${tc.status}`}>
+                  <span className="subagent-toolcall-status">
+                    {tc.status === "done" ? "\u2713" : tc.status === "error" ? "\u2717" : "\u2022"}
+                  </span>
+                  <span className="subagent-toolcall-name">{tc.name}</span>
+                  {tc.path && <span className="subagent-toolcall-path">{tc.path}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {sa.thinking && (
+            <pre className="subagent-thinking">{sa.thinking}</pre>
+          )}
+          <MarkdownContent text={sa.content || (sa.status === "running" ? "Working…" : "(no output)")} />
+        </div>
+      )}
     </div>
   );
 }
@@ -742,6 +859,56 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       if (event.payload) setRoutedModel(event.payload);
     }).then((fn) => { unlisten = fn; });
     return () => { if (unlisten) unlisten(); };
+  }, []);
+
+  // ---- Sub-agents: live windows streamed from `subagent-*` events ----------
+  const [subAgents, setSubAgents] = useState<SubAgentLiveState[]>([]);
+
+  useEffect(() => {
+    const unlisteners: (() => void)[] = [];
+    listen<{ id: string; agent: string; task: string; model: string }>("subagent-start", (e) => {
+      setSubAgents((prev) => [...prev, {
+        id: e.payload.id,
+        agent: e.payload.agent,
+        task: e.payload.task,
+        model: e.payload.model,
+        status: "running",
+        content: "",
+        thinking: "",
+        toolCalls: [],
+      }]);
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<{ id: string; token: string; thinking: boolean }>("subagent-token", (e) => {
+      setSubAgents((prev) => prev.map((sa) => {
+        if (sa.id !== e.payload.id) return sa;
+        if (e.payload.thinking) return { ...sa, thinking: sa.thinking + e.payload.token };
+        return { ...sa, content: sa.content + e.payload.token };
+      }));
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<{ id: string; type: string; name: string; path?: string }>("subagent-tool-progress", (e) => {
+      setSubAgents((prev) => prev.map((sa) => {
+        if (sa.id !== e.payload.id) return sa;
+        if (e.payload.type === "start") {
+          return { ...sa, toolCalls: [...sa.toolCalls, { name: e.payload.name, status: "start", path: e.payload.path }] };
+        }
+        const next = [...sa.toolCalls];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].name === e.payload.name && next[i].status === "start") {
+            next[i] = { ...next[i], status: e.payload.type as SubAgentLiveToolCall["status"] };
+            break;
+          }
+        }
+        return { ...sa, toolCalls: next };
+      }));
+    }).then((fn) => unlisteners.push(fn));
+
+    listen<{ id: string; result: string }>("subagent-done", (e) => {
+      setSubAgents((prev) => prev.map((sa) => sa.id === e.payload.id ? { ...sa, status: "done" } : sa));
+    }).then((fn) => unlisteners.push(fn));
+
+    return () => unlisteners.forEach((fn) => fn());
   }, []);
 
   // ---- Hooks: run cards + concurrency ----
@@ -1109,6 +1276,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setAccumulatedContextTokens(0);
     setThinkingText("");
     setRoutedModel(null);
+    setSubAgents([]);
     try { setSessions(await listSessions(rootPath)); } catch {}
   }, [rootPath, sessionId, messages]);
 
@@ -1303,6 +1471,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         rootPath: rootPath || undefined,
         maxIterations: 1,
         modelAffinity: getDigitalOceanModelAffinity(),
+        providers: buildProvidersMap(),
       };
 
       // Stream tokens — they get appended to the existing last assistant message
@@ -1808,6 +1977,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         rootPath: rootPath || undefined,
         maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
         modelAffinity: getDigitalOceanModelAffinity(),
+        providers: buildProvidersMap(),
       };
 
       if (dpoTriggered) {
@@ -2162,6 +2332,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           )}
         </div>
       ))}
+        {/* Sub-agent windows — live, inspectable blocks in the conversation. */}
+        {subAgents.length > 0 && (
+          <div className="subagents">
+            {subAgents.map((sa) => (
+              <SubAgentBlock key={sa.id} sa={sa} />
+            ))}
+          </div>
+        )}
         {/* Hook run cards — live feedback for hooks still queued/running.
             Completed runs are surfaced as "Hook result" messages in the thread. */}
         {hookRuns.some((r) => r.status === "queued" || r.status === "running") && (

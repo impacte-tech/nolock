@@ -280,7 +280,9 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
     let mut name = String::new();
     let mut description = String::new();
     let mut model = String::new();
+    let mut backend = String::new();
     let mut temperature = 0.7_f64;
+    let mut tools: Vec<String> = Vec::new();
     let prompt;
 
     // Extract frontmatter between --- markers
@@ -299,9 +301,11 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
                         "name" => name = value,
                         "description" => description = value,
                         "model" => model = value,
+                        "backend" => backend = value,
                         "temperature" => {
                             temperature = value.parse().unwrap_or(0.7);
                         }
+                        "tools" => tools = parse_tools_list(&value),
                         _ => {}
                     }
                 }
@@ -323,8 +327,116 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
         "description": description,
         "prompt": prompt,
         "model": model,
+        "backend": backend,
         "temperature": temperature,
+        "tools": tools,
     }))
+}
+
+/// Parse a `tools:` frontmatter value into a list of tool names. Accepts both
+/// comma-separated (`read_file, grep`) and JSON-array (`["read_file", "grep"]`)
+/// forms.
+fn parse_tools_list(value: &str) -> Vec<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    // JSON array form
+    if trimmed.starts_with('[') {
+        if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
+            return arr.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        }
+    }
+    // Comma-separated form
+    trimmed
+        .split(',')
+        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// A parsed sub-agent definition (from `.agents/`).
+#[derive(Clone, Default)]
+struct AgentConfig {
+    name: String,
+    description: String,
+    prompt: String,
+    /// Empty = use the main agent's model.
+    model: String,
+    /// Empty = use the main agent's backend/provider.
+    backend: String,
+    temperature: f64,
+    /// Empty = use the default standard tool set.
+    tools: Vec<String>,
+}
+
+/// Load a single agent's config from `.agents/<name>.md` or `.agents/<name>.json`.
+fn load_agent_config(root_path: &str, name: &str) -> Result<AgentConfig, String> {
+    let base = std::path::Path::new(root_path).join(".agents");
+    let md = base.join(format!("{}.md", name));
+    let json = base.join(format!("{}.json", name));
+    let path = if md.exists() {
+        md
+    } else if json.exists() {
+        json
+    } else {
+        return Err(format!("Sub-agent '{}' not found in .agents/", name));
+    };
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read agent file {}: {}", path.display(), e))?;
+
+    let parsed = if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        serde_json::from_str::<serde_json::Value>(&content)
+            .map_err(|e| format!("Failed to parse agent file {}: {}", path.display(), e))?
+    } else {
+        // Reuse read_agent's markdown parsing.
+        read_agent(path.to_string_lossy().to_string())?
+    };
+
+    Ok(AgentConfig {
+        name: parsed["name"].as_str().unwrap_or(name).to_string(),
+        description: parsed["description"].as_str().unwrap_or("").to_string(),
+        prompt: parsed["prompt"].as_str().unwrap_or("").to_string(),
+        model: parsed["model"].as_str().unwrap_or("").to_string(),
+        backend: parsed["backend"].as_str().unwrap_or("").to_string(),
+        temperature: parsed["temperature"].as_f64().unwrap_or(0.7),
+        tools: parsed["tools"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+    })
+}
+
+/// List all agent configs in `.agents/` (name + description + prompt + model +
+/// backend + tools). Used to build the `spawn_subagent` tool description.
+fn list_agent_configs(root_path: &str) -> Vec<AgentConfig> {
+    let agents_dir = std::path::Path::new(root_path).join(".agents");
+    let read_dir = match std::fs::read_dir(&agents_dir) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut configs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for entry in read_dir.flatten() {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let stem = if let Some(s) = file_name.strip_suffix(".json") {
+            s.to_string()
+        } else if let Some(s) = file_name.strip_suffix(".md") {
+            s.to_string()
+        } else {
+            continue;
+        };
+        if !seen.insert(stem.clone()) {
+            continue;
+        }
+        if let Ok(cfg) = load_agent_config(root_path, &stem) {
+            configs.push(cfg);
+        }
+    }
+    configs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    configs
 }
 
 // ---------------------------------------------------------------------------
@@ -1764,6 +1876,17 @@ struct SessionRecord {
     context_window: u64,
 }
 
+/// Endpoint + credential for a single model provider, used to resolve the
+/// sub-agent's provider when it differs from the main agent's.
+#[derive(Clone, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ProviderConfig {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    api_key: String,
+}
+
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ChatRequest {
@@ -1773,6 +1896,11 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     #[serde(default)]
     api_key: Option<String>,
+    /// Config for all configured providers, keyed by backend name. Used to
+    /// resolve credentials + endpoint when a sub-agent runs on a different
+    /// provider than the main agent (multi-model provider routing).
+    #[serde(default)]
+    providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
     tools_enabled: Vec<String>,
     /// Per-tool configuration (e.g. web_search provider + api_key).
@@ -1842,6 +1970,23 @@ struct ToolCallLog {
     result_full: String,
     #[serde(default)]
     file_changes: Vec<FileChange>,
+    /// Present when this tool call spawned a sub-agent; carries the full trace
+    /// so the frontend can render an inspectable "window" in the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subagent: Option<SubAgentTrace>,
+}
+
+/// Full trace of a sub-agent run, returned to the frontend so it can render an
+/// expandable window showing the sub-agent's work (tool calls + final answer).
+#[derive(serde::Serialize, Clone)]
+struct SubAgentTrace {
+    id: String,
+    agent: String,
+    task: String,
+    model: String,
+    result: String,
+    #[serde(default)]
+    tool_calls: Vec<ToolCallLog>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1861,6 +2006,298 @@ struct ToolProgressPayload {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+}
+
+// ---- Sub-agent streaming event payloads ------------------------------------
+
+/// Emitted as `subagent-start` when the main agent spawns a sub-agent.
+#[derive(Clone, serde::Serialize)]
+struct SubAgentStartPayload {
+    id: String,
+    agent: String,
+    task: String,
+    model: String,
+}
+
+/// Emitted as `subagent-token` while a sub-agent streams its answer/thinking.
+#[derive(Clone, serde::Serialize)]
+struct SubAgentTokenPayload {
+    id: String,
+    token: String,
+    #[serde(default)]
+    thinking: bool,
+}
+
+/// Emitted as `subagent-tool-progress` while a sub-agent runs a tool.
+#[derive(Clone, serde::Serialize)]
+struct SubAgentToolProgressPayload {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+/// Emitted as `subagent-done` when a sub-agent finishes.
+#[derive(Clone, serde::Serialize)]
+struct SubAgentDonePayload {
+    id: String,
+    result: String,
+}
+
+/// Emit a stream token, routing to `subagent-token` when a sub-agent is
+/// streaming (so its window updates live) or `stream-token` for the main agent.
+fn emit_stream_token(
+    app_handle: &tauri::AppHandle,
+    subagent_id: Option<&str>,
+    token: &str,
+    thinking: bool,
+) {
+    if let Some(id) = subagent_id {
+        app_handle
+            .emit(
+                "subagent-token",
+                SubAgentTokenPayload {
+                    id: id.to_string(),
+                    token: token.to_string(),
+                    thinking,
+                },
+            )
+            .ok();
+    } else {
+        app_handle
+            .emit(
+                "stream-token",
+                StreamPayload {
+                    token: token.to_string(),
+                    thinking,
+                },
+            )
+            .ok();
+    }
+}
+
+/// Emit tool progress, routing to `subagent-tool-progress` for sub-agents.
+fn emit_tool_progress(
+    app_handle: &tauri::AppHandle,
+    subagent_id: Option<&str>,
+    kind: &str,
+    name: &str,
+    path: Option<String>,
+) {
+    if let Some(id) = subagent_id {
+        app_handle
+            .emit(
+                "subagent-tool-progress",
+                SubAgentToolProgressPayload {
+                    id: id.to_string(),
+                    kind: kind.to_string(),
+                    name: name.to_string(),
+                    path,
+                },
+            )
+            .ok();
+    } else {
+        app_handle
+            .emit(
+                "tool-progress",
+                ToolProgressPayload {
+                    kind: kind.to_string(),
+                    name: name.to_string(),
+                    path,
+                },
+            )
+            .ok();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sub-agents (multi-model provider routing)
+// ---------------------------------------------------------------------------
+
+/// Bundles everything needed to spawn and run sub-agents from within a tool
+/// loop. Passed into the tool loops so `spawn_subagent` can launch a sub-agent
+/// on a (possibly different) provider with its own model + tools.
+#[derive(Clone, Copy)]
+struct SubAgentRunner<'a> {
+    app_handle: &'a tauri::AppHandle,
+    client: &'a reqwest::Client,
+    main_backend: &'a str,
+    main_url: &'a str,
+    main_model: &'a str,
+    main_api_key: &'a str,
+    providers: &'a HashMap<String, ProviderConfig>,
+    tool_configs: &'a HashMap<String, serde_json::Value>,
+    root_path: Option<&'a str>,
+    max_tokens: Option<u32>,
+    max_iterations: usize,
+    use_model_affinity: bool,
+    /// Current sub-agent nesting depth (to bound recursion).
+    depth: usize,
+}
+
+/// Default tool set for a sub-agent that doesn't specify its own `tools:` list.
+const DEFAULT_SUBAGENT_TOOLS: [&str; 8] = [
+    "read_file",
+    "list_directory",
+    "grep",
+    "edit",
+    "write_file",
+    "web_fetch",
+    "web_search",
+    "bash_sandbox",
+];
+
+const MAX_SUBAGENT_DEPTH: usize = 4;
+
+/// Run a sub-agent and return its final result + full trace (for the frontend
+/// "window"). Emits `subagent-*` events so the window streams live.
+async fn run_subagent(
+    runner: &SubAgentRunner<'_>,
+    agent_name: &str,
+    task: &str,
+) -> Result<(String, SubAgentTrace), String> {
+    if runner.depth >= MAX_SUBAGENT_DEPTH {
+        return Err(format!(
+            "Sub-agent nesting depth limit ({}) exceeded",
+            MAX_SUBAGENT_DEPTH
+        ));
+    }
+    let root = runner
+        .root_path
+        .ok_or("No project folder is open — sub-agents require one")?;
+    let agent = load_agent_config(root, agent_name)?;
+
+    // Resolve the sub-agent's provider: its own backend/model when set,
+    // otherwise fall back to the main agent's.
+    let backend = if agent.backend.is_empty() {
+        runner.main_backend.to_string()
+    } else {
+        agent.backend.clone()
+    };
+    let model = if agent.model.is_empty() {
+        runner.main_model.to_string()
+    } else {
+        agent.model.clone()
+    };
+    let provider = runner.providers.get(&backend);
+    let url = provider
+        .and_then(|p| if p.url.is_empty() { None } else { Some(p.url.clone()) })
+        .unwrap_or_else(|| runner.main_url.to_string());
+    let api_key = provider
+        .and_then(|p| if p.api_key.is_empty() { None } else { Some(p.api_key.clone()) })
+        .unwrap_or_else(|| runner.main_api_key.to_string());
+
+    // Resolve the sub-agent's tool set.
+    let tool_names: Vec<String> = if agent.tools.is_empty() {
+        DEFAULT_SUBAGENT_TOOLS.iter().map(|s| s.to_string()).collect()
+    } else {
+        agent.tools.clone()
+    };
+    let tools = build_tool_schemas(&tool_names, runner.root_path);
+
+    let id = format!(
+        "sa_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    let msgs = vec![
+        ChatMessage { role: "system".to_string(), content: agent.prompt.clone() },
+        ChatMessage { role: "user".to_string(), content: task.to_string() },
+    ];
+
+    runner
+        .app_handle
+        .emit("subagent-start", SubAgentStartPayload {
+            id: id.clone(),
+            agent: agent.name.clone(),
+            task: task.to_string(),
+            model: model.clone(),
+        })
+        .ok();
+
+    let sub_runner = SubAgentRunner { depth: runner.depth + 1, ..*runner };
+
+    let result = if backend == "ollama" {
+        let ctx = OllamaChatContext {
+            app_handle: runner.app_handle,
+            client: runner.client,
+            url: &url,
+            model: &model,
+            tool_configs: runner.tool_configs,
+            root_path: runner.root_path,
+        };
+        ollama_chat_with_tools(
+            &ctx,
+            &msgs,
+            &tools,
+            runner.max_iterations,
+            agent.temperature,
+            runner.max_tokens.unwrap_or(4096),
+            Some(&id),
+            Some(&sub_runner),
+        )
+        .await
+    } else if backend == "llamacpp" {
+        Err("Sub-agents on the llamacpp backend are not supported; use ollama or a cloud provider.".to_string())
+    } else {
+        run_openai_tool_loop(
+            runner.client,
+            runner.app_handle,
+            &url,
+            &api_key,
+            &model,
+            &backend,
+            &msgs,
+            &tools,
+            runner.tool_configs,
+            runner.root_path,
+            agent.temperature,
+            runner.max_tokens,
+            runner.max_iterations,
+            None,
+            runner.use_model_affinity,
+            Some(&id),
+            Some(&sub_runner),
+        )
+        .await
+    };
+
+    match result {
+        Ok(chat) => {
+            let trace = SubAgentTrace {
+                id: id.clone(),
+                agent: agent.name.clone(),
+                task: task.to_string(),
+                model,
+                result: chat.content.clone(),
+                tool_calls: chat.tool_calls.clone(),
+            };
+            runner
+                .app_handle
+                .emit("subagent-done", SubAgentDonePayload {
+                    id: id.clone(),
+                    result: chat.content.clone(),
+                })
+                .ok();
+            Ok((chat.content, trace))
+        }
+        Err(e) => {
+            let err_msg = format!("Sub-agent error: {}", e);
+            runner
+                .app_handle
+                .emit("subagent-done", SubAgentDonePayload {
+                    id: id.clone(),
+                    result: err_msg.clone(),
+                })
+                .ok();
+            Err(format!("Sub-agent '{}' failed: {}", agent.name, e))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2210,6 +2647,49 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
                     }
                 }
             }
+        }
+    }
+
+    // Add a `spawn_subagent` tool when sub-agents are defined in `.agents/`.
+    // The description lists each agent + its description so the main LLM can
+    // decide which tasks to route to which sub-agent.
+    if let Some(rp) = root_path {
+        let agents = list_agent_configs(rp);
+        if !agents.is_empty() {
+            let agent_list: Vec<String> = agents
+                .iter()
+                .map(|a| {
+                    let desc = if a.description.is_empty() { "(no description)" } else { a.description.as_str() };
+                    format!("- {}: {}", a.name, desc)
+                })
+                .collect();
+            tools.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "spawn_subagent",
+                    "description": format!(
+                        "Delegate a task to a specialized sub-agent and return its result. \
+                         Use this to offload focused work (e.g. code review, research, writing, \
+                         or anything another agent is better suited for) to a sub-agent that runs \
+                         independently and reports back. Available sub-agents:\n{}",
+                        agent_list.join("\n")
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent": {
+                                "type": "string",
+                                "description": "The name of the sub-agent to spawn (must match one of the available sub-agents)"
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "The task or instruction for the sub-agent"
+                            }
+                        },
+                        "required": ["agent", "task"]
+                    }
+                }
+            }));
         }
     }
 
@@ -3327,6 +3807,7 @@ async fn stream_ollama_response(
     mut resp: reqwest::Response,
     app_handle: &tauri::AppHandle,
     full_content: &mut String,
+    subagent_id: Option<&str>,
 ) -> Result<StreamResult, String> {
     let mut iter_content = String::new();
     let mut iter_thinking = String::new();
@@ -3350,30 +3831,14 @@ async fn stream_ollama_response(
             if let Some(thinking) = data["message"]["thinking"].as_str() {
                 if !thinking.is_empty() {
                     iter_thinking.push_str(thinking);
-                    app_handle
-                        .emit(
-                            "stream-token",
-                            StreamPayload {
-                                token: thinking.to_string(),
-                                thinking: true,
-                            },
-                        )
-                        .ok();
+                    emit_stream_token(app_handle, subagent_id, thinking, true);
                 }
             }
             if let Some(content) = data["message"]["content"].as_str() {
                 if !content.is_empty() {
                     iter_content.push_str(content);
                     full_content.push_str(content);
-                    app_handle
-                        .emit(
-                            "stream-token",
-                            StreamPayload {
-                                token: content.to_string(),
-                                thinking: false,
-                            },
-                        )
-                        .ok();
+                    emit_stream_token(app_handle, subagent_id, content, false);
                 }
             }
             // Detect tool calls in ANY chunk — not just the done:true chunk.
@@ -3389,9 +3854,9 @@ async fn stream_ollama_response(
     };
 
     loop {
-        match resp.chunk().await.map_err(|e| e.to_string())? {
-            None => break,
-            Some(chunk) => {
+        match resp.chunk().await {
+            Ok(None) => break,
+            Ok(Some(chunk)) => {
                 buf.extend_from_slice(&chunk);
                 while let Some(line) = take_next_line(&mut buf) {
                     if line.is_empty() {
@@ -3399,6 +3864,18 @@ async fn stream_ollama_response(
                     }
                     process_line(&line, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
                 }
+            }
+            Err(e) => {
+                // Stream interrupted mid-response — keep partial content rather
+                // than failing the whole request with a bare decode error.
+                eprintln!("[nolock] ollama stream interrupted: {}", e);
+                if iter_content.is_empty() && iter_thinking.is_empty() && tool_calls.is_none() {
+                    return Err(format!("Stream interrupted before any content: {}", e));
+                }
+                let note = format!("\n\n[stream interrupted: {}]", e);
+                iter_content.push_str(&note);
+                full_content.push_str(&note);
+                break;
             }
         }
     }
@@ -3444,6 +3921,8 @@ async fn ollama_chat_with_tools(
     max_iterations: usize,
     temperature: f64,
     max_tokens: u32,
+    subagent_id: Option<&str>,
+    runner: Option<&SubAgentRunner<'_>>,
 ) -> Result<ChatResult, String> {
     let mut ollama_msgs = build_initial_messages(messages, tools);
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
@@ -3492,7 +3971,7 @@ async fn ollama_chat_with_tools(
         }
 
         // --- Stream the response ---
-        let stream = stream_ollama_response(resp, ctx.app_handle, &mut full_content).await?;
+        let stream = stream_ollama_response(resp, ctx.app_handle, &mut full_content, subagent_id).await?;
 
         // --- Handle tool calls or return final response ---
         if let Some(calls) = stream.tool_calls {
@@ -3515,35 +3994,39 @@ async fn ollama_chat_with_tools(
                 let args = &call["function"]["arguments"];
 
                 let tool_path = args["path"].as_str().map(String::from);
-                ctx.app_handle
-                    .emit("tool-progress", ToolProgressPayload {
-                        kind: "start".to_string(),
-                        name: name.to_string(),
-                        path: tool_path.clone(),
-                    })
-                    .ok();
+                emit_tool_progress(ctx.app_handle, subagent_id, "start", name, tool_path.clone());
 
-                let (result, file_changes) =
+                // Sub-agent spawning — run the sub-agent and capture its trace.
+                let mut subagent_trace: Option<SubAgentTrace> = None;
+                let (result, file_changes) = if name == "spawn_subagent" {
+                    let agent = args["agent"].as_str().unwrap_or("");
+                    let task = args["task"].as_str().unwrap_or("");
+                    match runner {
+                        Some(r) => match Box::pin(run_subagent(r, agent, task)).await {
+                            Ok((out, trace)) => {
+                                subagent_trace = Some(trace);
+                                (out, Vec::new())
+                            }
+                            Err(e) => {
+                                emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
+                                (format!("Tool error: {}", e), Vec::new())
+                            }
+                        },
+                        None => {
+                            emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
+                            ("Tool error: sub-agents are not available".to_string(), Vec::new())
+                        }
+                    }
+                } else {
                     execute_tool_tracked(name, args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
                         .await
                         .unwrap_or_else(|e| {
-                            ctx.app_handle
-                                .emit("tool-progress", ToolProgressPayload {
-                                    kind: "error".to_string(),
-                                    name: name.to_string(),
-                                    path: tool_path.clone(),
-                                })
-                                .ok();
+                            emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
                             (format!("Tool error: {}", e), Vec::new())
-                        });
+                        })
+                };
 
-                ctx.app_handle
-                    .emit("tool-progress", ToolProgressPayload {
-                        kind: "done".to_string(),
-                        name: name.to_string(),
-                        path: tool_path,
-                    })
-                    .ok();
+                emit_tool_progress(ctx.app_handle, subagent_id, "done", name, tool_path);
 
                 let snippet = if result.len() > 200 {
                     format!("{}...", &result[..200])
@@ -3557,6 +4040,7 @@ async fn ollama_chat_with_tools(
                     result_snippet: snippet,
                     result_full: result.clone(),
                     file_changes,
+                    subagent: subagent_trace,
                 });
 
                 // Add tool result message
@@ -3650,6 +4134,7 @@ async fn stream_openai_response(
     mut resp: reqwest::Response,
     app_handle: &tauri::AppHandle,
     full_content: &mut String,
+    subagent_id: Option<&str>,
 ) -> Result<OpenAIStreamResult, String> {
     let mut iter_content = String::new();
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
@@ -3665,15 +4150,7 @@ async fn stream_openai_response(
             // `thinking` flag so the frontend can display it transiently.
             if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
                 if !thinking.is_empty() {
-                    app_handle
-                        .emit(
-                            "stream-token",
-                            StreamPayload {
-                                token: thinking.to_string(),
-                                thinking: true,
-                            },
-                        )
-                        .ok();
+                    emit_stream_token(app_handle, subagent_id, thinking, true);
                 }
             }
             // Content delta
@@ -3681,15 +4158,7 @@ async fn stream_openai_response(
                 if !content.is_empty() {
                     iter_content.push_str(content);
                     full_content.push_str(content);
-                    app_handle
-                        .emit(
-                            "stream-token",
-                            StreamPayload {
-                                token: content.to_string(),
-                                thinking: false,
-                            },
-                        )
-                        .ok();
+                    emit_stream_token(app_handle, subagent_id, content, false);
                 }
             }
             // Tool calls delta (OpenAI format: delta.tool_calls)
@@ -3727,9 +4196,9 @@ async fn stream_openai_response(
     };
 
     loop {
-        match resp.chunk().await.map_err(|e| e.to_string())? {
-            None => break,
-            Some(chunk) => {
+        match resp.chunk().await {
+            Ok(None) => break,
+            Ok(Some(chunk)) => {
                 buf.extend_from_slice(&chunk);
                 while let Some(line) = take_next_line(&mut buf) {
                     if let Some(data) = line.strip_prefix("data: ") {
@@ -3738,6 +4207,20 @@ async fn stream_openai_response(
                         process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
                     }
                 }
+            }
+            Err(e) => {
+                // The connection was interrupted mid-stream (e.g. the provider
+                // reset the connection after a slow response). If we already
+                // received content or tool calls, return them with a note instead
+                // of failing the whole request with a bare decode error.
+                eprintln!("[nolock] openai stream interrupted: {}", e);
+                if iter_content.is_empty() && tool_calls.is_none() {
+                    return Err(format!("Stream interrupted before any content: {}", e));
+                }
+                let note = format!("\n\n[stream interrupted: {}]", e);
+                iter_content.push_str(&note);
+                full_content.push_str(&note);
+                break;
             }
         }
     }
@@ -3793,6 +4276,8 @@ async fn run_openai_tool_loop(
     max_iterations: usize,
     extra_headers: Option<Vec<(&str, &str)>>,
     use_model_affinity: bool,
+    subagent_id: Option<&str>,
+    runner: Option<&SubAgentRunner<'_>>,
 ) -> Result<ChatResult, String> {
     let mut openai_msgs: Vec<serde_json::Value> = messages
         .iter()
@@ -3928,7 +4413,7 @@ async fn run_openai_tool_loop(
         }
 
         // Stream the response
-        let stream = stream_openai_response(resp, app_handle, &mut full_content).await?;
+        let stream = stream_openai_response(resp, app_handle, &mut full_content, subagent_id).await?;
 
         // Handle tool calls or return final response
         if let Some(calls) = stream.tool_calls {
@@ -3971,35 +4456,39 @@ async fn run_openai_tool_loop(
                 let args = normalize_tool_args(&call["function"]["arguments"]);
 
                 let tool_path = args["path"].as_str().map(String::from);
-                app_handle
-                    .emit("tool-progress", ToolProgressPayload {
-                        kind: "start".to_string(),
-                        name: name.to_string(),
-                        path: tool_path.clone(),
-                    })
-                    .ok();
+                emit_tool_progress(app_handle, subagent_id, "start", name, tool_path.clone());
 
-                let (result, file_changes) =
+                // Sub-agent spawning — run the sub-agent and capture its trace.
+                let mut subagent_trace: Option<SubAgentTrace> = None;
+                let (result, file_changes) = if name == "spawn_subagent" {
+                    let agent = args["agent"].as_str().unwrap_or("");
+                    let task = args["task"].as_str().unwrap_or("");
+                    match runner {
+                        Some(r) => match Box::pin(run_subagent(r, agent, task)).await {
+                            Ok((out, trace)) => {
+                                subagent_trace = Some(trace);
+                                (out, Vec::new())
+                            }
+                            Err(e) => {
+                                emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
+                                (format!("Tool error: {}", e), Vec::new())
+                            }
+                        },
+                        None => {
+                            emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
+                            ("Tool error: sub-agents are not available".to_string(), Vec::new())
+                        }
+                    }
+                } else {
                     execute_tool_tracked(name, &args, client, tool_configs, root_path, backend)
                         .await
                         .unwrap_or_else(|e| {
-                            app_handle
-                                .emit("tool-progress", ToolProgressPayload {
-                                    kind: "error".to_string(),
-                                    name: name.to_string(),
-                                    path: tool_path.clone(),
-                                })
-                                .ok();
+                            emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
                             (format!("Tool error: {}", e), Vec::new())
-                        });
+                        })
+                };
 
-                app_handle
-                    .emit("tool-progress", ToolProgressPayload {
-                        kind: "done".to_string(),
-                        name: name.to_string(),
-                        path: tool_path,
-                    })
-                    .ok();
+                emit_tool_progress(app_handle, subagent_id, "done", name, tool_path);
 
                 let snippet = if result.len() > 200 {
                     format!("{}...", &result[..200])
@@ -4013,6 +4502,7 @@ async fn run_openai_tool_loop(
                     result_snippet: snippet,
                     result_full: result.clone(),
                     file_changes,
+                    subagent: subagent_trace,
                 });
 
                 // Add tool result message
@@ -4469,6 +4959,24 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     let tools = build_tool_schemas(&req.tools_enabled, req.root_path.as_deref());
     let has_tools = !tools.is_empty();
 
+    // Runner used to spawn sub-agents from within the tool loops.
+    let main_api_key = req.api_key.clone().unwrap_or_default();
+    let runner = SubAgentRunner {
+        app_handle: &app_handle,
+        client: &client,
+        main_backend: &req.backend,
+        main_url: &req.url,
+        main_model: &req.model,
+        main_api_key: &main_api_key,
+        providers: &req.providers,
+        tool_configs: &req.tool_configs,
+        root_path: req.root_path.as_deref(),
+        max_tokens: cloud_max_tokens,
+        max_iterations: req.max_iterations,
+        use_model_affinity: req.model_affinity.unwrap_or(true),
+        depth: 0,
+    };
+
     match req.backend.as_str() {
         "ollama" => {
             if has_tools {
@@ -4480,7 +4988,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     tool_configs: &req.tool_configs,
                     root_path: req.root_path.as_deref(),
                 };
-                ollama_chat_with_tools(&ollama_ctx, &messages, &tools, req.max_iterations, temperature, max_tokens)
+                ollama_chat_with_tools(&ollama_ctx, &messages, &tools, req.max_iterations, temperature, max_tokens, None, Some(&runner))
                     .await
             } else {
                 // No tools — simple single-turn chat (streaming)
@@ -4989,6 +5497,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 req.max_iterations,
                 None, // no extra headers needed for DigitalOcean
                 use_model_affinity,
+                None, // subagent_id (main agent)
+                Some(&runner),
             )
             .await
         }
@@ -5111,6 +5621,15 @@ mod tests {
         // No trailing newline — should return None, not lose data.
         buf.extend_from_slice(b"partial");
         assert!(take_next_line(&mut buf).is_none());
+    }
+
+    // ---- Sub-agent config parsing ------------------------------------------
+    #[test]
+    fn test_parse_tools_list() {
+        assert_eq!(parse_tools_list("read_file, grep , edit"), vec!["read_file", "grep", "edit"]);
+        assert_eq!(parse_tools_list("[\"read_file\", \"web_search\"]"), vec!["read_file", "web_search"]);
+        assert_eq!(parse_tools_list("  "), Vec::<String>::new());
+        assert_eq!(parse_tools_list(""), Vec::<String>::new());
     }
 
     // ---- DirEntry sorting / filtering ------------------------------------

@@ -13,6 +13,10 @@ export interface AgentConfig {
   model: string;
   /** Optional temperature override (0.0–2.0). */
   temperature: number;
+  /** Optional provider override — empty string means "use default chat backend". */
+  backend: string;
+  /** Comma-separated tool names the sub-agent may use; empty = default set. */
+  tools: string;
 }
 
 export interface AgentEntry {
@@ -47,6 +51,8 @@ const DEFAULT_CONFIG: AgentConfig = {
   prompt: "",
   model: "",
   temperature: 0.7,
+  backend: "",
+  tools: "",
 };
 
 // ---------------------------------------------------------------------------
@@ -140,6 +146,8 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
         prompt: data.prompt || "",
         model: data.model || "",
         temperature: typeof data.temperature === "number" ? data.temperature : 0.7,
+        backend: data.backend || "",
+        tools: Array.isArray(data.tools) ? data.tools.join(", ") : (data.tools || ""),
       };
       setEditing(config);
       setIsNew(false);
@@ -175,7 +183,9 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
 name: ${editing.name}
 description: ${editing.description || ""}
 model: ${editing.model || ""}
+backend: ${editing.backend || ""}
 temperature: ${editing.temperature}
+tools: ${editing.tools || ""}
 ---
 
 ${editing.prompt}`;
@@ -374,6 +384,35 @@ ${editing.prompt}`;
               onChange={(e) => updateAgentField("model", e.target.value)}
               placeholder="Leave empty to use default chat model"
             />
+
+            <label className="field-label">Provider Override (optional)</label>
+            <select
+              className="field-input"
+              value={editing.backend}
+              onChange={(e) => updateAgentField("backend", e.target.value)}
+            >
+              <option value="">Use default chat backend</option>
+              <option value="ollama">Ollama</option>
+              <option value="llamacpp">llama.cpp</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="opencode">OpenCode Zen</option>
+              <option value="digitalocean">DigitalOcean Inference Router</option>
+            </select>
+            <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
+              When this agent runs as a sub-agent, it uses this provider instead of the main chat backend.
+            </span>
+
+            <label className="field-label">Allowed Tools (comma-separated, optional)</label>
+            <input
+              className="field-input"
+              value={editing.tools}
+              onChange={(e) => updateAgentField("tools", e.target.value)}
+              placeholder="e.g. read_file, grep, web_search (empty = default set)"
+            />
+            <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
+              Tools this sub-agent may use: read_file, list_directory, grep, edit, write_file,
+              web_fetch, web_search, bash_sandbox. Leave empty for the default set.
+            </span>
 
             <label className="field-label">
               Temperature: {editing.temperature.toFixed(1)}
