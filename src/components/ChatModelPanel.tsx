@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import ModelSelector from "./ModelSelector";
 import Select from "./Select";
-import { BACKENDS, resolveBackendUrl, getChatBackend } from "../lib/backends";
+import { BACKENDS, resolveBackendUrl, getChatBackend, isCloudBackend } from "../lib/backends";
 
 interface Props {
   visible: boolean;
@@ -15,6 +15,11 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   const [systemPrompt, setSystemPrompt] = useState("");
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(8192);
+  // Cloud max tokens — empty string means "unlimited" (omit the field so the
+  // provider's own default applies). Only used for cloud backends.
+  const [cloudMaxTokens, setCloudMaxTokens] = useState("");
+  // Context window used for the context % meter denominator.
+  const [contextLength, setContextLength] = useState(128_000);
   const [showThinking, setShowThinking] = useState(false);
 
   useEffect(() => {
@@ -26,6 +31,9 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.7);
     const savedTokens = localStorage.getItem("nolock.chatMaxTokens");
     setMaxTokens(savedTokens ? parseInt(savedTokens, 10) : 8192);
+    setCloudMaxTokens(localStorage.getItem("nolock.chatCloudMaxTokens") || "");
+    const savedCtx = localStorage.getItem("nolock.contextLength");
+    setContextLength(savedCtx ? parseInt(savedCtx, 10) : 128_000);
     // Chat uses its own provider (falls back to the global one).
     const chatBackend = getChatBackend();
     setBackend(chatBackend);
@@ -44,6 +52,8 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.chatSystemPrompt", systemPrompt);
     localStorage.setItem("nolock.chatTemperature", String(temperature));
     localStorage.setItem("nolock.chatMaxTokens", String(maxTokens));
+    localStorage.setItem("nolock.chatCloudMaxTokens", cloudMaxTokens);
+    localStorage.setItem("nolock.contextLength", String(contextLength));
     localStorage.setItem("nolock.showThinking", String(showThinking));
     onClose();
   };
@@ -108,24 +118,65 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
             <span>Creative (2.0)</span>
           </div>
 
-          <label className="field-label">Max Tokens</label>
+          {isCloudBackend(backend) ? (
+            <>
+              <label className="field-label">Cloud Max Tokens</label>
+              <input
+                className="field-input"
+                type="number"
+                min={1}
+                step={64}
+                value={cloudMaxTokens}
+                onChange={(e) => setCloudMaxTokens(e.target.value)}
+                placeholder="32768 (default)"
+                style={{ width: 120 }}
+              />
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
+                Maximum output tokens for cloud providers. Leave empty for the{" "}
+                <strong>default (32768)</strong> — this bounds reasoning-model chains-of-thought
+                so they don't "overthink" indefinitely, while staying generous enough for
+                multi-tool agent runs. For DigitalOcean this maps to{" "}
+                <code>max_completion_tokens</code>, scoped across the whole tool loop.
+              </span>
+            </>
+          ) : (
+            <>
+              <label className="field-label">Max Tokens</label>
+              <input
+                className="field-input"
+                type="number"
+                min={64}
+                max={32768}
+                step={64}
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(Math.max(64, parseInt(e.target.value, 10) || 2048))}
+                style={{ width: 120 }}
+              />
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
+                Maximum number of tokens in the model's response (64–32768).
+                When Agent Tools are enabled, the backend auto-scales this to 8192+ for thinking models.
+              </span>
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4, fontStyle: "italic" }}>
+                Thinking models (Qwen3, DeepSeek-R1, etc.) consume tokens for hidden reasoning.
+                Set this to at least 4096 (or leave it at 8192) when using tools, otherwise the response may be cut off.
+              </span>
+            </>
+          )}
+
+          <label className="field-label">Context Window</label>
           <input
             className="field-input"
             type="number"
-            min={64}
-            max={32768}
-            step={64}
-            value={maxTokens}
-            onChange={(e) => setMaxTokens(Math.max(64, parseInt(e.target.value, 10) || 2048))}
-            style={{ width: 120 }}
+            min={1024}
+            step={1024}
+            value={contextLength}
+            onChange={(e) => setContextLength(Math.max(1024, parseInt(e.target.value, 10) || 128_000))}
+            style={{ width: 140 }}
           />
-          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
-            Maximum number of tokens in the model's response (64–32768).
-            When Agent Tools are enabled, the backend auto-scales this to 8192+ for thinking models.
-          </span>
-          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4, fontStyle: "italic" }}>
-            Thinking models (Qwen3, DeepSeek-R1, etc.) consume tokens for hidden reasoning.
-            Set this to at least 4096 (or leave it at 8192) when using tools, otherwise the response may be cut off.
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>
+            Model context window size used to compute the context % meter.
+            For Ollama this is auto-detected from the model; set it manually for cloud
+            models (e.g. 65536, 128000, 200000).
           </span>
 
           <label className="field-label" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>

@@ -4,6 +4,7 @@ out/
 src-tauri/target/
 *.vsix
 .planning/
+.sessions/
 src-tauri/gen/
 .venv-rlhf/
 # Ignore RLHF feedback data, but keep the training guide and dependencies tracked

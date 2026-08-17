@@ -580,8 +580,17 @@ export default function App() {
         return;
       }
 
-      const tag = (e.target as HTMLElement).tagName;
-      const isInput = tag === "INPUT" || tag === "TEXTAREA";
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName ?? "";
+      // Exclude xterm.js hidden textarea (xterm-helper-textarea) from the
+      // input check. That textarea has tagName TEXTAREA but it's just a
+      // technical capture device for the terminal emulator — not an actual
+      // user text input.  We need chord shortcuts to still work when the
+      // terminal panel is focused (the textarea sits inside a .xterm element).
+      // `?.closest?.(...)` guards against non-Element targets (e.g. window /
+      // document) dispatched in tests and by global keyboard listeners.
+      const isXtermTextarea = !!target?.closest?.(".xterm");
+      const isInput = tag === "INPUT" || (tag === "TEXTAREA" && !isXtermTextarea);
 
       // When focus is in an input/textarea, skip chord prefixes and app
       // shortcuts so the input gets native handling (e.g. Ctrl+A selectAll,

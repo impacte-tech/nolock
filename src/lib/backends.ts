@@ -38,6 +38,16 @@ export function getChatBackend(): string {
   return localStorage.getItem("nolock.chatBackend") || localStorage.getItem("nolock.backend") || "ollama";
 }
 
+/**
+ * Whether a backend is a hosted/cloud provider (OpenRouter, OpenCode Zen,
+ * DigitalOcean Inference Router) as opposed to a local server (Ollama,
+ * llama.cpp). Cloud providers have large context windows and should not be
+ * subject to the small-local-model tool-result / max-token heuristics.
+ */
+export function isCloudBackend(backend: string): boolean {
+  return backend !== "ollama" && backend !== "llamacpp";
+}
+
 /** The backend used for FITM completion requests. */
 export function getFitmBackend(): string {
   return localStorage.getItem("nolock.fitmBackend") || localStorage.getItem("nolock.backend") || "ollama";
