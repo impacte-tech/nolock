@@ -7,7 +7,7 @@ import SkillAutocomplete from "./SkillAutocomplete";
 import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
-import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity } from "../lib/backends";
+import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity, isCloudBackend } from "../lib/backends";
 import {
   type HookRunState,
   type ToolCallLog as HookToolCallLog,
@@ -31,6 +31,18 @@ import {
   getModelContext,
   serializeToolCalls,
 } from "../lib/rlhf";
+import {
+  type SessionRecord,
+  newSessionId,
+  listSessions,
+  saveSession,
+  deleteSession,
+  archiveSession,
+  summarizeMessages,
+  buildSessionMetadata,
+  formatTokens,
+  formatSessionTime,
+} from "../lib/sessions";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -38,11 +50,25 @@ import {
 // ---------------------------------------------------------------------------
 const marked = new Marked({ gfm: true, breaks: true });
 
+export interface FileChangeEdit {
+  old_text: string;
+  new_text: string;
+}
+
+export interface FileChange {
+  path: string;
+  action: "write" | "edit";
+  created: boolean;
+  bytes: number;
+  edits?: FileChangeEdit[];
+}
+
 export interface ToolCallLog {
   name: string;
   arguments: string;
   result_snippet: string;
   result_full: string;
+  file_changes?: FileChange[];
 }
 
 interface Message {
@@ -172,6 +198,200 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
           </a>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Dependency-free line-level diff (LCS-based) used to render expandable
+ * before/after views for file edits without pulling in a `diff` dependency.
+ * Returns an ordered list of lines tagged as context / added / removed.
+ */
+type DiffLine = { type: "context" | "added" | "removed"; text: string };
+
+function diffLines(oldText: string, newText: string): DiffLine[] {
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  const n = oldLines.length;
+  const m = newLines.length;
+
+  // dp[i][j] = LCS length of oldLines[i..] and newLines[j..]
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = oldLines[i] === newLines[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const out: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (oldLines[i] === newLines[j]) {
+      out.push({ type: "context", text: oldLines[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      out.push({ type: "removed", text: oldLines[i] });
+      i++;
+    } else {
+      out.push({ type: "added", text: newLines[j] });
+      j++;
+    }
+  }
+  while (i < n) { out.push({ type: "removed", text: oldLines[i] }); i++; }
+  while (j < m) { out.push({ type: "added", text: newLines[j] }); j++; }
+  return out;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Custom session history dropdown — matches the app's monochrome panel style. */
+function SessionPicker({
+  sessions,
+  currentId,
+  currentTitle,
+  onNew,
+  onDelete,
+}: {
+  sessions: SessionRecord[];
+  currentId: string;
+  currentTitle: string;
+  onNew: () => void;
+  onDelete: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  return (
+    <div className="session-picker" ref={rootRef}>
+      <button
+        className="session-picker-toggle"
+        onClick={() => setOpen((o) => !o)}
+        title="Sessions"
+      >
+        <span className="session-picker-toggle-title">{currentTitle || "New session"}</span>
+        <span className="session-picker-toggle-chevron">{open ? "\u25BE" : "\u25B8"}</span>
+      </button>
+      {open && (
+        <div className="session-picker-menu">
+          <button
+            className="session-picker-new"
+            onClick={() => { onNew(); setOpen(false); }}
+          >
+            + New session
+          </button>
+          <div className="session-picker-list">
+            {sessions.map((s) => (
+              <div
+                key={s.id}
+                className={`session-picker-item${s.id === currentId ? " current" : ""}`}
+              >
+                <div className="session-picker-item-main">
+                  <span className="session-picker-item-title">
+                    {s.summary || s.firstMessage || s.id}
+                  </span>
+                  <span className="session-picker-item-meta">
+                    {formatSessionTime(s.updatedAt)}
+                    {" · "}{s.messageCount} msg{s.messageCount === 1 ? "" : "s"}
+                    {" · "}{s.toolCallCount} tool{s.toolCallCount === 1 ? "" : "s"}
+                  </span>
+                  {s.contextWindow > 0 && (
+                    <span className="session-picker-item-tokens">
+                      {formatTokens(s.tokenUsage)} / {formatTokens(s.contextWindow)} tok
+                    </span>
+                  )}
+                </div>
+                <button
+                  className="session-picker-delete"
+                  onClick={() => onDelete(s.id)}
+                  title="Delete session"
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+            {sessions.length === 0 && (
+              <div className="session-picker-empty">No saved sessions yet</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
+  const lines = diffLines(oldText, newText);
+  return (
+    <pre className="file-diff-block">
+      {lines.map((line, i) => (
+        <div key={i} className={`diff-line diff-${line.type}`}>
+          <span className="diff-marker">
+            {line.type === "added" ? "+" : line.type === "removed" ? "-" : " "}
+          </span>
+          <span className="diff-text">{line.text || " "}</span>
+        </div>
+      ))}
+    </pre>
+  );
+}
+
+function FileChangeItem({ change }: { change: FileChange }) {
+  const [expanded, setExpanded] = useState(false);
+  const isEdit = change.action === "edit" && change.edits && change.edits.length > 0;
+  const badge = change.created ? "created" : change.action === "edit" ? "edited" : "written";
+  return (
+    <div className="file-change-item">
+      <div className="file-change-item-header" onClick={() => setExpanded(!expanded)}>
+        <span className="file-change-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        <span className={`file-change-badge file-change-badge-${badge}`}>{badge}</span>
+        <span className="file-change-path">{change.path}</span>
+        <span className="file-change-bytes">{formatBytes(change.bytes)}</span>
+      </div>
+      {expanded && isEdit && (
+        <div className="file-change-diff">
+          {change.edits!.map((edit, i) => (
+            <DiffBlock key={i} oldText={edit.old_text} newText={edit.new_text} />
+          ))}
+        </div>
+      )}
+      {expanded && !isEdit && (
+        <div className="file-change-summary">
+          {change.created
+            ? `New file (${formatBytes(change.bytes)})`
+            : `File overwritten (${formatBytes(change.bytes)})`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Shows the files a tool call changed, with expandable before/after diffs. */
+function FileChangesBlock({ changes }: { changes: FileChange[] }) {
+  return (
+    <div className="file-changes">
+      <div className="file-changes-header">Files changed</div>
+      {changes.map((change, i) => (
+        <FileChangeItem key={`${change.path}-${i}`} change={change} />
+      ))}
     </div>
   );
 }
@@ -485,6 +705,45 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [thinkingText, setThinkingText] = useState("");
   const showThinking = localStorage.getItem("nolock.showThinking") === "true";
 
+  /** Live tool progress (name + file path) emitted by the backend while the
+   *  agent tool loop runs. Shown as a transient status line near the input. */
+  const [toolProgress, setToolProgress] = useState<{ name: string; path?: string; status: "start" | "done" | "error" } | null>(null);
+
+  // Subscribe to live tool-progress events emitted by the Rust tool loops.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let mounted = true;
+    listen<{ type: string; name: string; path?: string }>("tool-progress", (event) => {
+      if (!mounted) return;
+      const { type, name, path } = event.payload;
+      if (type === "start" || type === "done" || type === "error") {
+        setToolProgress({ name, path, status: type });
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => {
+      mounted = false;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // Clear the progress line once generation finishes.
+  useEffect(() => {
+    if (!loading) setToolProgress(null);
+  }, [loading]);
+
+  /** The model the DigitalOcean Inference Router selected (from the
+   *  x-model-router-selected-model header), surfaced so reasoning models can
+   *  be identified when they "overthink". */
+  const [routedModel, setRoutedModel] = useState<string | null>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen<string>("model-routed", (event) => {
+      if (event.payload) setRoutedModel(event.payload);
+    }).then((fn) => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
+  }, []);
+
   // ---- Hooks: run cards + concurrency ----
   const [hookRuns, setHookRuns] = useState<HookRunState[]>(() => getHookRuns());
   const hookBusy = hookRuns.some((r) => r.status === "queued" || r.status === "running");
@@ -766,16 +1025,19 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     return () => window.removeEventListener("click", handleClick, true);
   }, []);
 
-  /** Maximum tokens allowed in context window — fetched from backend (/api/show for Ollama). */
+  /** Maximum tokens allowed in context window — configurable for cloud, auto-detected for Ollama. */
   const [maxTokens, setMaxTokens] = useState<number>(() => {
-    const stored = localStorage.getItem("nolock.maxContextTokens");
+    const stored = localStorage.getItem("nolock.contextLength") || localStorage.getItem("nolock.maxContextTokens");
     return stored ? Number(stored) : 128_000;
   });
 
-  // Fetch the model's actual context length from the backend on mount
+  // Fetch the model's actual context length from the backend on mount. Only
+  // local backends (Ollama) expose this via /api/show; cloud backends use the
+  // user-configured "Context Window" value (nolock.contextLength) instead.
   useEffect(() => {
     const fetchContextLength = async () => {
       const backend = getChatBackend();
+      if (isCloudBackend(backend)) return; // respect the configured context window
       const url = resolveBackendUrl(backend);
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
       if (!chatModel) return;
@@ -797,6 +1059,107 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     };
     fetchContextLength();
   }, []);
+
+  // ---- Sessions: project-local conversation persistence (metadata only) --
+  const [sessionId, setSessionId] = useState<string>("");
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const createdAtRef = useRef<Record<string, number>>({});
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** Persist session metadata (counts, first/last message, token usage) and refresh the list. */
+  const persistSession = useCallback(async (
+    id: string,
+    msgs: Message[],
+    tokenUsage: number,
+    contextWindow: number,
+  ) => {
+    if (!rootPath || !id) return;
+    const now = Math.floor(Date.now() / 1000);
+    const createdAt = createdAtRef.current[id] ?? now;
+    createdAtRef.current[id] = createdAt;
+    try {
+      await saveSession(rootPath, {
+        id,
+        summary: summarizeMessages(msgs),
+        status: "active",
+        createdAt,
+        updatedAt: now,
+        ...buildSessionMetadata(msgs, tokenUsage, contextWindow),
+      });
+      setSessions(await listSessions(rootPath));
+    } catch (e) {
+      console.error("[sessions] save failed:", e);
+    }
+  }, [rootPath]);
+
+  /** Archive the current session and start a fresh one (clears conversation context). */
+  const startNewSession = useCallback(async () => {
+    if (sessionId && messages.length > 0) {
+      try { await archiveSession(rootPath, sessionId, summarizeMessages(messages)); } catch {}
+    }
+    const newId = newSessionId();
+    createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
+    setSessionId(newId);
+    setMessages([]);
+    setInput("");
+    setFileRefs([]);
+    setAgentRefs([]);
+    setSkillRefs([]);
+    setToolRefs([]);
+    setAccumulatedContextTokens(0);
+    setThinkingText("");
+    setRoutedModel(null);
+    try { setSessions(await listSessions(rootPath)); } catch {}
+  }, [rootPath, sessionId, messages]);
+
+  /** Delete a session by id. If it's the current one, start a fresh session. */
+  const deleteSessionById = useCallback(async (id: string) => {
+    try { await deleteSession(rootPath, id); } catch (e) { console.error(e); }
+    if (id === sessionId) {
+      const newId = newSessionId();
+      createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
+      setSessionId(newId);
+      setMessages([]);
+      setAccumulatedContextTokens(0);
+      setThinkingText("");
+      setRoutedModel(null);
+    }
+    try { setSessions(await listSessions(rootPath)); } catch {}
+  }, [rootPath, sessionId]);
+
+  // Load the session history and start a fresh session on mount / when the
+  // project folder changes. (Messages are not restored — only metadata.)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!rootPath) { setSessions([]); return; }
+      try {
+        const list = await listSessions(rootPath);
+        if (cancelled) return;
+        setSessions(list);
+        const newId = newSessionId();
+        createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
+        setSessionId(newId);
+      } catch (e) {
+        console.error("[sessions] load failed:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootPath]);
+
+  // Auto-save the current session (debounced) whenever the conversation changes
+  // and we're not mid-stream.
+  useEffect(() => {
+    if (!rootPath || !sessionId || loading) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      void persistSession(sessionId, messages, accumulatedContextTokens, maxTokens);
+    }, 800);
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [messages, sessionId, rootPath, accumulatedContextTokens, maxTokens, loading, persistSession]);
 
   // ---- Tauri native event listeners for chat input (macOS) -------------
   useEffect(() => {
@@ -897,7 +1260,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
 
       const chatTemperature = localStorage.getItem("nolock.chatTemperature");
-      const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
+      const chatMaxTokens = isCloudBackend(backend)
+        ? localStorage.getItem("nolock.chatCloudMaxTokens")
+        : localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
 
       // Build API messages from existing conversation history — completed hook
@@ -1327,13 +1692,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       apiContent = `Context:\n${contextParts.join("\n\n")}\n\n---\n${apiContent}`;
     }
 
-    // Accumulate context tokens for the persistent indicator
-    const sentTokens = refsWithSize.reduce((sum: number, r: FileRef) => sum + (r._tokenCount || 0), 0);
-    const msgTokens = countTokens(apiContent);
-    if (sentTokens > 0 || msgTokens > 0) {
-      setAccumulatedContextTokens((prev) => prev + sentTokens + msgTokens);
-    }
-
     const userMsg: Message = { role: "user", content: apiContent, displayContent: displayText, contextRefs };
     const allMessages = [...messages, userMsg];
     setMessages(allMessages);
@@ -1383,7 +1741,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
       // Read chat model parameters from localStorage
       const chatTemperature = localStorage.getItem("nolock.chatTemperature");
-      const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
+      const chatMaxTokens = isCloudBackend(backend)
+        ? localStorage.getItem("nolock.chatCloudMaxTokens")
+        : localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
 
       // ---- Check DPO trigger ----
@@ -1423,6 +1783,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           return [{ role: m.role, content: m.content }];
         }),
       ];
+
+      // Update the context meter with the actual outgoing payload size (the
+      // exact messages that will be sent), rather than a rough incremental
+      // estimate. This includes prior assistant responses, tool results, hook
+      // output, agent system prompts, and file context — everything the model
+      // will actually receive.
+      const payloadTokens = apiMessages.reduce((sum, m) => sum + countTokens(m.content), 0)
+        + countTokens(chatSystemPrompt || "");
+      setAccumulatedContextTokens(payloadTokens);
 
       // Shared request base
       const reqBase = {
@@ -1577,8 +1946,28 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   return (
     <div className="chat-panel" style={style}>
       <div className="chat-header">
-        <span>Agent Chat</span>
+        <div className="chat-header-title">
+          <span>Agent Chat</span>
+          {routedModel && (
+            <span className="routed-model" title="Model selected by the DigitalOcean Inference Router">
+              via {routedModel}
+            </span>
+          )}
+        </div>
         <div className="chat-header-actions">
+          {rootPath && (
+            <SessionPicker
+              sessions={sessions}
+              currentId={sessionId}
+              currentTitle={
+                sessions.find((s) => s.id === sessionId)?.summary
+                || summarizeMessages(messages)
+                || "New session"
+              }
+              onNew={() => void startNewSession()}
+              onDelete={(id) => void deleteSessionById(id)}
+            />
+          )}
           {rootPath && onOpenAgentManager && (
             <button className="chat-header-btn" onClick={onOpenAgentManager} title="Manage AI Agents">
               <svg className="robot-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1628,6 +2017,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 <div className="role">{m.role}</div>
                 {m.toolCalls && m.toolCalls.length > 0 && (
                   <ToolCallBlock calls={m.toolCalls} />
+                )}
+                {m.toolCalls && m.toolCalls.some((c) => c.file_changes && c.file_changes.length > 0) && (
+                  <FileChangesBlock
+                    changes={m.toolCalls.flatMap((c) => c.file_changes || [])}
+                  />
                 )}
                 {m.role === "assistant" ? (
               <div className="assistant-content">
@@ -1892,7 +2286,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 </div>
               );
             })()}
-            <button className="clear-context-btn" onClick={clearAllRefs} title="Clear all context">&times;</button>
+            <button className="clear-context-btn" onClick={() => void startNewSession()} title="Clear conversation (new session)">&times;</button>
           </div>
         )}
 
@@ -1921,7 +2315,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                   </div>
                 );
               })()}
-              <button className="clear-context-btn" onClick={clearAllRefs} title="Clear all context">&times;</button>
+              <button className="clear-context-btn" onClick={() => void startNewSession()} title="Clear conversation (new session)">&times;</button>
             </div>
           </div>
         )}
@@ -1967,6 +2361,42 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 setMentionType(null);
               }}
             />
+          </div>
+        )}
+
+        {/* Context-nearly-full warning — session token usage vs model window */}
+        {maxTokens > 0 && accumulatedContextTokens > 0 && accumulatedContextTokens / maxTokens > 0.8 && (
+          <div className="context-warning">
+            <span>
+              Context {Math.round((accumulatedContextTokens / maxTokens) * 100)}% full
+              ({formatTokens(accumulatedContextTokens)} / {formatTokens(maxTokens)} tokens)
+            </span>
+            <button className="context-warning-action" onClick={() => void startNewSession()}>
+              New session
+            </button>
+          </div>
+        )}
+
+        {/* Live tool progress — transient status line while the agent runs */}
+        {loading && toolProgress && (
+          <div className={`tool-progress-line tool-progress-${toolProgress.status}`}>
+            {toolProgress.status === "start" && (
+              <span className="tool-progress-label">
+                {toolProgress.path
+                  ? `${toolProgress.name}: ${toolProgress.path}`
+                  : `${toolProgress.name}`}…
+              </span>
+            )}
+            {toolProgress.status === "done" && (
+              <span className="tool-progress-label">
+                {toolProgress.path
+                  ? `${toolProgress.name}: ${toolProgress.path}`
+                  : `${toolProgress.name}`} done
+              </span>
+            )}
+            {toolProgress.status === "error" && (
+              <span className="tool-progress-label">{toolProgress.name} failed</span>
+            )}
           </div>
         )}
 

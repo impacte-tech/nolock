@@ -15,7 +15,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { parseCron, cronMatches } from "./cron";
 import { getSecret } from "./secrets";
-import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity } from "./backends";
+import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity, isCloudBackend } from "./backends";
 
 // ---------------------------------------------------------------------------
 // Types (mirror the Rust serde structures in src-tauri/src/hooks.rs)
@@ -393,7 +393,9 @@ async function executeHookRun(
   }
 
   const chatTemperature = localStorage.getItem("nolock.chatTemperature");
-  const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
+  const chatMaxTokens = isCloudBackend(backend)
+    ? localStorage.getItem("nolock.chatCloudMaxTokens")
+    : localStorage.getItem("nolock.chatMaxTokens");
 
   const req = {
     backend,

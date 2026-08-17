@@ -328,6 +328,124 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Session management commands (project-local `.sessions/` directory)
+// ---------------------------------------------------------------------------
+
+/// Resolve the `.sessions/` directory. Falls back to `~/.nolock/sessions` when
+/// no project folder is open so sessions still work outside a project.
+fn sessions_dir(root_path: &str) -> Result<std::path::PathBuf, String> {
+    if root_path.trim().is_empty() {
+        let home = std::env::var("HOME")
+            .map_err(|_| "No HOME directory and no project folder open".to_string())?;
+        return Ok(std::path::Path::new(&home).join(".nolock").join("sessions"));
+    }
+    Ok(std::path::Path::new(root_path).join(".sessions"))
+}
+
+/// Reject session ids that could escape the `.sessions/` directory.
+fn sanitize_session_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("Invalid session id: {:?}", id));
+    }
+    Ok(())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// List all persisted sessions, newest first. Each record carries only metadata.
+#[tauri::command]
+fn list_sessions(root_path: String) -> Result<Vec<SessionRecord>, String> {
+    let dir = sessions_dir(&root_path)?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let read_dir = std::fs::read_dir(&dir)
+        .map_err(|e| format!("Failed to read .sessions directory: {}", e))?;
+
+    let mut sessions = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read session {}: {}", path.display(), e))?;
+        if let Ok(rec) = serde_json::from_str::<SessionRecord>(&content) {
+            sessions.push(rec);
+        }
+    }
+
+    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(sessions)
+}
+
+/// Read a single session record (metadata only) by id.
+#[tauri::command]
+fn read_session(root_path: String, id: String) -> Result<SessionRecord, String> {
+    sanitize_session_id(&id)?;
+    let path = sessions_dir(&root_path)?.join(format!("{}.json", id));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read session {}: {}", id, e))?;
+    serde_json::from_str::<SessionRecord>(&content)
+        .map_err(|e| format!("Failed to parse session {}: {}", id, e))
+}
+
+/// Persist a session record (creating it if new, overwriting if existing).
+#[tauri::command]
+fn save_session(root_path: String, session: SessionRecord) -> Result<(), String> {
+    sanitize_session_id(&session.id)?;
+    let dir = sessions_dir(&root_path)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create .sessions directory: {}", e))?;
+    let path = dir.join(format!("{}.json", session.id));
+    let json = serde_json::to_string_pretty(&session)
+        .map_err(|e| format!("Failed to serialize session: {}", e))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("Failed to write session {}: {}", session.id, e))
+}
+
+/// Delete a session by id.
+#[tauri::command]
+fn delete_session(root_path: String, id: String) -> Result<(), String> {
+    sanitize_session_id(&id)?;
+    let path = sessions_dir(&root_path)?.join(format!("{}.json", id));
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete session {}: {}", id, e))?;
+    }
+    Ok(())
+}
+
+/// Mark a session as archived and optionally attach a summary.
+#[tauri::command]
+fn archive_session(root_path: String, id: String, summary: String) -> Result<(), String> {
+    sanitize_session_id(&id)?;
+    let path = sessions_dir(&root_path)?.join(format!("{}.json", id));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read session {}: {}", id, e))?;
+    let mut rec: SessionRecord = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse session {}: {}", id, e))?;
+    rec.status = "archived".to_string();
+    if !summary.trim().is_empty() {
+        rec.summary = summary.trim().to_string();
+    }
+    rec.updated_at = now_secs();
+    let json = serde_json::to_string_pretty(&rec)
+        .map_err(|e| format!("Failed to serialize session: {}", e))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("Failed to write session {}: {}", id, e))
+}
+
+// ---------------------------------------------------------------------------
 // Custom tool management commands
 // ---------------------------------------------------------------------------
 
@@ -642,6 +760,141 @@ const GREP_MAX_MATCHES: usize = 100;
 const GREP_MAX_OUTPUT_BYTES: usize = 50 * 1024; // 50KB
 const GREP_MAX_LINE_LENGTH: usize = 500;
 const READ_FILE_MAX_BYTES: usize = 8 * 1024; // 8KB
+
+// Tool result limits for cloud providers (DigitalOcean, OpenRouter, OpenCode).
+// These route to models with large context windows, so the aggressive
+// small-model truncation above should not be applied to them.
+const READ_FILE_MAX_BYTES_CLOUD: usize = 1024 * 1024; // 1MB
+const WEB_FETCH_MAX_CHARS_CLOUD: usize = 256 * 1024; // 256KB
+
+/// Default output-token budget for cloud providers when the user hasn't set one
+/// explicitly. Bounds reasoning-model chains-of-thought (which would otherwise
+/// "overthink" for tens of thousands of tokens) while still being generous
+/// enough for typical multi-tool agent runs. The user can override it via the
+/// "Cloud Max Tokens" setting in the Chat Model panel.
+const CLOUD_DEFAULT_MAX_TOKENS: u32 = 32_768;
+
+/// Returns true for cloud backends (DigitalOcean, OpenRouter, OpenCode), which
+/// have large context windows and should not be constrained by the small-local-
+/// model tool-result limits.
+fn is_cloud_backend(backend: &str) -> bool {
+    !matches!(backend, "ollama" | "llamacpp")
+}
+
+/// Max bytes `read_file` may return for the given backend.
+fn read_file_limit(backend: &str) -> usize {
+    if is_cloud_backend(backend) {
+        READ_FILE_MAX_BYTES_CLOUD
+    } else {
+        READ_FILE_MAX_BYTES
+    }
+}
+
+/// Max chars `web_fetch` may return for the given backend.
+fn web_fetch_limit(backend: &str) -> usize {
+    if is_cloud_backend(backend) {
+        WEB_FETCH_MAX_CHARS_CLOUD
+    } else {
+        15_000
+    }
+}
+
+/// Resolves `path` against the open project folder (`root_path`) when one is
+/// set, and rejects any path that resolves outside it. When no folder is open
+/// the path is returned as-is. This keeps filesystem tools scoped to the
+/// project the user actually has open in nolock.
+fn resolve_within_root(
+    root_path: Option<&str>,
+    path: &str,
+) -> Result<std::path::PathBuf, String> {
+    match root_path {
+        None => Ok(std::path::PathBuf::from(path)),
+        Some(rp) => {
+            let p = std::path::Path::new(path);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::path::Path::new(rp).join(p)
+            };
+            let root_canon = std::path::Path::new(rp)
+                .canonicalize()
+                .map_err(|e| format!("Failed to resolve project root: {}", e))?;
+            // Canonicalize the target when it exists; otherwise resolve its
+            // nearest existing parent and re-append the file/dir name. This
+            // also resolves symlinks so links pointing outside the project
+            // are rejected too.
+            let target_canon = abs
+                .canonicalize()
+                .or_else(|_| {
+                    abs.parent()
+                        .and_then(|par| par.canonicalize().ok())
+                        .map(|par| par.join(abs.file_name().unwrap_or_default()))
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::NotFound,
+                                "path has no resolvable parent",
+                            )
+                        })
+                })
+                .map_err(|e| format!("Failed to resolve path '{}': {}", path, e))?;
+            if !target_canon.starts_with(&root_canon) {
+                return Err(format!(
+                    "Path '{}' is outside the open folder '{}'",
+                    path, rp
+                ));
+            }
+            Ok(abs)
+        }
+    }
+}
+
+/// Returns true if `candidate` (an absolute path string) is equal to or nested
+/// inside `root` (an already-canonicalized absolute path). Falls back to a
+/// lexical component comparison when `candidate` does not exist on disk.
+fn path_is_within(root: &std::path::Path, candidate: &str) -> bool {
+    let cand = std::path::Path::new(candidate);
+    if let Ok(cc) = cand.canonicalize() {
+        return cc.starts_with(root);
+    }
+    let root_comps: Vec<std::path::Component> = root.components().collect();
+    let mut norm: Vec<std::path::Component> = Vec::new();
+    for c in cand.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if norm.len() > 1 {
+                    norm.pop();
+                }
+            }
+            other => norm.push(other),
+        }
+    }
+    norm.len() >= root_comps.len()
+        && norm.iter().zip(&root_comps).all(|(a, b)| a == b)
+}
+
+/// Scans a shell command for absolute-path references and returns the first one
+/// that resolves outside `root` (which must already be canonicalized). This
+/// keeps `bash_sandbox` scoped to the open project folder so the shell can't
+/// `find`/`cat`/`cd` into other directories.
+fn command_escapes_root(command: &str, root: &std::path::Path) -> Option<String> {
+    for raw in command.split_whitespace() {
+        // Take the leading path-like portion of each token, dropping leading
+        // quotes and trailing shell metacharacters / punctuation.
+        let path_str: String = raw
+            .chars()
+            .skip_while(|c| matches!(c, '\'' | '"'))
+            .take_while(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~'))
+            .collect();
+        if !path_str.starts_with('/') {
+            continue;
+        }
+        if !path_is_within(root, &path_str) {
+            return Some(path_str);
+        }
+    }
+    None
+}
 
 /// Build a compiled Regex from the search request.
 fn build_search_regex(query: &str, use_regex: bool, match_case: bool) -> Result<Regex, String> {
@@ -1473,6 +1726,44 @@ struct ChatMessage {
     content: String,
 }
 
+// ---------------------------------------------------------------------------
+// Sessions — project-local conversation persistence (`.sessions/`)
+// ---------------------------------------------------------------------------
+
+/// A single persisted conversation session. Only *metadata* is stored — the
+/// full message history is intentionally NOT persisted. The important summary
+/// fields are: message count, tool-call count, the first/last message text, and
+/// the total token usage (so the frontend can warn and clean context as the
+/// model's context window fills up).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionRecord {
+    id: String,
+    summary: String,
+    /// "active" | "finished" | "archived"
+    status: String,
+    created_at: u64,
+    updated_at: u64,
+    /// Number of user + assistant messages in the conversation.
+    #[serde(default)]
+    message_count: u64,
+    /// Number of tool calls the agent made during the session.
+    #[serde(default)]
+    tool_call_count: u64,
+    /// First user message (display title fallback).
+    #[serde(default)]
+    first_message: String,
+    /// Last message content (user or assistant).
+    #[serde(default)]
+    last_message: String,
+    /// Total tokens in the last-recorded outgoing context payload.
+    #[serde(default)]
+    token_usage: u64,
+    /// The model's context window (denominator for the context meter).
+    #[serde(default)]
+    context_window: u64,
+}
+
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ChatRequest {
@@ -1519,12 +1810,38 @@ struct ChatResult {
     tool_calls: Vec<ToolCallLog>,
 }
 
+/// A single old/new text pair from an `edit` tool call.
+#[derive(Clone, serde::Serialize, Default)]
+struct FileChangeEdit {
+    old_text: String,
+    new_text: String,
+}
+
+/// Structured metadata about a file that a tool call changed. Returned to the
+/// frontend so it can render an expandable before/after diff. Only populated
+/// for file-mutating tools (`write_file`, `edit`).
+#[derive(Clone, serde::Serialize, Default)]
+struct FileChange {
+    path: String,
+    /// "write" for new/overwritten files, "edit" for in-place edits.
+    action: String,
+    /// True when the file did not exist before the tool ran.
+    created: bool,
+    /// Number of bytes in the file after the change.
+    bytes: u64,
+    /// The individual edits (for `edit`). Empty for `write`.
+    #[serde(default)]
+    edits: Vec<FileChangeEdit>,
+}
+
 #[derive(serde::Serialize, Clone)]
 struct ToolCallLog {
     name: String,
     arguments: String,
     result_snippet: String,
     result_full: String,
+    #[serde(default)]
+    file_changes: Vec<FileChange>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1532,6 +1849,18 @@ struct StreamPayload {
     token: String,
     #[serde(default)]
     thinking: bool,
+}
+
+/// Emitted as `tool-progress` while the agent tool loop runs, so the frontend
+/// can show a live "editing <file>…" status line.
+#[derive(Clone, serde::Serialize)]
+struct ToolProgressPayload {
+    /// "start" | "done" | "error"
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1564,13 +1893,13 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read the contents of a file on disk. Use this to examine source code, configuration files, or any file the user references.",
+                "description": "Read the contents of a file on disk. Use this to examine source code, configuration files, or any file the user references. When a project folder is open, only files within that folder can be read.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "The absolute file path to read"
+                            "description": "The file path to read (absolute or relative to the open project folder)"
                         }
                     },
                     "required": ["path"]
@@ -1583,13 +1912,13 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
             "type": "function",
             "function": {
                 "name": "list_directory",
-                "description": "List files and directories at a given path. Use this to explore the project structure.",
+                "description": "List files and directories at a given path. Use this to explore the project structure. When a project folder is open, only directories within that folder can be listed.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "The directory path to list"
+                            "description": "The directory path to list (absolute or relative to the open project folder)"
                         }
                     },
                     "required": ["path"]
@@ -1799,7 +2128,8 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
         let sandbox_desc = match root_path {
             Some(rp) => format!(
                 "Execute a shell command in a sandboxed environment and return its output. \
-                 The command runs in a temporary directory by default (or in the specified working_directory). \
+                 The command runs in the open project folder (or in the specified working_directory). \
+                 Commands may only access paths within the open project folder. \
                  Use this to validate CLI commands, test shell scripts, run build tools, \
                  or verify command-line answers before presenting them. \
                  stdout and stderr are captured and returned. \
@@ -1886,12 +2216,113 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
     tools
 }
 
+/// Computes structured file-change metadata for file-mutating tools, resolved
+/// the same way `execute_tool` does (relative paths joined to `root_path`).
+/// Called *before* the tool executes so `write_file` can record whether the
+/// file already existed. Returns an empty vec for non-file tools or when the
+/// edit would fail (so a failed edit isn't reported as a change).
+fn compute_file_changes(
+    name: &str,
+    args: &serde_json::Value,
+    root_path: Option<&str>,
+) -> Vec<FileChange> {
+    let resolve = |path: &str| -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(path);
+        if p.is_absolute() {
+            Some(p.to_path_buf())
+        } else {
+            root_path.map(|rp| std::path::Path::new(rp).join(p))
+        }
+    };
+
+    match name {
+        "write_file" => {
+            let path = args["path"].as_str().unwrap_or("");
+            let content = args["content"].as_str().unwrap_or("");
+            if path.is_empty() {
+                return Vec::new();
+            }
+            match resolve(path) {
+                Some(abs) => vec![FileChange {
+                    path: path.to_string(),
+                    action: "write".to_string(),
+                    created: !abs.exists(),
+                    bytes: content.len() as u64,
+                    edits: Vec::new(),
+                }],
+                None => Vec::new(),
+            }
+        }
+        "edit" => {
+            let path = args["path"].as_str().unwrap_or("");
+            let edits = args["edits"].as_array().cloned().unwrap_or_default();
+            if path.is_empty() || edits.is_empty() {
+                return Vec::new();
+            }
+            match resolve(path) {
+                Some(abs) => {
+                    let content = match std::fs::read_to_string(&abs) {
+                        Ok(c) => c,
+                        // The edit tool will fail too — don't report a change.
+                        Err(_) => return Vec::new(),
+                    };
+                    // Mirror the edit tool's sequential replace + uniqueness
+                    // checks so a change is only reported when the edit will
+                    // actually succeed.
+                    let mut new_content = content;
+                    let mut fc_edits: Vec<FileChangeEdit> = Vec::with_capacity(edits.len());
+                    for edit in &edits {
+                        let old_text = edit["old_text"].as_str().unwrap_or("");
+                        let new_text = edit["new_text"].as_str().unwrap_or("");
+                        let count = new_content.matches(old_text).count();
+                        if count != 1 {
+                            // Missing or ambiguous — the edit tool will error.
+                            return Vec::new();
+                        }
+                        new_content = new_content.replacen(old_text, new_text, 1);
+                        fc_edits.push(FileChangeEdit {
+                            old_text: old_text.to_string(),
+                            new_text: new_text.to_string(),
+                        });
+                    }
+                    vec![FileChange {
+                        path: path.to_string(),
+                        action: "edit".to_string(),
+                        created: false,
+                        bytes: new_content.len() as u64,
+                        edits: fc_edits,
+                    }]
+                }
+                None => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Executes a tool and also returns file-change metadata (for `write_file` and
+/// `edit`) so the frontend can render expandable diffs. Thin wrapper around
+/// `execute_tool` — the actual tool logic is untouched.
+async fn execute_tool_tracked(
+    name: &str,
+    args: &serde_json::Value,
+    client: &reqwest::Client,
+    tool_configs: &HashMap<String, serde_json::Value>,
+    root_path: Option<&str>,
+    backend: &str,
+) -> Result<(String, Vec<FileChange>), String> {
+    let file_changes = compute_file_changes(name, args, root_path);
+    let output = execute_tool(name, args, client, tool_configs, root_path, backend).await?;
+    Ok((output, file_changes))
+}
+
 async fn execute_tool(
     name: &str,
     args: &serde_json::Value,
     client: &reqwest::Client,
     tool_configs: &HashMap<String, serde_json::Value>,
     root_path: Option<&str>,
+    backend: &str,
 ) -> Result<String, String> {
     match name {
         "web_fetch" => {
@@ -1912,10 +2343,12 @@ async fn execute_tool(
             }
             let text = resp.text().await.map_err(|e| e.to_string())?;
             // Truncate to avoid overwhelming the model
-            if text.len() > 15000 {
+            let limit = web_fetch_limit(backend);
+            if text.len() > limit {
                 Ok(format!(
-                    "{}\n\n... [truncated at 15000 chars, total {} chars]",
-                    &text[..15000],
+                    "{}\n\n... [truncated at {} chars, total {} chars]",
+                    &text[..limit],
+                    limit,
                     text.len()
                 ))
             } else {
@@ -1927,14 +2360,16 @@ async fn execute_tool(
                 .as_str()
                 .ok_or("Missing required parameter: path")?;
             eprintln!("[nolock] tool read_file path={}", path);
-            let text = std::fs::read_to_string(path)
+            let resolved = resolve_within_root(root_path, path)?;
+            let text = std::fs::read_to_string(&resolved)
                 .map_err(|e| format!("Failed to read {}: {}", path, e))?;
             // Truncate to avoid overwhelming small models with large files
-            if text.len() > READ_FILE_MAX_BYTES {
+            let limit = read_file_limit(backend);
+            if text.len() > limit {
                 Ok(format!(
                     "{}\n\n... [truncated at {} chars, total {} chars — use grep to search, or edit for targeted changes]",
-                    &text[..READ_FILE_MAX_BYTES],
-                    READ_FILE_MAX_BYTES,
+                    &text[..limit],
+                    limit,
                     text.len()
                 ))
             } else {
@@ -1946,8 +2381,9 @@ async fn execute_tool(
                 .as_str()
                 .ok_or("Missing required parameter: path")?;
             eprintln!("[nolock] tool list_directory path={}", path);
+            let resolved = resolve_within_root(root_path, path)?;
             let mut entries = Vec::new();
-            let read_dir = std::fs::read_dir(path)
+            let read_dir = std::fs::read_dir(&resolved)
                 .map_err(|e| format!("Failed to read dir {}: {}", path, e))?;
             for entry in read_dir {
                 let entry = entry.map_err(|e| e.to_string())?;
@@ -1966,14 +2402,23 @@ async fn execute_tool(
             let pattern = args["pattern"]
                 .as_str()
                 .ok_or("Missing required parameter: pattern")?;
-            let search_path = args["path"]
-                .as_str()
-                .unwrap_or(root_path.unwrap_or("."));
+            let search_path_buf = if let Some(p) = args["path"].as_str() {
+                resolve_within_root(root_path, p)?
+            } else {
+                match root_path {
+                    Some(rp) => std::path::PathBuf::from(rp),
+                    None => std::path::PathBuf::from("."),
+                }
+            };
             let glob_pattern = args["glob"].as_str();
             let ignore_case = args["ignore_case"].as_bool().unwrap_or(false);
             let context_lines = args["context"].as_u64().unwrap_or(0) as usize;
             let max_matches = args["limit"].as_u64().unwrap_or(GREP_MAX_MATCHES as u64) as usize;
-            eprintln!("[nolock] tool grep pattern={} path={}", pattern, search_path);
+            eprintln!(
+                "[nolock] tool grep pattern={} path={}",
+                pattern,
+                search_path_buf.display()
+            );
 
             // Build regex
             let re_str = if ignore_case {
@@ -2013,7 +2458,7 @@ async fn execute_tool(
                 Regex::new(&regex_str).unwrap_or_else(|_| Regex::new(".*").unwrap())
             });
 
-            let root = std::path::Path::new(search_path);
+            let root = search_path_buf.as_path();
             let mut output_lines: Vec<String> = Vec::new();
             let mut match_count: usize = 0;
             let mut total_bytes: usize = 0;
@@ -2519,6 +2964,22 @@ async fn execute_tool(
                 timeout_secs
             );
 
+            // When a project is open, refuse commands that reference absolute
+            // paths outside it, so the sandboxed shell can't escape into other
+            // directories (e.g. `find /other/project ...`).
+            if let Some(rp) = root_path {
+                let root_canonical = std::path::Path::new(rp)
+                    .canonicalize()
+                    .map_err(|e| format!("Failed to resolve project root: {}", e))?;
+                if let Some(bad_path) = command_escapes_root(command, &root_canonical) {
+                    return Err(format!(
+                        "Command references path '{}' outside the open project folder '{}'. \
+                         Commands must stay within the open folder.",
+                        bad_path, rp
+                    ));
+                }
+            }
+
             // Determine working directory — always restricted to within root_path
             // when a project folder is open, to prevent filesystem escape.
             let cwd = if let Some(wd) = working_dir {
@@ -2842,6 +3303,23 @@ fn build_initial_messages(
     ollama_msgs
 }
 
+/// Extract the next complete newline-delimited line from a byte buffer,
+/// returning it as a trimmed `String`, or `None` if no complete line is present.
+///
+/// Buffering raw bytes (rather than decoding each network chunk in isolation)
+/// is critical for correctness: a multi-byte UTF-8 sequence can be split across
+/// chunk boundaries, and decoding a chunk whose tail ends mid-sequence with
+/// `String::from_utf8_lossy` would corrupt the stream (garbled / replacement
+/// characters — often appearing as CJK mojibake). We instead accumulate raw
+/// bytes and only decode once the trailing newline arrives, so split sequences
+/// are reassembled before decoding.
+fn take_next_line(buf: &mut Vec<u8>) -> Option<String> {
+    let pos = buf.iter().position(|&b| b == b'\n')?;
+    let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+    let line = String::from_utf8_lossy(&line_bytes);
+    Some(line.trim().to_string())
+}
+
 /// Stream an Ollama NDJSON response line by line, emitting tokens to the
 /// frontend via `app_handle` and accumulating content into `full_content`.
 /// Returns the iteration-scoped content, thinking trace, and any tool calls found.
@@ -2853,7 +3331,7 @@ async fn stream_ollama_response(
     let mut iter_content = String::new();
     let mut iter_thinking = String::new();
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::new();
 
     // Helper to process a single NDJSON line — extracted so the main loop
     // and the trailing-buffer drain share the same logic.
@@ -2914,11 +3392,8 @@ async fn stream_ollama_response(
         match resp.chunk().await.map_err(|e| e.to_string())? {
             None => break,
             Some(chunk) => {
-                let s = String::from_utf8_lossy(&chunk);
-                buf.push_str(&s);
-                while let Some(pos) = buf.find('\n') {
-                    let line = buf[..pos].trim().to_string();
-                    buf = buf[pos + 1..].to_string();
+                buf.extend_from_slice(&chunk);
+                while let Some(line) = take_next_line(&mut buf) {
                     if line.is_empty() {
                         continue;
                     }
@@ -2932,9 +3407,11 @@ async fn stream_ollama_response(
     // The last chunk from the server may not end with a newline, so the
     // inner while-let loop leaves residual bytes in `buf`.  Process them
     // now so we don't silently drop content or tool-call detection.
-    if !buf.trim().is_empty() {
-        let line = buf.trim().to_string();
-        process_line(&line, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
+    if !buf.is_empty() {
+        let line = String::from_utf8_lossy(&buf).trim().to_string();
+        if !line.is_empty() {
+            process_line(&line, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
+        }
     }
 
     Ok(StreamResult {
@@ -3037,9 +3514,36 @@ async fn ollama_chat_with_tools(
                 let name = call["function"]["name"].as_str().unwrap_or("unknown");
                 let args = &call["function"]["arguments"];
 
-                let result = execute_tool(name, args, ctx.client, ctx.tool_configs, ctx.root_path)
-                    .await
-                    .unwrap_or_else(|e| format!("Tool error: {}", e));
+                let tool_path = args["path"].as_str().map(String::from);
+                ctx.app_handle
+                    .emit("tool-progress", ToolProgressPayload {
+                        kind: "start".to_string(),
+                        name: name.to_string(),
+                        path: tool_path.clone(),
+                    })
+                    .ok();
+
+                let (result, file_changes) =
+                    execute_tool_tracked(name, args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
+                        .await
+                        .unwrap_or_else(|e| {
+                            ctx.app_handle
+                                .emit("tool-progress", ToolProgressPayload {
+                                    kind: "error".to_string(),
+                                    name: name.to_string(),
+                                    path: tool_path.clone(),
+                                })
+                                .ok();
+                            (format!("Tool error: {}", e), Vec::new())
+                        });
+
+                ctx.app_handle
+                    .emit("tool-progress", ToolProgressPayload {
+                        kind: "done".to_string(),
+                        name: name.to_string(),
+                        path: tool_path,
+                    })
+                    .ok();
 
                 let snippet = if result.len() > 200 {
                     format!("{}...", &result[..200])
@@ -3052,6 +3556,7 @@ async fn ollama_chat_with_tools(
                     arguments: serde_json::to_string(args).unwrap_or_default(),
                     result_snippet: snippet,
                     result_full: result.clone(),
+                    file_changes,
                 });
 
                 // Add tool result message
@@ -3148,7 +3653,7 @@ async fn stream_openai_response(
 ) -> Result<OpenAIStreamResult, String> {
     let mut iter_content = String::new();
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::new();
 
     let process_sse_data = |data: &str,
                             iter_content: &mut String,
@@ -3225,28 +3730,23 @@ async fn stream_openai_response(
         match resp.chunk().await.map_err(|e| e.to_string())? {
             None => break,
             Some(chunk) => {
-                let s = String::from_utf8_lossy(&chunk);
-                buf.push_str(&s);
-                while let Some(pos) = buf.find("\n\n") {
-                    let event = buf[..pos].to_string();
-                    buf = buf[pos + 2..].to_string();
-                    for line in event.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            let data = data.trim();
-                            if data == "[DONE]" { continue; }
-                            process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
-                        }
+                buf.extend_from_slice(&chunk);
+                while let Some(line) = take_next_line(&mut buf) {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data == "[DONE]" { continue; }
+                        process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
                     }
                 }
             }
         }
     }
     // Drain trailing buffer
-    if !buf.trim().is_empty() {
-        for line in buf.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                let data = data.trim();
-                if data == "[DONE]" { continue; }
+    if !buf.is_empty() {
+        let line = String::from_utf8_lossy(&buf).trim().to_string();
+        if let Some(data) = line.strip_prefix("data: ") {
+            let data = data.trim();
+            if data != "[DONE]" {
                 process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
             }
         }
@@ -3283,12 +3783,13 @@ async fn run_openai_tool_loop(
     url: &str,
     api_key: &str,
     model: &str,
+    backend: &str,
     messages: &[ChatMessage],
     tools: &[serde_json::Value],
     tool_configs: &HashMap<String, serde_json::Value>,
     root_path: Option<&str>,
     temperature: f64,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     max_iterations: usize,
     extra_headers: Option<Vec<(&str, &str)>>,
     use_model_affinity: bool,
@@ -3339,15 +3840,19 @@ async fn run_openai_tool_loop(
     for iteration in 0..max_iterations {
         // Build request body. DigitalOcean deprecates `max_tokens` in favor of
         // `max_completion_tokens`, which is scoped across the whole run (i.e. all
-        // tool-call iterations) rather than per completion — the right budget for
-        // a multi-turn agent loop.
+        // tool-call iterations) rather than per completion. We only set it when
+        // the user explicitly configured a budget: when left unset we omit it so
+        // the provider's own (generous) default applies instead of an arbitrary
+        // local-model cap that would truncate mid-agent-loop.
         let mut body = serde_json::json!({
             "model": model,
             "messages": openai_msgs,
-            "max_completion_tokens": max_tokens,
             "temperature": temperature,
             "stream": true
         });
+        if let Some(mt) = max_tokens {
+            body["max_completion_tokens"] = serde_json::json!(mt);
+        }
         if !tools.is_empty() {
             body["tools"] = serde_json::json!(tools);
             body["tool_choice"] = serde_json::json!("auto");
@@ -3391,6 +3896,10 @@ async fn run_openai_tool_loop(
         if let Some(m) = resp.headers().get("x-model-router-selected-model") {
             if let Ok(m) = m.to_str() {
                 eprintln!("[nolock] openai-tool-loop routed model={}", m);
+                // Surface the routed model to the frontend so the user can see
+                // which model the DigitalOcean Inference Router selected (helps
+                // diagnose e.g. reasoning-model "overthinking").
+                app_handle.emit("model-routed", m.to_string()).ok();
             }
         }
         if !status.is_success() {
@@ -3461,9 +3970,36 @@ async fn run_openai_tool_loop(
                 let name = call["function"]["name"].as_str().unwrap_or("unknown");
                 let args = normalize_tool_args(&call["function"]["arguments"]);
 
-                let result = execute_tool(name, &args, client, tool_configs, root_path)
-                    .await
-                    .unwrap_or_else(|e| format!("Tool error: {}", e));
+                let tool_path = args["path"].as_str().map(String::from);
+                app_handle
+                    .emit("tool-progress", ToolProgressPayload {
+                        kind: "start".to_string(),
+                        name: name.to_string(),
+                        path: tool_path.clone(),
+                    })
+                    .ok();
+
+                let (result, file_changes) =
+                    execute_tool_tracked(name, &args, client, tool_configs, root_path, backend)
+                        .await
+                        .unwrap_or_else(|e| {
+                            app_handle
+                                .emit("tool-progress", ToolProgressPayload {
+                                    kind: "error".to_string(),
+                                    name: name.to_string(),
+                                    path: tool_path.clone(),
+                                })
+                                .ok();
+                            (format!("Tool error: {}", e), Vec::new())
+                        });
+
+                app_handle
+                    .emit("tool-progress", ToolProgressPayload {
+                        kind: "done".to_string(),
+                        name: name.to_string(),
+                        path: tool_path,
+                    })
+                    .ok();
 
                 let snippet = if result.len() > 200 {
                     format!("{}...", &result[..200])
@@ -3476,6 +4012,7 @@ async fn run_openai_tool_loop(
                     arguments: serde_json::to_string(&args).unwrap_or_default(),
                     result_snippet: snippet,
                     result_full: result.clone(),
+                    file_changes,
                 });
 
                 // Add tool result message
@@ -3894,9 +4431,18 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     } else {
         user_max_tokens
     };
+    // Cloud providers must NOT be auto-scaled. Their max_tokens /
+    // max_completion_tokens budget is the only thing the user controls, and
+    // DigitalOcean scopes `max_completion_tokens` across the *entire* tool loop
+    // (all iterations), so an auto-scaled 8192/4096 cap would truncate the
+    // response mid-agent-loop. When the user hasn't set a budget we apply a
+    // generous default (32K) rather than leaving the output unbounded, which
+    // keeps reasoning-capable models from "overthinking" indefinitely.
+    let cloud_max_tokens: Option<u32> =
+        Some(req.max_tokens.unwrap_or(CLOUD_DEFAULT_MAX_TOKENS));
     eprintln!(
-        "[nolock] ai_chat resolved max_tokens={} (user={:?}, has_tools={})",
-        max_tokens, req.max_tokens, has_tools
+        "[nolock] ai_chat resolved max_tokens={} (local, user={:?}, has_tools={}) cloud_max_tokens={:?}",
+        max_tokens, req.max_tokens, has_tools, cloud_max_tokens
     );
 
     // Prepend global system prompt if provided and not already present
@@ -3975,16 +4521,13 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
                 // Stream NDJSON response (handles both thinking and content fields)
                 let mut full_content = String::new();
-                let mut buf = String::new();
+                let mut buf: Vec<u8> = Vec::new();
                 loop {
                     match resp.chunk().await.map_err(|e| e.to_string())? {
                         None => break,
                         Some(chunk) => {
-                            let s = String::from_utf8_lossy(&chunk);
-                            buf.push_str(&s);
-                            while let Some(pos) = buf.find('\n') {
-                                let line = buf[..pos].trim().to_string();
-                                buf = buf[pos + 1..].to_string();
+                            buf.extend_from_slice(&chunk);
+                            while let Some(line) = take_next_line(&mut buf) {
                                 if line.is_empty() { continue; }
                                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
                                     // Capture thinking field for thinking-capable models
@@ -4011,8 +4554,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     }
                 }
                 // Drain trailing buffer (last chunk may not end with '\n')
-                if !buf.trim().is_empty() {
-                    let line = buf.trim().to_string();
+                if !buf.is_empty() {
+                    let line = String::from_utf8_lossy(&buf).trim().to_string();
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
                         if let Some(thinking) = data["message"]["thinking"].as_str() {
                             if !thinking.is_empty() {
@@ -4075,30 +4618,24 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
             // SSE streaming — data: {...}\n\n
             let mut full_content = String::new();
-            let mut buf = String::new();
+            let mut buf: Vec<u8> = Vec::new();
             loop {
                 match resp.chunk().await.map_err(|e| e.to_string())? {
                     None => break,
                     Some(chunk) => {
-                        let s = String::from_utf8_lossy(&chunk);
-                        buf.push_str(&s);
-                        // SSE events are separated by \n\n
-                        while let Some(pos) = buf.find("\n\n") {
-                            let event = buf[..pos].to_string();
-                            buf = buf[pos + 2..].to_string();
-                            for line in event.lines() {
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    let data = data.trim();
-                                    if data == "[DONE]" { continue; }
-                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                        if let Some(content) = json["content"].as_str() {
-                                            if !content.is_empty() {
-                                                full_content.push_str(content);
-                                                app_handle.emit("stream-token", StreamPayload {
-                                                    token: content.to_string(),
-                                                    thinking: false,
-                                                }).ok();
-                                            }
+                        buf.extend_from_slice(&chunk);
+                        while let Some(line) = take_next_line(&mut buf) {
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                let data = data.trim();
+                                if data == "[DONE]" { continue; }
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                    if let Some(content) = json["content"].as_str() {
+                                        if !content.is_empty() {
+                                            full_content.push_str(content);
+                                            app_handle.emit("stream-token", StreamPayload {
+                                                token: content.to_string(),
+                                                thinking: false,
+                                            }).ok();
                                         }
                                     }
                                 }
@@ -4107,12 +4644,12 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     }
                 }
             }
-            // Drain trailing buffer (last chunk may not end with '\n\n')
-            if !buf.trim().is_empty() {
-                for line in buf.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        let data = data.trim();
-                        if data == "[DONE]" { continue; }
+            // Drain trailing buffer (last chunk may not end with '\n')
+            if !buf.is_empty() {
+                let line = String::from_utf8_lossy(&buf).trim().to_string();
+                if let Some(data) = line.strip_prefix("data: ") {
+                    let data = data.trim();
+                    if data != "[DONE]" {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             if let Some(content) = json["content"].as_str() {
                                 if !content.is_empty() {
@@ -4159,10 +4696,12 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             let mut body = serde_json::json!({
                 "model": req.model,
                 "messages": or_msgs,
-                "max_tokens": max_tokens,
                 "temperature": temperature,
                 "stream": true
             });
+            if let Some(mt) = cloud_max_tokens {
+                body["max_tokens"] = serde_json::json!(mt);
+            }
             if has_tools {
                 body["tools"] = serde_json::json!(tools);
             }
@@ -4196,29 +4735,24 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
             // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
             let mut full_content = String::new();
-            let mut buf = String::new();
+            let mut buf: Vec<u8> = Vec::new();
             loop {
                 match resp.chunk().await.map_err(|e| e.to_string())? {
                     None => break,
                     Some(chunk) => {
-                        let s = String::from_utf8_lossy(&chunk);
-                        buf.push_str(&s);
-                        while let Some(pos) = buf.find("\n\n") {
-                            let event = buf[..pos].to_string();
-                            buf = buf[pos + 2..].to_string();
-                            for line in event.lines() {
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    let data = data.trim();
-                                    if data == "[DONE]" { continue; }
-                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                            if !content.is_empty() {
-                                                full_content.push_str(content);
-                                                app_handle.emit("stream-token", StreamPayload {
-                                                    token: content.to_string(),
-                                                    thinking: false,
-                                                }).ok();
-                                            }
+                        buf.extend_from_slice(&chunk);
+                        while let Some(line) = take_next_line(&mut buf) {
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                let data = data.trim();
+                                if data == "[DONE]" { continue; }
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                        if !content.is_empty() {
+                                            full_content.push_str(content);
+                                            app_handle.emit("stream-token", StreamPayload {
+                                                token: content.to_string(),
+                                                thinking: false,
+                                            }).ok();
                                         }
                                     }
                                 }
@@ -4228,11 +4762,11 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 }
             }
             // Drain trailing buffer (last chunk may not end with '\n\n')
-            if !buf.trim().is_empty() {
-                for line in buf.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        let data = data.trim();
-                        if data == "[DONE]" { continue; }
+            if !buf.is_empty() {
+                let line = String::from_utf8_lossy(&buf).trim().to_string();
+                if let Some(data) = line.strip_prefix("data: ") {
+                    let data = data.trim();
+                    if data != "[DONE]" {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                 if !content.is_empty() {
@@ -4258,13 +4792,15 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
             if is_remote {
                 // Remote OpenCode Zen API — OpenAI-compatible SSE streaming
-                let body = serde_json::json!({
+                let mut body = serde_json::json!({
                     "model": req.model,
                     "messages": messages,
                     "stream": true,
-                    "max_tokens": max_tokens,
                     "temperature": temperature,
                 });
+                if let Some(mt) = cloud_max_tokens {
+                    body["max_tokens"] = serde_json::json!(mt);
+                }
                 let full_url = format!("{}/chat/completions", req.url.trim_end_matches('/'));
                 eprintln!("[nolock] opencode POST {full_url} (streaming)");
                 let mut resp = client
@@ -4289,29 +4825,24 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
                 // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
                 let mut full_content = String::new();
-                let mut buf = String::new();
+                let mut buf: Vec<u8> = Vec::new();
                 loop {
                     match resp.chunk().await.map_err(|e| e.to_string())? {
                         None => break,
                         Some(chunk) => {
-                            let s = String::from_utf8_lossy(&chunk);
-                            buf.push_str(&s);
-                            while let Some(pos) = buf.find("\n\n") {
-                                let event = buf[..pos].to_string();
-                                buf = buf[pos + 2..].to_string();
-                                for line in event.lines() {
-                                    if let Some(data) = line.strip_prefix("data: ") {
-                                        let data = data.trim();
-                                        if data == "[DONE]" { continue; }
-                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                                if !content.is_empty() {
-                                                    full_content.push_str(content);
-                                                     app_handle.emit("stream-token", StreamPayload {
-                                                        token: content.to_string(),
-                                                        thinking: false,
-                                                    }).ok();
-                                                }
+                            buf.extend_from_slice(&chunk);
+                            while let Some(line) = take_next_line(&mut buf) {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    let data = data.trim();
+                                    if data == "[DONE]" { continue; }
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                            if !content.is_empty() {
+                                                full_content.push_str(content);
+                                                 app_handle.emit("stream-token", StreamPayload {
+                                                    token: content.to_string(),
+                                                    thinking: false,
+                                                }).ok();
                                             }
                                         }
                                     }
@@ -4321,11 +4852,11 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     }
                 }
                 // Drain trailing buffer (last chunk may not end with '\n\n')
-                if !buf.trim().is_empty() {
-                    for line in buf.lines() {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            let data = data.trim();
-                            if data == "[DONE]" { continue; }
+                if !buf.is_empty() {
+                    let line = String::from_utf8_lossy(&buf).trim().to_string();
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data != "[DONE]" {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                                 if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                     if !content.is_empty() {
@@ -4383,16 +4914,13 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
                 // NDJSON streaming — {"response":"...","done":false}
                 let mut full_content = String::new();
-                let mut buf = String::new();
+                let mut buf: Vec<u8> = Vec::new();
                 loop {
                     match resp.chunk().await.map_err(|e| e.to_string())? {
                         None => break,
                         Some(chunk) => {
-                            let s = String::from_utf8_lossy(&chunk);
-                            buf.push_str(&s);
-                            while let Some(pos) = buf.find('\n') {
-                                let line = buf[..pos].trim().to_string();
-                                buf = buf[pos + 1..].to_string();
+                            buf.extend_from_slice(&chunk);
+                            while let Some(line) = take_next_line(&mut buf) {
                                 if line.is_empty() { continue; }
                                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
                                     if let Some(content) = data["response"].as_str() {
@@ -4410,8 +4938,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     }
                 }
                 // Drain trailing buffer (last chunk may not end with '\n')
-                if !buf.trim().is_empty() {
-                    let line = buf.trim().to_string();
+                if !buf.is_empty() {
+                    let line = String::from_utf8_lossy(&buf).trim().to_string();
                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
                         if let Some(content) = data["response"].as_str() {
                             if !content.is_empty() {
@@ -4451,12 +4979,13 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 &full_url,
                 &api_key,
                 &req.model,
+                &req.backend,
                 &messages,
                 &tools,
                 &req.tool_configs,
                 req.root_path.as_deref(),
                 temperature,
-                max_tokens,
+                cloud_max_tokens,
                 req.max_iterations,
                 None, // no extra headers needed for DigitalOcean
                 use_model_affinity,
@@ -4515,6 +5044,11 @@ pub fn run() {
             list_tools,
             read_tool,
             run_tool_command,
+            list_sessions,
+            read_session,
+            save_session,
+            delete_session,
+            archive_session,
             search_in_files,
             replace_in_files,
             create_directory,
@@ -4552,6 +5086,32 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Streaming UTF-8 line splitter ------------------------------------
+    #[test]
+    fn test_take_next_line_reassembles_split_utf8() {
+        // "你" is the 3 bytes E4 BD A0. Split it across two chunks: chunk 1
+        // ends with E4 BD, chunk 2 starts with A0. take_next_line must buffer
+        // raw bytes and only decode complete lines, otherwise the split
+        // sequence would corrupt into replacement characters.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"data: hello \xE4\xBD"); // partial "你"
+        assert!(take_next_line(&mut buf).is_none()); // no newline yet
+        buf.extend_from_slice(b"\xA0 world\n"); // completes "你" + newline
+        let line = take_next_line(&mut buf).unwrap();
+        assert_eq!(line, "data: hello 你 world");
+    }
+
+    #[test]
+    fn test_take_next_line_handles_crlf_and_partial_tail() {
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(b"line one\r\nline two\n");
+        assert_eq!(take_next_line(&mut buf).unwrap(), "line one");
+        assert_eq!(take_next_line(&mut buf).unwrap(), "line two");
+        // No trailing newline — should return None, not lose data.
+        buf.extend_from_slice(b"partial");
+        assert!(take_next_line(&mut buf).is_none());
+    }
 
     // ---- DirEntry sorting / filtering ------------------------------------
     #[test]
@@ -4728,7 +5288,7 @@ mod tests {
     async fn test_execute_tool_unknown_name() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("unknown_tool", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("unknown_tool", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown tool"));
     }
@@ -4737,7 +5297,7 @@ mod tests {
     async fn test_execute_tool_web_fetch_missing_url() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("web_fetch", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("web_fetch", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
@@ -4746,7 +5306,7 @@ mod tests {
     async fn test_execute_tool_read_file_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_file_xyzzy_123.test" });
-        let result = execute_tool("read_file", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("read_file", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read"));
     }
@@ -4755,9 +5315,47 @@ mod tests {
     async fn test_execute_tool_list_directory_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_dir_xyzzy_123" });
-        let result = execute_tool("list_directory", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("list_directory", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read dir"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_read_file_respects_backend_limit() {
+        let client = reqwest::Client::new();
+        // A file larger than the 8KB local limit but well under the 1MB cloud
+        // limit: cloud providers must receive the full content, local backends
+        // keep the small-model truncation.
+        let dir = std::env::temp_dir().join("nolock_test_read_limit");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("big_file.txt");
+        let content = "x".repeat(16 * 1024); // 16KB
+        std::fs::write(&path, &content).unwrap();
+        let path_str = path.to_string_lossy().to_string();
+        let args = serde_json::json!({ "path": path_str });
+
+        // Local backend keeps the 8KB truncation.
+        let local = execute_tool("read_file", &args, &client, &HashMap::new(), None, "ollama")
+            .await
+            .unwrap();
+        assert!(
+            local.contains("truncated at"),
+            "expected local backend to truncate 16KB file, got len {}",
+            local.len()
+        );
+        assert!(local.len() < content.len(), "local result should be truncated");
+
+        // Cloud backend returns the full file.
+        let cloud = execute_tool("read_file", &args, &client, &HashMap::new(), None, "digitalocean")
+            .await
+            .unwrap();
+        assert_eq!(
+            cloud, content,
+            "cloud backend should return the full 16KB file"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     // ---- read_file with temp dirs ---------------------------
@@ -4803,7 +5401,7 @@ mod tests {
                 }),
             ),
         ]);
-        let result = execute_tool("web_search", &args, &client, &tool_configs, None)
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama")
             .await
             .unwrap();
         assert!(
@@ -4818,7 +5416,7 @@ mod tests {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "query": "test query" });
         let tool_configs = HashMap::new();
-        let result = execute_tool("web_search", &args, &client, &tool_configs, None).await;
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama").await;
         // Without tool_configs it defaults to DuckDuckGo. The request will fail
         // because the DuckDuckGo API is reachable but may return no results for
         // "test query" — either way we get a non-error string (not a tool error).
@@ -4846,7 +5444,7 @@ mod tests {
                 }),
             ),
         ]);
-        let result = execute_tool("web_search", &args, &client, &tool_configs, None).await;
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama").await;
         // With a real-looking key the code attempts an HTTP call, which will
         // fail (invalid key) but the error message should come from the Brave
         // Search API path, NOT from DuckDuckGo.
@@ -4873,7 +5471,7 @@ mod tests {
     async fn test_execute_tool_rust_repl_missing_code() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
@@ -4884,7 +5482,7 @@ mod tests {
         let args = serde_json::json!({
             "code": "fn main() { println!(\"Hello, world!\"); }"
         });
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should compile and run, got: {:?}", result);
         let output = result.unwrap();
         assert!(
@@ -4900,7 +5498,7 @@ mod tests {
         let args = serde_json::json!({
             "code": "fn main() { let sum: u64 = (1..=100).sum(); println!(\"Sum = {}\", sum); }"
         });
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should compile and run, got: {:?}", result);
         let output = result.unwrap();
         assert!(
@@ -4916,7 +5514,7 @@ mod tests {
         let args = serde_json::json!({
             "code": "fn main() { let x: i32 = \"not an int\"; println!(\"{}\", x); }"
         });
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should return compile error, not Err: {:?}", result);
         let output = result.unwrap();
         // The output should contain compiler error messages
@@ -4934,7 +5532,7 @@ mod tests {
             "code": "fn main() { let mut v = vec![1, 2, 3]; v.sort(); println!(\"sorted: {:?}\", v); }",
             "dependencies": []
         });
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should compile and run, got: {:?}", result);
         let output = result.unwrap();
         assert!(
@@ -4949,7 +5547,7 @@ mod tests {
     async fn test_execute_tool_bash_sandbox_missing_command() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
@@ -4960,7 +5558,7 @@ mod tests {
         let args = serde_json::json!({
             "command": "echo hello from bash"
         });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should run, got: {:?}", result);
         let output = result.unwrap();
         assert!(
@@ -4976,7 +5574,7 @@ mod tests {
         let args = serde_json::json!({
             "command": "echo error_msg >&2; exit 1"
         });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should return output even on non-zero exit, got: {:?}", result);
         let output = result.unwrap();
         assert!(
@@ -4992,7 +5590,7 @@ mod tests {
         let args = serde_json::json!({
             "command": "echo -e 'banana\\napple\\ncherry' | sort | head -2"
         });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should run pipeline, got: {:?}", result);
         let output = result.unwrap();
         assert!(
@@ -5011,7 +5609,7 @@ mod tests {
             "command": "pwd",
             "working_directory": dir.to_string_lossy()
         });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should run in working dir, got: {:?}", result);
         let output = result.unwrap();
         assert!(
@@ -5030,7 +5628,7 @@ mod tests {
             "command": "sleep 60",
             "timeout": 2
         });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None).await;
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_ok(), "should return output even on kill, got: {:?}", result);
         let output = result.unwrap();
         assert!(
@@ -5048,12 +5646,127 @@ mod tests {
             "command": "pwd",
             "working_directory": "/tmp"
         });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), Some("/home")).await;
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), Some("/home"), "ollama").await;
         assert!(result.is_err(), "should reject working dir outside root, got: {:?}", result);
         assert!(
             result.unwrap_err().contains("outside"),
             "expected 'outside' in error message"
         );
+    }
+
+    // ---- filesystem tools scoped to the open project folder --------------
+    #[test]
+    fn test_command_escapes_root_detects_outside_path() {
+        let base = std::env::temp_dir().join("nolock_test_escape");
+        let _ = std::fs::create_dir_all(&base);
+        let root = base.canonicalize().unwrap();
+        let outside = std::env::temp_dir().join("nolock_other_dir_xyz");
+        let _ = std::fs::create_dir_all(&outside);
+
+        let cmd = format!("find {} -name '*.tsx'", outside.to_string_lossy());
+        assert!(
+            command_escapes_root(&cmd, &root).is_some(),
+            "outside absolute path should be detected"
+        );
+
+        let in_cmd = format!("find {} -name '*.rs'", root.join("src").to_string_lossy());
+        assert!(
+            command_escapes_root(&in_cmd, &root).is_none(),
+            "in-root absolute path should be allowed"
+        );
+
+        assert!(
+            command_escapes_root("cargo test", &root).is_none(),
+            "command without absolute paths should be allowed"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_read_file_outside_root() {
+        let client = reqwest::Client::new();
+        let base = std::env::temp_dir().join("nolock_test_read_scope");
+        let project = base.join("project");
+        let outside = base.join("outside");
+        let _ = std::fs::create_dir_all(&project);
+        let _ = std::fs::create_dir_all(&outside);
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "secret data").unwrap();
+        let project_str = project.to_string_lossy().to_string();
+        let secret_str = secret.to_string_lossy().to_string();
+
+        let args = serde_json::json!({ "path": secret_str });
+        let result = execute_tool("read_file", &args, &client, &HashMap::new(), Some(&project_str), "ollama")
+            .await;
+        assert!(result.is_err(), "read outside root should be rejected, got: {:?}", result);
+        assert!(result.unwrap_err().contains("outside the open folder"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_list_directory_outside_root() {
+        let client = reqwest::Client::new();
+        let base = std::env::temp_dir().join("nolock_test_list_scope");
+        let project = base.join("project");
+        let outside = base.join("outside");
+        let _ = std::fs::create_dir_all(&project);
+        let _ = std::fs::create_dir_all(&outside);
+        let project_str = project.to_string_lossy().to_string();
+        let outside_str = outside.to_string_lossy().to_string();
+
+        let args = serde_json::json!({ "path": outside_str });
+        let result = execute_tool("list_directory", &args, &client, &HashMap::new(), Some(&project_str), "ollama")
+            .await;
+        assert!(result.is_err(), "listing outside root should be rejected, got: {:?}", result);
+        assert!(result.unwrap_err().contains("outside the open folder"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_command_outside_root() {
+        let client = reqwest::Client::new();
+        let base = std::env::temp_dir().join("nolock_test_sandbox_scope");
+        let project = base.join("project");
+        let outside = base.join("outside");
+        let _ = std::fs::create_dir_all(&project);
+        let _ = std::fs::create_dir_all(&outside);
+        let project_str = project.to_string_lossy().to_string();
+        let outside_str = outside.to_string_lossy().to_string();
+
+        let args = serde_json::json!({ "command": format!("find {} -name '*.txt'", outside_str) });
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), Some(&project_str), "ollama")
+            .await;
+        assert!(result.is_err(), "command escaping root should be rejected, got: {:?}", result);
+        assert!(result.unwrap_err().contains("outside the open project folder"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_bash_sandbox_command_within_root() {
+        let client = reqwest::Client::new();
+        let base = std::env::temp_dir().join("nolock_test_sandbox_within");
+        let project = base.join("project");
+        let _ = std::fs::create_dir_all(&project);
+        let file = project.join("hello.txt");
+        std::fs::write(&file, "hi").unwrap();
+        let project_str = project.to_string_lossy().to_string();
+        let file_str = file.to_string_lossy().to_string();
+
+        let args = serde_json::json!({ "command": format!("cat '{}'", file_str) });
+        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), Some(&project_str), "ollama")
+            .await;
+        assert!(result.is_ok(), "in-root command should run, got: {:?}", result);
+        assert!(
+            result.unwrap().contains("hi"),
+            "expected file content in output"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ---- tool_call_id fix: reproducing the bug and confirming the fix ----
