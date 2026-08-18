@@ -2220,7 +2220,11 @@ async fn run_subagent(
          Complete the task above and return a single final answer. Use tools only \
          when necessary; do not call the same tool repeatedly and do not re-read the \
          same file. Once you have enough information, stop calling tools and write \
-         your answer directly.",
+         your answer directly.\n\n\
+         Do NOT ask yourself questions and then answer them. Do NOT role-play multiple \
+         personas or write out an internal back-and-forth dialogue. Do NOT produce a \
+         long chain-of-thought before answering. State your answer once, directly and \
+         concisely.",
         agent.prompt
     );
     let msgs = vec![
@@ -2317,6 +2321,40 @@ async fn run_subagent(
             Err(format!("Sub-agent '{}' failed: {}", agent.name, e))
         }
     }
+}
+
+/// Maximum number of sub-agents to run concurrently. Bounded so two large local
+/// models don't exhaust VRAM.
+const MAX_CONCURRENT_SUBAGENTS: usize = 2;
+
+/// Run a batch of `spawn_subagent` calls concurrently (at most
+/// `MAX_CONCURRENT_SUBAGENTS` at a time). Returns `(result, optional_trace)` for
+/// each item in the same order as `items`. Duplicates (`is_dup`) are
+/// short-circuited without running.
+async fn run_spawn_batch(
+    runner: Option<&SubAgentRunner<'_>>,
+    items: &[(String, String, bool)], // (agent, task, is_dup)
+) -> Vec<(String, Option<SubAgentTrace>)> {
+    let mut results: Vec<(String, Option<SubAgentTrace>)> = Vec::with_capacity(items.len());
+    for chunk in items.chunks(MAX_CONCURRENT_SUBAGENTS) {
+        let futures = chunk.iter().map(|(agent, task, is_dup)| {
+            let is_dup = *is_dup;
+            async move {
+                if is_dup {
+                    (format!("Sub-agent '{}' was already spawned with this task in this turn; skipped duplicate.", agent), None)
+                } else if let Some(r) = runner {
+                    match Box::pin(run_subagent(r, agent, task)).await {
+                        Ok((out, trace)) => (out, Some(trace)),
+                        Err(e) => (format!("Tool error: {}", e), None),
+                    }
+                } else {
+                    ("Tool error: sub-agents are not available".to_string(), None)
+                }
+            }
+        });
+        results.extend(futures::future::join_all(futures).await);
+    }
+    results
 }
 
 // ---------------------------------------------------------------------------
@@ -4026,76 +4064,88 @@ async fn ollama_chat_with_tools(
             }
             ollama_msgs.push(assistant_msg);
 
-            // Execute each tool call and add results
+            // Execute each tool call and add results. `spawn_subagent` calls run
+            // concurrently (max 2); other tools run sequentially.
+            let mut spawn_items: Vec<(String, String, String, serde_json::Value, bool)> = Vec::new();
+
             for call in &calls {
                 let name = call["function"]["name"].as_str().unwrap_or("unknown");
                 let args = &call["function"]["arguments"];
-
+                let tool_call_id = call["id"].as_str().unwrap_or("call_unknown").to_string();
                 let tool_path = args["path"].as_str().map(String::from);
-                emit_tool_progress(ctx.app_handle, subagent_id, "start", name, tool_path.clone());
 
-                // Sub-agent spawning — run the sub-agent and capture its trace.
-                let mut subagent_trace: Option<SubAgentTrace> = None;
-                let (result, file_changes) = if name == "spawn_subagent" {
-                    let agent = args["agent"].as_str().unwrap_or("");
-                    let task = args["task"].as_str().unwrap_or("");
+                if name == "spawn_subagent" {
+                    let agent = args["agent"].as_str().unwrap_or("").to_string();
+                    let task = args["task"].as_str().unwrap_or("").to_string();
                     let task_norm: String = task.split_whitespace().collect::<Vec<_>>().join(" ");
                     let dedup_key = format!("{}||{}", agent.trim(), task_norm);
-                    if spawned_subagents.contains(&dedup_key) {
-                        emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
-                        (format!("Sub-agent '{}' was already spawned with this task in this turn; skipped duplicate.", agent), Vec::new())
-                    } else {
+                    let is_dup = spawned_subagents.contains(&dedup_key);
+                    if !is_dup {
                         spawned_subagents.insert(dedup_key);
-                        match runner {
-                            Some(r) => match Box::pin(run_subagent(r, agent, task)).await {
-                                Ok((out, trace)) => {
-                                    subagent_trace = Some(trace);
-                                    (out, Vec::new())
-                                }
-                                Err(e) => {
-                                    emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
-                                    (format!("Tool error: {}", e), Vec::new())
-                                }
-                            },
-                            None => {
-                                emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
-                                ("Tool error: sub-agents are not available".to_string(), Vec::new())
-                            }
-                        }
                     }
+                    spawn_items.push((tool_call_id, agent, task, args.clone(), is_dup));
                 } else {
-                    execute_tool_tracked(name, args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
-                        .await
-                        .unwrap_or_else(|e| {
-                            emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
-                            (format!("Tool error: {}", e), Vec::new())
-                        })
-                };
+                    emit_tool_progress(ctx.app_handle, subagent_id, "start", name, tool_path.clone());
+                    let (result, file_changes) =
+                        execute_tool_tracked(name, args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
+                            .await
+                            .unwrap_or_else(|e| {
+                                emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
+                                (format!("Tool error: {}", e), Vec::new())
+                            });
+                    emit_tool_progress(ctx.app_handle, subagent_id, "done", name, tool_path);
 
-                emit_tool_progress(ctx.app_handle, subagent_id, "done", name, tool_path);
+                    let snippet = if result.len() > 200 {
+                        format!("{}...", &result[..200])
+                    } else {
+                        result.clone()
+                    };
+                    all_tool_calls.push(ToolCallLog {
+                        name: name.to_string(),
+                        arguments: serde_json::to_string(args).unwrap_or_default(),
+                        result_snippet: snippet,
+                        result_full: result.clone(),
+                        file_changes,
+                        subagent: None,
+                    });
+                    ollama_msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": result
+                    }));
+                }
+            }
 
-                let snippet = if result.len() > 200 {
-                    format!("{}...", &result[..200])
-                } else {
-                    result.clone()
-                };
+            // Run the collected spawn_subagent calls concurrently (max 2).
+            if !spawn_items.is_empty() {
+                let batch: Vec<(String, String, bool)> = spawn_items
+                    .iter()
+                    .map(|(_, agent, task, _, is_dup)| (agent.clone(), task.clone(), *is_dup))
+                    .collect();
+                let outcomes = run_spawn_batch(runner, &batch).await;
 
-                all_tool_calls.push(ToolCallLog {
-                    name: name.to_string(),
-                    arguments: serde_json::to_string(args).unwrap_or_default(),
-                    result_snippet: snippet,
-                    result_full: result.clone(),
-                    file_changes,
-                    subagent: subagent_trace,
-                });
+                for ((tool_call_id, _, _, args, _), (result, subagent_trace)) in spawn_items.into_iter().zip(outcomes) {
+                    emit_tool_progress(ctx.app_handle, subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
 
-                // Add tool result message
-                let tool_call_id = call["id"].as_str().unwrap_or("call_unknown");
-                ollama_msgs.push(serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": result
-                }));
+                    let snippet = if result.len() > 200 {
+                        format!("{}...", &result[..200])
+                    } else {
+                        result.clone()
+                    };
+                    all_tool_calls.push(ToolCallLog {
+                        name: "spawn_subagent".to_string(),
+                        arguments: serde_json::to_string(&args).unwrap_or_default(),
+                        result_snippet: snippet,
+                        result_full: result.clone(),
+                        file_changes: Vec::new(),
+                        subagent: subagent_trace,
+                    });
+                    ollama_msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": result
+                    }));
+                }
             }
 
             // Add a newline separator between tool-loop iterations so the
@@ -4154,7 +4204,17 @@ fn build_ollama_chat_body(
         "model": model,
         "messages": ollama_msgs,
         "stream": true,
-        "options": { "num_predict": max_tokens, "temperature": temperature }
+        // Anti-repetition options: some models (e.g. Nemotron) otherwise spiral
+        // into self-question/self-answer loops. repeat_penalty + top_k/top_p add
+        // just enough diversity to break the loop without hurting coherence.
+        "options": {
+            "num_predict": max_tokens,
+            "temperature": temperature,
+            "repeat_penalty": 1.1,
+            "repeat_last_n": 256,
+            "top_k": 40,
+            "top_p": 0.95
+        }
     });
     if !tools.is_empty() {
         body["tools"] = serde_json::json!(tools);
@@ -4513,76 +4573,88 @@ async fn run_openai_tool_loop(
             });
             openai_msgs.push(assistant_msg);
 
-            // Execute each tool call and add results
+            // Execute each tool call and add results. `spawn_subagent` calls run
+            // concurrently (max 2); other tools run sequentially.
+            let mut spawn_items: Vec<(String, String, String, serde_json::Value, bool)> = Vec::new();
+
             for call in &complete_calls {
                 let name = call["function"]["name"].as_str().unwrap_or("unknown");
                 let args = normalize_tool_args(&call["function"]["arguments"]);
-
+                let tool_call_id = call["id"].as_str().unwrap_or("call_unknown").to_string();
                 let tool_path = args["path"].as_str().map(String::from);
-                emit_tool_progress(app_handle, subagent_id, "start", name, tool_path.clone());
 
-                // Sub-agent spawning — run the sub-agent and capture its trace.
-                let mut subagent_trace: Option<SubAgentTrace> = None;
-                let (result, file_changes) = if name == "spawn_subagent" {
-                    let agent = args["agent"].as_str().unwrap_or("");
-                    let task = args["task"].as_str().unwrap_or("");
+                if name == "spawn_subagent" {
+                    let agent = args["agent"].as_str().unwrap_or("").to_string();
+                    let task = args["task"].as_str().unwrap_or("").to_string();
                     let task_norm: String = task.split_whitespace().collect::<Vec<_>>().join(" ");
                     let dedup_key = format!("{}||{}", agent.trim(), task_norm);
-                    if spawned_subagents.contains(&dedup_key) {
-                        emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
-                        (format!("Sub-agent '{}' was already spawned with this task in this turn; skipped duplicate.", agent), Vec::new())
-                    } else {
+                    let is_dup = spawned_subagents.contains(&dedup_key);
+                    if !is_dup {
                         spawned_subagents.insert(dedup_key);
-                        match runner {
-                            Some(r) => match Box::pin(run_subagent(r, agent, task)).await {
-                                Ok((out, trace)) => {
-                                    subagent_trace = Some(trace);
-                                    (out, Vec::new())
-                                }
-                                Err(e) => {
-                                    emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
-                                    (format!("Tool error: {}", e), Vec::new())
-                                }
-                            },
-                            None => {
-                                emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
-                                ("Tool error: sub-agents are not available".to_string(), Vec::new())
-                            }
-                        }
                     }
+                    spawn_items.push((tool_call_id, agent, task, args.clone(), is_dup));
                 } else {
-                    execute_tool_tracked(name, &args, client, tool_configs, root_path, backend)
-                        .await
-                        .unwrap_or_else(|e| {
-                            emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
-                            (format!("Tool error: {}", e), Vec::new())
-                        })
-                };
+                    emit_tool_progress(app_handle, subagent_id, "start", name, tool_path.clone());
+                    let (result, file_changes) =
+                        execute_tool_tracked(name, &args, client, tool_configs, root_path, backend)
+                            .await
+                            .unwrap_or_else(|e| {
+                                emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
+                                (format!("Tool error: {}", e), Vec::new())
+                            });
+                    emit_tool_progress(app_handle, subagent_id, "done", name, tool_path);
 
-                emit_tool_progress(app_handle, subagent_id, "done", name, tool_path);
+                    let snippet = if result.len() > 200 {
+                        format!("{}...", &result[..200])
+                    } else {
+                        result.clone()
+                    };
+                    all_tool_calls.push(ToolCallLog {
+                        name: name.to_string(),
+                        arguments: serde_json::to_string(&args).unwrap_or_default(),
+                        result_snippet: snippet,
+                        result_full: result.clone(),
+                        file_changes,
+                        subagent: None,
+                    });
+                    openai_msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": result
+                    }));
+                }
+            }
 
-                let snippet = if result.len() > 200 {
-                    format!("{}...", &result[..200])
-                } else {
-                    result.clone()
-                };
+            // Run the collected spawn_subagent calls concurrently (max 2).
+            if !spawn_items.is_empty() {
+                let batch: Vec<(String, String, bool)> = spawn_items
+                    .iter()
+                    .map(|(_, agent, task, _, is_dup)| (agent.clone(), task.clone(), *is_dup))
+                    .collect();
+                let outcomes = run_spawn_batch(runner, &batch).await;
 
-                all_tool_calls.push(ToolCallLog {
-                    name: name.to_string(),
-                    arguments: serde_json::to_string(&args).unwrap_or_default(),
-                    result_snippet: snippet,
-                    result_full: result.clone(),
-                    file_changes,
-                    subagent: subagent_trace,
-                });
+                for ((tool_call_id, _, _, args, _), (result, subagent_trace)) in spawn_items.into_iter().zip(outcomes) {
+                    emit_tool_progress(app_handle, subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
 
-                // Add tool result message
-                let tool_call_id = call["id"].as_str().unwrap_or("call_unknown");
-                openai_msgs.push(serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": result
-                }));
+                    let snippet = if result.len() > 200 {
+                        format!("{}...", &result[..200])
+                    } else {
+                        result.clone()
+                    };
+                    all_tool_calls.push(ToolCallLog {
+                        name: "spawn_subagent".to_string(),
+                        arguments: serde_json::to_string(&args).unwrap_or_default(),
+                        result_snippet: snippet,
+                        result_full: result.clone(),
+                        file_changes: Vec::new(),
+                        subagent: subagent_trace,
+                    });
+                    openai_msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": result
+                    }));
+                }
             }
 
             // Add separator between iterations
