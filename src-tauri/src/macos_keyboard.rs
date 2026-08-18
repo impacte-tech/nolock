@@ -1,9 +1,9 @@
 #[cfg(target_os = "macos")]
 use block2::RcBlock;
 #[cfg(target_os = "macos")]
-use objc2::runtime::Object;
+use objc2::runtime::AnyObject;
 #[cfg(target_os = "macos")]
-use objc2::{class, msg_send, sel};
+use objc2::{class, msg_send};
 #[cfg(target_os = "macos")]
 use tauri::Emitter;
 
@@ -43,8 +43,8 @@ pub fn install(app_handle: tauri::AppHandle) {
 unsafe fn install_inner(app_handle: tauri::AppHandle) {
     let app = app_handle.clone();
 
-    let handler: RcBlock<dyn Fn(*mut Object) -> *mut Object> = RcBlock::new(
-        move |event: *mut Object| -> *mut Object {
+    let handler: RcBlock<dyn Fn(*mut AnyObject) -> *mut AnyObject> = RcBlock::new(
+        move |event: *mut AnyObject| -> *mut AnyObject {
             if event.is_null() {
                 return std::ptr::null_mut();
             }
@@ -92,14 +92,16 @@ unsafe fn install_inner(app_handle: tauri::AppHandle) {
     // The method retains a copy of the block, so we can drop our handle.
     // Pass the block as an id (void pointer). Blocks are Objective-C objects
     // and their struct pointer is compatible with id.
-    let _monitor: *mut Object = msg_send![cls,
-        addLocalMonitorForEventsMatchingMask: mask
-        handler: &*handler as *const _ as *mut Object
+    let _monitor: *mut AnyObject = msg_send![cls,
+        addLocalMonitorForEventsMatchingMask: mask,
+        handler: &*handler as *const _ as *mut AnyObject
     ];
 
     // Leak the monitor — it lives for the entire app lifetime.
     // We never need to remove it.
-    std::mem::forget(_monitor);
+    // Use let _ to suppress the "unused import" / variable warning
+    // while keeping the monitor registered with the OS event loop.
+    let _ = _monitor;
 }
 
 /// Stub for non-macOS platforms.
