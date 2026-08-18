@@ -7,7 +7,7 @@ import SkillAutocomplete from "./SkillAutocomplete";
 import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { getSecret } from "../lib/secrets";
-import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity } from "../lib/backends";
+import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity, isCloudBackend, BACKENDS } from "../lib/backends";
 import {
   type HookRunState,
   type ToolCallLog as HookToolCallLog,
@@ -31,6 +31,18 @@ import {
   getModelContext,
   serializeToolCalls,
 } from "../lib/rlhf";
+import {
+  type SessionRecord,
+  newSessionId,
+  listSessions,
+  saveSession,
+  deleteSession,
+  archiveSession,
+  summarizeMessages,
+  buildSessionMetadata,
+  formatTokens,
+  formatSessionTime,
+} from "../lib/sessions";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -38,11 +50,67 @@ import {
 // ---------------------------------------------------------------------------
 const marked = new Marked({ gfm: true, breaks: true });
 
+/** Build the provider config map (url + api key per backend) sent to the
+ *  backend so sub-agents can run on a different provider than the main agent. */
+function buildProvidersMap(): Record<string, { url: string; apiKey: string }> {
+  const providers: Record<string, { url: string; apiKey: string }> = {};
+  for (const b of BACKENDS) {
+    providers[b.value] = {
+      url: resolveBackendUrl(b.value),
+      apiKey: localStorage.getItem(`nolock.apiKey.${b.value}`) || "",
+    };
+  }
+  return providers;
+}
+
+export interface FileChangeEdit {
+  old_text: string;
+  new_text: string;
+}
+
+export interface FileChange {
+  path: string;
+  action: "write" | "edit";
+  created: boolean;
+  bytes: number;
+  edits?: FileChangeEdit[];
+}
+
+export interface SubAgentTrace {
+  id: string;
+  agent: string;
+  task: string;
+  model: string;
+  result: string;
+  tool_calls?: ToolCallLog[];
+}
+
+/** A tool call observed in a live sub-agent window. */
+interface SubAgentLiveToolCall {
+  name: string;
+  status: "start" | "done" | "error";
+  path?: string;
+}
+
+/** Live state for a sub-agent window, accumulated from `subagent-*` events. */
+interface SubAgentLiveState {
+  id: string;
+  agent: string;
+  task: string;
+  model: string;
+  status: "running" | "done";
+  content: string;
+  thinking: string;
+  toolCalls: SubAgentLiveToolCall[];
+}
+
 export interface ToolCallLog {
   name: string;
   arguments: string;
   result_snippet: string;
   result_full: string;
+  file_changes?: FileChange[];
+  subagent?: SubAgentTrace;
 }
 
 interface Message {
@@ -115,9 +183,70 @@ const PROVIDER_META: Record<string, { label: string; url: string }> = {
   brave: { label: "Brave Search", url: "https://brave.com/search/" },
 };
 
-export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
-  const [expanded, setExpanded] = useState(false);
+function truncateText(s: string, max: number): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max)}…` : t;
+}
 
+function prettyJson(s: string): string {
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
+}
+
+/** A short human-readable summary of a tool call's arguments (e.g. the path). */
+function summarizeToolArgs(call: ToolCallLog): string {
+  let args: Record<string, unknown> | null = null;
+  try { args = JSON.parse(call.arguments); } catch {}
+  if (!args || typeof args !== "object") {
+    return call.arguments ? truncateText(call.arguments, 60) : "";
+  }
+  const a = args as Record<string, unknown>;
+  if (typeof a.agent === "string" && a.agent) return `@${a.agent}`;
+  if (typeof a.path === "string" && a.path) return a.path;
+  if (typeof a.query === "string" && a.query) return truncateText(a.query, 60);
+  if (typeof a.url === "string" && a.url) return a.url;
+  if (typeof a.command === "string" && a.command) return truncateText(a.command, 60);
+  if (typeof a.pattern === "string" && a.pattern) return truncateText(a.pattern, 60);
+  return truncateText(JSON.stringify(args), 60);
+}
+
+/** A single tool call, rendered as a collapsible window (Thinking-style). */
+function ToolCallItem({ call }: { call: ToolCallLog }) {
+  const [expanded, setExpanded] = useState(false);
+  const summary = summarizeToolArgs(call);
+  const isSubagent = call.name === "spawn_subagent";
+  return (
+    <div className="tool-call-window">
+      <div className="tool-call-window-header" onClick={() => setExpanded(!expanded)}>
+        <span className="tool-call-window-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        <span className="tool-call-window-name">{call.name}</span>
+        {summary && <span className="tool-call-window-summary" title={summary}>{summary}</span>}
+      </div>
+      {expanded && (
+        <div className="tool-call-window-body">
+          {call.arguments && (
+            <div className="tool-call-window-args">
+              <pre className="tool-call-window-pre">{prettyJson(call.arguments)}</pre>
+            </div>
+          )}
+          {isSubagent ? (
+            <div className="tool-call-window-note">
+              Full result and tool calls are shown in the sub-agent window.
+            </div>
+          ) : (
+            <div className="tool-call-window-result">
+              <pre className="tool-call-window-pre">{call.result_full || call.result_snippet}</pre>
+            </div>
+          )}
+          {call.file_changes && call.file_changes.length > 0 && (
+            <FileChangesBlock changes={call.file_changes} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
   const hasWebSearch = calls.some((c) => c.name === "web_search");
 
   let providerLabel = "DuckDuckGo";
@@ -138,28 +267,9 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
 
   return (
     <div className="tool-calls">
-      <div className="tool-calls-header" onClick={() => setExpanded(!expanded)}>
-        <span className="tool-calls-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
-        <span className="tool-calls-label">
-          {calls.length} tool {calls.length === 1 ? "call" : "calls"}
-        </span>
-        <span className="tool-calls-names">
-          {calls.map((c) => c.name).join(", ")}
-        </span>
-      </div>
-      {expanded && (
-        <div className="tool-calls-list">
-          {calls.map((call, i) => (
-            <div key={i} className="tool-call-item">
-              <div className="tool-call-name">{call.name}</div>
-              <div className="tool-call-args">
-                <code>{call.arguments}</code>
-              </div>
-              <div className="tool-call-result">{call.result_snippet}</div>
-            </div>
-          ))}
-        </div>
-      )}
+      {calls.map((call, i) => (
+        <ToolCallItem key={i} call={call} />
+      ))}
       {hasWebSearch && (
         <div className="tool-attribution">
           <a
@@ -170,6 +280,241 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
           >
             Results from {providerLabel}
           </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Dependency-free line-level diff (LCS-based) used to render expandable
+ * before/after views for file edits without pulling in a `diff` dependency.
+ * Returns an ordered list of lines tagged as context / added / removed.
+ */
+type DiffLine = { type: "context" | "added" | "removed"; text: string };
+
+function diffLines(oldText: string, newText: string): DiffLine[] {
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  const n = oldLines.length;
+  const m = newLines.length;
+
+  // dp[i][j] = LCS length of oldLines[i..] and newLines[j..]
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = oldLines[i] === newLines[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const out: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (oldLines[i] === newLines[j]) {
+      out.push({ type: "context", text: oldLines[i] });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      out.push({ type: "removed", text: oldLines[i] });
+      i++;
+    } else {
+      out.push({ type: "added", text: newLines[j] });
+      j++;
+    }
+  }
+  while (i < n) { out.push({ type: "removed", text: oldLines[i] }); i++; }
+  while (j < m) { out.push({ type: "added", text: newLines[j] }); j++; }
+  return out;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Custom session history dropdown — matches the app's monochrome panel style. */
+function SessionPicker({
+  sessions,
+  currentId,
+  currentTitle,
+  onNew,
+  onDelete,
+}: {
+  sessions: SessionRecord[];
+  currentId: string;
+  currentTitle: string;
+  onNew: () => void;
+  onDelete: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  return (
+    <div className="session-picker" ref={rootRef}>
+      <button
+        className="session-picker-toggle"
+        onClick={() => setOpen((o) => !o)}
+        title="Sessions"
+      >
+        <span className="session-picker-toggle-title">{currentTitle || "New session"}</span>
+        <span className="session-picker-toggle-chevron">{open ? "\u25BE" : "\u25B8"}</span>
+      </button>
+      {open && (
+        <div className="session-picker-menu">
+          <button
+            className="session-picker-new"
+            onClick={() => { onNew(); setOpen(false); }}
+          >
+            + New session
+          </button>
+          <div className="session-picker-list">
+            {sessions.map((s) => (
+              <div
+                key={s.id}
+                className={`session-picker-item${s.id === currentId ? " current" : ""}`}
+              >
+                <div className="session-picker-item-main">
+                  <span className="session-picker-item-title">
+                    {s.summary || s.firstMessage || s.id}
+                  </span>
+                  <span className="session-picker-item-meta">
+                    {formatSessionTime(s.updatedAt)}
+                    {" · "}{s.messageCount} msg{s.messageCount === 1 ? "" : "s"}
+                    {" · "}{s.toolCallCount} tool{s.toolCallCount === 1 ? "" : "s"}
+                  </span>
+                  {s.contextWindow > 0 && (
+                    <span className="session-picker-item-tokens">
+                      {formatTokens(s.tokenUsage)} / {formatTokens(s.contextWindow)} tok
+                    </span>
+                  )}
+                </div>
+                <button
+                  className="session-picker-delete"
+                  onClick={() => onDelete(s.id)}
+                  title="Delete session"
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+            {sessions.length === 0 && (
+              <div className="session-picker-empty">No saved sessions yet</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
+  const lines = diffLines(oldText, newText);
+  return (
+    <pre className="file-diff-block">
+      {lines.map((line, i) => (
+        <div key={i} className={`diff-line diff-${line.type}`}>
+          <span className="diff-marker">
+            {line.type === "added" ? "+" : line.type === "removed" ? "-" : " "}
+          </span>
+          <span className="diff-text">{line.text || " "}</span>
+        </div>
+      ))}
+    </pre>
+  );
+}
+
+function FileChangeItem({ change }: { change: FileChange }) {
+  const [expanded, setExpanded] = useState(false);
+  const isEdit = change.action === "edit" && change.edits && change.edits.length > 0;
+  const badge = change.created ? "created" : change.action === "edit" ? "edited" : "written";
+  return (
+    <div className="file-change-item">
+      <div className="file-change-item-header" onClick={() => setExpanded(!expanded)}>
+        <span className="file-change-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        <span className={`file-change-badge file-change-badge-${badge}`}>{badge}</span>
+        <span className="file-change-path">{change.path}</span>
+        <span className="file-change-bytes">{formatBytes(change.bytes)}</span>
+      </div>
+      {expanded && isEdit && (
+        <div className="file-change-diff">
+          {change.edits!.map((edit, i) => (
+            <DiffBlock key={i} oldText={edit.old_text} newText={edit.new_text} />
+          ))}
+        </div>
+      )}
+      {expanded && !isEdit && (
+        <div className="file-change-summary">
+          {change.created
+            ? `New file (${formatBytes(change.bytes)})`
+            : `File overwritten (${formatBytes(change.bytes)})`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Shows the files a tool call changed, with expandable before/after diffs. */
+function FileChangesBlock({ changes }: { changes: FileChange[] }) {
+  return (
+    <div className="file-changes">
+      <div className="file-changes-header">Files changed</div>
+      {changes.map((change, i) => (
+        <FileChangeItem key={`${change.path}-${i}`} change={change} />
+      ))}
+    </div>
+  );
+}
+
+/** A single sub-agent "window" — collapsible, live-streamed, inspectable. */
+function SubAgentBlock({ sa }: { sa: SubAgentLiveState }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className={`subagent-block${sa.status === "running" ? " running" : ""}`}>
+      <div className="subagent-block-header" onClick={() => setExpanded((e) => !e)}>
+        <span className="subagent-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        {sa.status === "running" ? (
+          <span className="subagent-spinner" />
+        ) : (
+          <span className="subagent-status-done">&#10003;</span>
+        )}
+        <span className="subagent-name">@{sa.agent}</span>
+        <span className="subagent-model">{sa.model}</span>
+        <span className="subagent-task" title={sa.task}>{sa.task}</span>
+      </div>
+      {expanded && (
+        <div className="subagent-block-body">
+          {sa.toolCalls.length > 0 && (
+            <div className="subagent-toolcalls">
+              {sa.toolCalls.map((tc, i) => (
+                <div key={i} className={`subagent-toolcall subagent-toolcall-${tc.status}`}>
+                  <span className="subagent-toolcall-status">
+                    {tc.status === "done" ? "\u2713" : tc.status === "error" ? "\u2717" : "\u2022"}
+                  </span>
+                  <span className="subagent-toolcall-name">{tc.name}</span>
+                  {tc.path && <span className="subagent-toolcall-path">{tc.path}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {sa.thinking && (
+            <pre className="subagent-thinking">{sa.thinking}</pre>
+          )}
+          <MarkdownContent text={sa.content || (sa.status === "running" ? "Working…" : "(no output)")} />
         </div>
       )}
     </div>
@@ -485,6 +830,96 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [thinkingText, setThinkingText] = useState("");
   const showThinking = localStorage.getItem("nolock.showThinking") === "true";
 
+  /** The model the DigitalOcean Inference Router selected (from the
+   *  x-model-router-selected-model header), surfaced so reasoning models can
+   *  be identified when they "overthink". */
+  const [routedModel, setRoutedModel] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    listen<string>("model-routed", (event) => {
+      if (event.payload) setRoutedModel(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // ---- Sub-agents: live windows streamed from `subagent-*` events ----------
+  const [subAgents, setSubAgents] = useState<SubAgentLiveState[]>([]);
+
+  useEffect(() => {
+    // `cancelled` guards against React StrictMode's double-mount: a listener
+    // whose registration promise resolves *after* cleanup would otherwise leak,
+    // and its handler would run twice — duplicating windows and streamed tokens.
+    let cancelled = false;
+    const unlisteners: (() => void)[] = [];
+    const track = (p: Promise<() => void>) => {
+      p.then((fn) => {
+        if (cancelled) fn();
+        else unlisteners.push(fn);
+      });
+    };
+
+    track(listen<{ id: string; agent: string; task: string; model: string }>("subagent-start", (e) => {
+      setSubAgents((prev) => {
+        // De-dup by agent + task so a repeated spawn doesn't open a second window.
+        if (prev.some((sa) => sa.agent === e.payload.agent && sa.task === e.payload.task)) {
+          return prev;
+        }
+        return [...prev, {
+          id: e.payload.id,
+          agent: e.payload.agent,
+          task: e.payload.task,
+          model: e.payload.model,
+          status: "running",
+          content: "",
+          thinking: "",
+          toolCalls: [],
+        }];
+      });
+    }));
+
+    track(listen<{ id: string; token: string; thinking: boolean }>("subagent-token", (e) => {
+      setSubAgents((prev) => prev.map((sa) => {
+        if (sa.id !== e.payload.id) return sa;
+        if (e.payload.thinking) return { ...sa, thinking: sa.thinking + e.payload.token };
+        return { ...sa, content: sa.content + e.payload.token };
+      }));
+    }));
+
+    track(listen<{ id: string; type: string; name: string; path?: string }>("subagent-tool-progress", (e) => {
+      setSubAgents((prev) => prev.map((sa) => {
+        if (sa.id !== e.payload.id) return sa;
+        if (e.payload.type === "start") {
+          return { ...sa, toolCalls: [...sa.toolCalls, { name: e.payload.name, status: "start", path: e.payload.path }] };
+        }
+        const next = [...sa.toolCalls];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].name === e.payload.name && next[i].status === "start") {
+            next[i] = { ...next[i], status: e.payload.type as SubAgentLiveToolCall["status"] };
+            break;
+          }
+        }
+        return { ...sa, toolCalls: next };
+      }));
+    }));
+
+    track(listen<{ id: string; result: string }>("subagent-done", (e) => {
+      setSubAgents((prev) => prev.map((sa) => sa.id === e.payload.id ? { ...sa, status: "done" } : sa));
+    }));
+
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((fn) => fn());
+    };
+  }, []);
+
   // ---- Hooks: run cards + concurrency ----
   const [hookRuns, setHookRuns] = useState<HookRunState[]>(() => getHookRuns());
   const hookBusy = hookRuns.some((r) => r.status === "queued" || r.status === "running");
@@ -766,16 +1201,19 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     return () => window.removeEventListener("click", handleClick, true);
   }, []);
 
-  /** Maximum tokens allowed in context window — fetched from backend (/api/show for Ollama). */
+  /** Maximum tokens allowed in context window — configurable for cloud, auto-detected for Ollama. */
   const [maxTokens, setMaxTokens] = useState<number>(() => {
-    const stored = localStorage.getItem("nolock.maxContextTokens");
+    const stored = localStorage.getItem("nolock.contextLength") || localStorage.getItem("nolock.maxContextTokens");
     return stored ? Number(stored) : 128_000;
   });
 
-  // Fetch the model's actual context length from the backend on mount
+  // Fetch the model's actual context length from the backend on mount. Only
+  // local backends (Ollama) expose this via /api/show; cloud backends use the
+  // user-configured "Context Window" value (nolock.contextLength) instead.
   useEffect(() => {
     const fetchContextLength = async () => {
       const backend = getChatBackend();
+      if (isCloudBackend(backend)) return; // respect the configured context window
       const url = resolveBackendUrl(backend);
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
       if (!chatModel) return;
@@ -797,6 +1235,108 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     };
     fetchContextLength();
   }, []);
+
+  // ---- Sessions: project-local conversation persistence (metadata only) --
+  const [sessionId, setSessionId] = useState<string>("");
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const createdAtRef = useRef<Record<string, number>>({});
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** Persist session metadata (counts, first/last message, token usage) and refresh the list. */
+  const persistSession = useCallback(async (
+    id: string,
+    msgs: Message[],
+    tokenUsage: number,
+    contextWindow: number,
+  ) => {
+    if (!rootPath || !id) return;
+    const now = Math.floor(Date.now() / 1000);
+    const createdAt = createdAtRef.current[id] ?? now;
+    createdAtRef.current[id] = createdAt;
+    try {
+      await saveSession(rootPath, {
+        id,
+        summary: summarizeMessages(msgs),
+        status: "active",
+        createdAt,
+        updatedAt: now,
+        ...buildSessionMetadata(msgs, tokenUsage, contextWindow),
+      });
+      setSessions(await listSessions(rootPath));
+    } catch (e) {
+      console.error("[sessions] save failed:", e);
+    }
+  }, [rootPath]);
+
+  /** Archive the current session and start a fresh one (clears conversation context). */
+  const startNewSession = useCallback(async () => {
+    if (sessionId && messages.length > 0) {
+      try { await archiveSession(rootPath, sessionId, summarizeMessages(messages)); } catch {}
+    }
+    const newId = newSessionId();
+    createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
+    setSessionId(newId);
+    setMessages([]);
+    setInput("");
+    setFileRefs([]);
+    setAgentRefs([]);
+    setSkillRefs([]);
+    setToolRefs([]);
+    setAccumulatedContextTokens(0);
+    setThinkingText("");
+    setRoutedModel(null);
+    setSubAgents([]);
+    try { setSessions(await listSessions(rootPath)); } catch {}
+  }, [rootPath, sessionId, messages]);
+
+  /** Delete a session by id. If it's the current one, start a fresh session. */
+  const deleteSessionById = useCallback(async (id: string) => {
+    try { await deleteSession(rootPath, id); } catch (e) { console.error(e); }
+    if (id === sessionId) {
+      const newId = newSessionId();
+      createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
+      setSessionId(newId);
+      setMessages([]);
+      setAccumulatedContextTokens(0);
+      setThinkingText("");
+      setRoutedModel(null);
+    }
+    try { setSessions(await listSessions(rootPath)); } catch {}
+  }, [rootPath, sessionId]);
+
+  // Load the session history and start a fresh session on mount / when the
+  // project folder changes. (Messages are not restored — only metadata.)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!rootPath) { setSessions([]); return; }
+      try {
+        const list = await listSessions(rootPath);
+        if (cancelled) return;
+        setSessions(list);
+        const newId = newSessionId();
+        createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
+        setSessionId(newId);
+      } catch (e) {
+        console.error("[sessions] load failed:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootPath]);
+
+  // Auto-save the current session (debounced) whenever the conversation changes
+  // and we're not mid-stream.
+  useEffect(() => {
+    if (!rootPath || !sessionId || loading) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      void persistSession(sessionId, messages, accumulatedContextTokens, maxTokens);
+    }, 800);
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [messages, sessionId, rootPath, accumulatedContextTokens, maxTokens, loading, persistSession]);
 
   // ---- Tauri native event listeners for chat input (macOS) -------------
   useEffect(() => {
@@ -897,7 +1437,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
 
       const chatTemperature = localStorage.getItem("nolock.chatTemperature");
-      const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
+      const chatMaxTokens = isCloudBackend(backend)
+        ? localStorage.getItem("nolock.chatCloudMaxTokens")
+        : localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
 
       // Build API messages from existing conversation history — completed hook
@@ -938,6 +1480,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         rootPath: rootPath || undefined,
         maxIterations: 1,
         modelAffinity: getDigitalOceanModelAffinity(),
+        providers: buildProvidersMap(),
       };
 
       // Stream tokens — they get appended to the existing last assistant message
@@ -1327,13 +1870,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       apiContent = `Context:\n${contextParts.join("\n\n")}\n\n---\n${apiContent}`;
     }
 
-    // Accumulate context tokens for the persistent indicator
-    const sentTokens = refsWithSize.reduce((sum: number, r: FileRef) => sum + (r._tokenCount || 0), 0);
-    const msgTokens = countTokens(apiContent);
-    if (sentTokens > 0 || msgTokens > 0) {
-      setAccumulatedContextTokens((prev) => prev + sentTokens + msgTokens);
-    }
-
     const userMsg: Message = { role: "user", content: apiContent, displayContent: displayText, contextRefs };
     const allMessages = [...messages, userMsg];
     setMessages(allMessages);
@@ -1383,7 +1919,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
       // Read chat model parameters from localStorage
       const chatTemperature = localStorage.getItem("nolock.chatTemperature");
-      const chatMaxTokens = localStorage.getItem("nolock.chatMaxTokens");
+      const chatMaxTokens = isCloudBackend(backend)
+        ? localStorage.getItem("nolock.chatCloudMaxTokens")
+        : localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
 
       // ---- Check DPO trigger ----
@@ -1424,6 +1962,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         }),
       ];
 
+      // Update the context meter with the actual outgoing payload size (the
+      // exact messages that will be sent), rather than a rough incremental
+      // estimate. This includes prior assistant responses, tool results, hook
+      // output, agent system prompts, and file context — everything the model
+      // will actually receive.
+      const payloadTokens = apiMessages.reduce((sum, m) => sum + countTokens(m.content), 0)
+        + countTokens(chatSystemPrompt || "");
+      setAccumulatedContextTokens(payloadTokens);
+
       // Shared request base
       const reqBase = {
         backend,
@@ -1439,6 +1986,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         rootPath: rootPath || undefined,
         maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
         modelAffinity: getDigitalOceanModelAffinity(),
+        providers: buildProvidersMap(),
       };
 
       if (dpoTriggered) {
@@ -1577,8 +2125,28 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   return (
     <div className="chat-panel" style={style}>
       <div className="chat-header">
-        <span>Agent Chat</span>
+        <div className="chat-header-title">
+          <span>Agent Chat</span>
+          {routedModel && (
+            <span className="routed-model" title="Model selected by the DigitalOcean Inference Router">
+              via {routedModel}
+            </span>
+          )}
+        </div>
         <div className="chat-header-actions">
+          {rootPath && (
+            <SessionPicker
+              sessions={sessions}
+              currentId={sessionId}
+              currentTitle={
+                sessions.find((s) => s.id === sessionId)?.summary
+                || summarizeMessages(messages)
+                || "New session"
+              }
+              onNew={() => void startNewSession()}
+              onDelete={(id) => void deleteSessionById(id)}
+            />
+          )}
           {rootPath && onOpenAgentManager && (
             <button className="chat-header-btn" onClick={onOpenAgentManager} title="Manage AI Agents">
               <svg className="robot-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -1768,6 +2336,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           )}
         </div>
       ))}
+        {/* Sub-agent windows — live, inspectable blocks in the conversation. */}
+        {subAgents.length > 0 && (
+          <div className="subagents">
+            {subAgents.map((sa) => (
+              <SubAgentBlock key={sa.id} sa={sa} />
+            ))}
+          </div>
+        )}
         {/* Hook run cards — live feedback for hooks still queued/running.
             Completed runs are surfaced as "Hook result" messages in the thread. */}
         {hookRuns.some((r) => r.status === "queued" || r.status === "running") && (
@@ -1892,7 +2468,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 </div>
               );
             })()}
-            <button className="clear-context-btn" onClick={clearAllRefs} title="Clear all context">&times;</button>
+            <button className="clear-context-btn" onClick={() => void startNewSession()} title="Clear conversation (new session)">&times;</button>
           </div>
         )}
 
@@ -1921,7 +2497,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                   </div>
                 );
               })()}
-              <button className="clear-context-btn" onClick={clearAllRefs} title="Clear all context">&times;</button>
+              <button className="clear-context-btn" onClick={() => void startNewSession()} title="Clear conversation (new session)">&times;</button>
             </div>
           </div>
         )}
@@ -1967,6 +2543,19 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 setMentionType(null);
               }}
             />
+          </div>
+        )}
+
+        {/* Context-nearly-full warning — session token usage vs model window */}
+        {maxTokens > 0 && accumulatedContextTokens > 0 && accumulatedContextTokens / maxTokens > 0.8 && (
+          <div className="context-warning">
+            <span>
+              Context {Math.round((accumulatedContextTokens / maxTokens) * 100)}% full
+              ({formatTokens(accumulatedContextTokens)} / {formatTokens(maxTokens)} tokens)
+            </span>
+            <button className="context-warning-action" onClick={() => void startNewSession()}>
+              New session
+            </button>
           </div>
         )}
 

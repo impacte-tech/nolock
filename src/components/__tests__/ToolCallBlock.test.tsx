@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Tests for ToolCallBlock component
+// Tests for ToolCallBlock component (collapsible tool-call windows)
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "vitest";
@@ -23,59 +23,48 @@ describe("ToolCallBlock", () => {
     },
   ];
 
-  it("renders tool call count", () => {
+  it("renders a window per tool call with its name", () => {
     render(<ToolCallBlock calls={mockCalls} />);
-    expect(screen.getByText("2 tool calls")).toBeInTheDocument();
+    expect(screen.getByText("web_fetch")).toBeInTheDocument();
+    expect(screen.getByText("read_file")).toBeInTheDocument();
   });
 
-  it("renders singular 'tool call' for single item", () => {
-    render(<ToolCallBlock calls={[mockCalls[0]]} />);
-    expect(screen.getByText("1 tool call")).toBeInTheDocument();
+  it("shows the argument summary in each header", () => {
+    render(<ToolCallBlock calls={mockCalls} />);
+    // web_fetch summarizes to its url; read_file to its path.
+    expect(screen.getByText("https://example.com")).toBeInTheDocument();
+    expect(screen.getByText("/src/main.rs")).toBeInTheDocument();
   });
 
-  it("shows tool names in the header", () => {
+  it("is collapsed by default (results hidden)", () => {
     render(<ToolCallBlock calls={mockCalls} />);
-    expect(screen.getByText("web_fetch, read_file")).toBeInTheDocument();
-  });
-
-  it("is collapsed by default", () => {
-    render(<ToolCallBlock calls={mockCalls} />);
-    expect(screen.queryByText("Fetched 12345 bytes")).not.toBeInTheDocument();
-    expect(screen.queryByText('fn main() { println!("Hello"); }')).not.toBeInTheDocument();
+    expect(screen.queryByText("Fetched 12345 bytes from https://example.com")).not.toBeInTheDocument();
+    expect(screen.queryByText('fn main() {\n    println!("Hello");\n}')).not.toBeInTheDocument();
   });
 
   it("expands when clicked", () => {
     render(<ToolCallBlock calls={mockCalls} />);
-    fireEvent.click(screen.getByText("2 tool calls"));
-    expect(screen.getByText("Fetched 12345 bytes")).toBeInTheDocument();
-    expect(screen.getByText('fn main() { println!("Hello"); }')).toBeInTheDocument();
+    fireEvent.click(screen.getByText("web_fetch"));
+    expect(screen.getByText("Fetched 12345 bytes from https://example.com")).toBeInTheDocument();
   });
 
   it("collapses when clicked again", () => {
     render(<ToolCallBlock calls={mockCalls} />);
-    fireEvent.click(screen.getByText("2 tool calls"));
-    expect(screen.getByText("Fetched 12345 bytes")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("web_fetch"));
+    expect(screen.getByText("Fetched 12345 bytes from https://example.com")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("2 tool calls"));
-    expect(screen.queryByText("Fetched 12345 bytes")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("web_fetch"));
+    expect(screen.queryByText("Fetched 12345 bytes from https://example.com")).not.toBeInTheDocument();
   });
 
-  it("renders individual tool call details when expanded", () => {
+  it("shows pretty-printed arguments when expanded", () => {
     render(<ToolCallBlock calls={mockCalls} />);
-    fireEvent.click(screen.getByText("2 tool calls"));
-
-    // Tool names should be visible
-    expect(screen.getByText("web_fetch")).toBeInTheDocument();
-    expect(screen.getByText("read_file")).toBeInTheDocument();
-
-    // Arguments as code
-    expect(screen.getByText('{"url": "https://example.com"}')).toBeInTheDocument();
-    expect(screen.getByText('{"path": "/src/main.rs"}')).toBeInTheDocument();
+    fireEvent.click(screen.getByText("read_file"));
+    expect(screen.getByText((content) => content.includes('"/src/main.rs"'))).toBeInTheDocument();
   });
 
   it("renders empty state when calls array is empty", () => {
     render(<ToolCallBlock calls={[]} />);
-    expect(screen.getByText("0 tool calls")).toBeInTheDocument();
-    expect(screen.getByText("0 tool calls")).toBeInTheDocument();
+    expect(screen.queryByText("web_fetch")).not.toBeInTheDocument();
   });
 });
