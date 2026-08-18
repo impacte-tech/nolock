@@ -1,7 +1,7 @@
 ---
 name: code-reviewer
 description: Reviews code for bugs, security issues and style; suggests concrete fixes
-model: qwen3.5:9b
+model: gemma4:12b-mlx
 backend: ollama
 temperature: 0.3
 tools: read_file, list_directory, grep
