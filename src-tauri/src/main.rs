@@ -880,11 +880,15 @@ const READ_FILE_MAX_BYTES_CLOUD: usize = 1024 * 1024; // 1MB
 const WEB_FETCH_MAX_CHARS_CLOUD: usize = 256 * 1024; // 256KB
 
 /// Default output-token budget for cloud providers when the user hasn't set one
-/// explicitly. Bounds reasoning-model chains-of-thought (which would otherwise
-/// "overthink" for tens of thousands of tokens) while still being generous
-/// enough for typical multi-tool agent runs. The user can override it via the
+/// explicitly. Matches the large context windows of modern routed models so long
+/// agentic tool-loop runs aren't truncated. The user can override it via the
 /// "Cloud Max Tokens" setting in the Chat Model panel.
-const CLOUD_DEFAULT_MAX_TOKENS: u32 = 32_768;
+const CLOUD_DEFAULT_MAX_TOKENS: u32 = 256_000;
+
+/// Default output-token budget for local backends when tools are enabled and the
+/// user hasn't set one. Large enough for multi-tool agent loops on models with
+/// big context windows.
+const LOCAL_TOOL_MAX_TOKENS: u32 = 256_000;
 
 /// Returns true for cloud backends (DigitalOcean, OpenRouter, OpenCode), which
 /// have large context windows and should not be constrained by the small-local-
@@ -2151,6 +2155,10 @@ const DEFAULT_SUBAGENT_TOOLS: [&str; 8] = [
 
 const MAX_SUBAGENT_DEPTH: usize = 4;
 
+/// Sub-agents get a tighter tool-loop budget than the main agent so they don't
+/// spin calling the same tools repeatedly; enough to gather info and answer.
+const SUBAGENT_MAX_ITERATIONS: usize = 6;
+
 /// Run a sub-agent and return its final result + full trace (for the frontend
 /// "window"). Emits `subagent-*` events so the window streams live.
 async fn run_subagent(
@@ -2205,10 +2213,21 @@ async fn run_subagent(
             .as_nanos()
     );
 
+    // Wrap the agent prompt with sub-agent operating instructions so it stays
+    // focused and returns a final answer instead of looping on tools.
+    let system_prompt = format!(
+        "{}\n\n[Sub-agent operating instructions]\n\
+         Complete the task above and return a single final answer. Use tools only \
+         when necessary; do not call the same tool repeatedly and do not re-read the \
+         same file. Once you have enough information, stop calling tools and write \
+         your answer directly.",
+        agent.prompt
+    );
     let msgs = vec![
-        ChatMessage { role: "system".to_string(), content: agent.prompt.clone() },
+        ChatMessage { role: "system".to_string(), content: system_prompt },
         ChatMessage { role: "user".to_string(), content: task.to_string() },
     ];
+    let sub_iterations = runner.max_iterations.min(SUBAGENT_MAX_ITERATIONS);
 
     runner
         .app_handle
@@ -2235,7 +2254,7 @@ async fn run_subagent(
             &ctx,
             &msgs,
             &tools,
-            runner.max_iterations,
+            sub_iterations,
             agent.temperature,
             runner.max_tokens.unwrap_or(4096),
             Some(&id),
@@ -2258,7 +2277,7 @@ async fn run_subagent(
             runner.root_path,
             agent.temperature,
             runner.max_tokens,
-            runner.max_iterations,
+            sub_iterations,
             None,
             runner.use_model_affinity,
             Some(&id),
@@ -3772,9 +3791,23 @@ struct StreamResult {
 /// 9B) and wastes precious context window space.
 fn build_initial_messages(
     messages: &[ChatMessage],
-    _tools: &[serde_json::Value],
+    tools: &[serde_json::Value],
 ) -> Vec<serde_json::Value> {
     let mut ollama_msgs: Vec<serde_json::Value> = Vec::new();
+
+    // Hint the model to delegate when a sub-agent is available.
+    let has_spawn_subagent = tools
+        .iter()
+        .any(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
+    if has_spawn_subagent {
+        ollama_msgs.push(serde_json::json!({
+            "role": "system",
+            "content": "When the `spawn_subagent` tool is available, delegate focused tasks that \
+                        match a sub-agent's specialty (e.g. code review, research, writing) to the \
+                        appropriate sub-agent instead of doing everything yourself. Spawn each \
+                        sub-agent at most once per task."
+        }));
+    }
 
     for m in messages {
         ollama_msgs.push(serde_json::json!({ "role": m.role, "content": m.content }));
@@ -3927,6 +3960,8 @@ async fn ollama_chat_with_tools(
     let mut ollama_msgs = build_initial_messages(messages, tools);
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
+    // De-duplicate spawn_subagent calls (same agent + task) within this run.
+    let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for iteration in 0..max_iterations {
         // --- Build and send request ---
@@ -4001,20 +4036,28 @@ async fn ollama_chat_with_tools(
                 let (result, file_changes) = if name == "spawn_subagent" {
                     let agent = args["agent"].as_str().unwrap_or("");
                     let task = args["task"].as_str().unwrap_or("");
-                    match runner {
-                        Some(r) => match Box::pin(run_subagent(r, agent, task)).await {
-                            Ok((out, trace)) => {
-                                subagent_trace = Some(trace);
-                                (out, Vec::new())
-                            }
-                            Err(e) => {
+                    let task_norm: String = task.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let dedup_key = format!("{}||{}", agent.trim(), task_norm);
+                    if spawned_subagents.contains(&dedup_key) {
+                        emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
+                        (format!("Sub-agent '{}' was already spawned with this task in this turn; skipped duplicate.", agent), Vec::new())
+                    } else {
+                        spawned_subagents.insert(dedup_key);
+                        match runner {
+                            Some(r) => match Box::pin(run_subagent(r, agent, task)).await {
+                                Ok((out, trace)) => {
+                                    subagent_trace = Some(trace);
+                                    (out, Vec::new())
+                                }
+                                Err(e) => {
+                                    emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
+                                    (format!("Tool error: {}", e), Vec::new())
+                                }
+                            },
+                            None => {
                                 emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
-                                (format!("Tool error: {}", e), Vec::new())
+                                ("Tool error: sub-agents are not available".to_string(), Vec::new())
                             }
-                        },
-                        None => {
-                            emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
-                            ("Tool error: sub-agents are not available".to_string(), Vec::new())
                         }
                     }
                 } else {
@@ -4295,21 +4338,35 @@ async fn run_openai_tool_loop(
                 Some(format!("- {name}: {desc}"))
             })
             .collect();
+        let has_spawn_subagent = tools
+            .iter()
+            .any(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
+        let mut sys_prompt = format!(
+            "You are a helpful assistant with access to tools. Use them whenever they help: \
+             call web_search or web_fetch for current information, documentation, or anything \
+             outside your training data instead of guessing; use read_file/list_directory/grep \
+             to inspect files and code; use edit/write_file to make changes. You may call \
+             multiple tools and then use their results in your answer.\n\nAvailable tools:\n{}",
+            tool_block.join("\n")
+        );
+        if has_spawn_subagent {
+            sys_prompt.push_str(
+                "\n\nWhen the `spawn_subagent` tool is available, delegate focused tasks that \
+                 match a sub-agent's specialty (e.g. code review, research, writing) to the \
+                 appropriate sub-agent instead of doing everything yourself. Spawn each \
+                 sub-agent at most once per task.",
+            );
+        }
         openai_msgs.insert(0, serde_json::json!({
             "role": "system",
-            "content": format!(
-                "You are a helpful assistant with access to tools. Use them whenever they help: \
-                 call web_search or web_fetch for current information, documentation, or anything \
-                 outside your training data instead of guessing; use read_file/list_directory/grep \
-                 to inspect files and code; use edit/write_file to make changes. You may call \
-                 multiple tools and then use their results in your answer.\n\nAvailable tools:\n{}",
-                tool_block.join("\n")
-            )
+            "content": sys_prompt
         }));
     }
 
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
+    // De-duplicate spawn_subagent calls (same agent + task) within this run.
+    let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Generate a stable session ID for the model-affinity header. This pins the
     // DigitalOcean Inference Router to a single model across the whole tool loop,
@@ -4463,20 +4520,28 @@ async fn run_openai_tool_loop(
                 let (result, file_changes) = if name == "spawn_subagent" {
                     let agent = args["agent"].as_str().unwrap_or("");
                     let task = args["task"].as_str().unwrap_or("");
-                    match runner {
-                        Some(r) => match Box::pin(run_subagent(r, agent, task)).await {
-                            Ok((out, trace)) => {
-                                subagent_trace = Some(trace);
-                                (out, Vec::new())
-                            }
-                            Err(e) => {
+                    let task_norm: String = task.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let dedup_key = format!("{}||{}", agent.trim(), task_norm);
+                    if spawned_subagents.contains(&dedup_key) {
+                        emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
+                        (format!("Sub-agent '{}' was already spawned with this task in this turn; skipped duplicate.", agent), Vec::new())
+                    } else {
+                        spawned_subagents.insert(dedup_key);
+                        match runner {
+                            Some(r) => match Box::pin(run_subagent(r, agent, task)).await {
+                                Ok((out, trace)) => {
+                                    subagent_trace = Some(trace);
+                                    (out, Vec::new())
+                                }
+                                Err(e) => {
+                                    emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
+                                    (format!("Tool error: {}", e), Vec::new())
+                                }
+                            },
+                            None => {
                                 emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
-                                (format!("Tool error: {}", e), Vec::new())
+                                ("Tool error: sub-agents are not available".to_string(), Vec::new())
                             }
-                        },
-                        None => {
-                            emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
-                            ("Tool error: sub-agents are not available".to_string(), Vec::new())
                         }
                     }
                 } else {
@@ -4911,9 +4976,9 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     let has_tools = !req.tools_enabled.is_empty();
     let user_max_tokens = req.max_tokens.unwrap_or(2048);
     let max_tokens = if has_tools && req.max_tokens.is_none() {
-        // User did not explicitly set max_tokens — auto-scale for tool mode.
-        // Thinking models need ~3x the budget they would without tools.
-        8192
+        // User did not explicitly set max_tokens — use a large tool-mode budget
+        // so long agentic runs aren't truncated mid-generation.
+        LOCAL_TOOL_MAX_TOKENS
     } else if has_tools && user_max_tokens < 4096 {
         // User set a low value but tools are on — enforce a minimum of 4096
         // so thinking models have room for at least one tool-call cycle.
@@ -4924,10 +4989,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     // Cloud providers must NOT be auto-scaled. Their max_tokens /
     // max_completion_tokens budget is the only thing the user controls, and
     // DigitalOcean scopes `max_completion_tokens` across the *entire* tool loop
-    // (all iterations), so an auto-scaled 8192/4096 cap would truncate the
-    // response mid-agent-loop. When the user hasn't set a budget we apply a
-    // generous default (32K) rather than leaving the output unbounded, which
-    // keeps reasoning-capable models from "overthinking" indefinitely.
+    // (all iterations). When the user hasn't set a budget we apply a large
+    // default so long agentic runs aren't truncated.
     let cloud_max_tokens: Option<u32> =
         Some(req.max_tokens.unwrap_or(CLOUD_DEFAULT_MAX_TOKENS));
     eprintln!(

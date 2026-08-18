@@ -128,14 +128,13 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
                 step={64}
                 value={cloudMaxTokens}
                 onChange={(e) => setCloudMaxTokens(e.target.value)}
-                placeholder="32768 (default)"
+                placeholder="256000 (default)"
                 style={{ width: 120 }}
               />
               <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
                 Maximum output tokens for cloud providers. Leave empty for the{" "}
-                <strong>default (32768)</strong> — this bounds reasoning-model chains-of-thought
-                so they don't "overthink" indefinitely, while staying generous enough for
-                multi-tool agent runs. For DigitalOcean this maps to{" "}
+                <strong>default (256000)</strong> — large enough for long agentic tool-loop
+                runs on models with big context windows. For DigitalOcean this maps to{" "}
                 <code>max_completion_tokens</code>, scoped across the whole tool loop.
               </span>
             </>
@@ -146,19 +145,19 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
                 className="field-input"
                 type="number"
                 min={64}
-                max={32768}
+                max={1000000}
                 step={64}
                 value={maxTokens}
                 onChange={(e) => setMaxTokens(Math.max(64, parseInt(e.target.value, 10) || 2048))}
                 style={{ width: 120 }}
               />
               <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
-                Maximum number of tokens in the model's response (64–32768).
-                When Agent Tools are enabled, the backend auto-scales this to 8192+ for thinking models.
+                Maximum number of tokens in the model's response (64–1000000).
+                When Agent Tools are enabled and this is left unset, the backend defaults to 256000.
               </span>
               <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4, fontStyle: "italic" }}>
                 Thinking models (Qwen3, DeepSeek-R1, etc.) consume tokens for hidden reasoning.
-                Set this to at least 4096 (or leave it at 8192) when using tools, otherwise the response may be cut off.
+                Leave this unset when using tools so the backend uses its large default, otherwise the response may be cut off.
               </span>
             </>
           )}

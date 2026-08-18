@@ -200,6 +200,7 @@ function summarizeToolArgs(call: ToolCallLog): string {
     return call.arguments ? truncateText(call.arguments, 60) : "";
   }
   const a = args as Record<string, unknown>;
+  if (typeof a.agent === "string" && a.agent) return `@${a.agent}`;
   if (typeof a.path === "string" && a.path) return a.path;
   if (typeof a.query === "string" && a.query) return truncateText(a.query, 60);
   if (typeof a.url === "string" && a.url) return a.url;
@@ -212,6 +213,7 @@ function summarizeToolArgs(call: ToolCallLog): string {
 function ToolCallItem({ call }: { call: ToolCallLog }) {
   const [expanded, setExpanded] = useState(false);
   const summary = summarizeToolArgs(call);
+  const isSubagent = call.name === "spawn_subagent";
   return (
     <div className="tool-call-window">
       <div className="tool-call-window-header" onClick={() => setExpanded(!expanded)}>
@@ -226,9 +228,15 @@ function ToolCallItem({ call }: { call: ToolCallLog }) {
               <pre className="tool-call-window-pre">{prettyJson(call.arguments)}</pre>
             </div>
           )}
-          <div className="tool-call-window-result">
-            <pre className="tool-call-window-pre">{call.result_full || call.result_snippet}</pre>
-          </div>
+          {isSubagent ? (
+            <div className="tool-call-window-note">
+              Full result and tool calls are shown in the sub-agent window.
+            </div>
+          ) : (
+            <div className="tool-call-window-result">
+              <pre className="tool-call-window-pre">{call.result_full || call.result_snippet}</pre>
+            </div>
+          )}
           {call.file_changes && call.file_changes.length > 0 && (
             <FileChangesBlock changes={call.file_changes} />
           )}
@@ -822,72 +830,70 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [thinkingText, setThinkingText] = useState("");
   const showThinking = localStorage.getItem("nolock.showThinking") === "true";
 
-  /** Live tool progress (name + file path) emitted by the backend while the
-   *  agent tool loop runs. Shown as a transient status line near the input. */
-  const [toolProgress, setToolProgress] = useState<{ name: string; path?: string; status: "start" | "done" | "error" } | null>(null);
-
-  // Subscribe to live tool-progress events emitted by the Rust tool loops.
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let mounted = true;
-    listen<{ type: string; name: string; path?: string }>("tool-progress", (event) => {
-      if (!mounted) return;
-      const { type, name, path } = event.payload;
-      if (type === "start" || type === "done" || type === "error") {
-        setToolProgress({ name, path, status: type });
-      }
-    }).then((fn) => { unlisten = fn; });
-    return () => {
-      mounted = false;
-      if (unlisten) unlisten();
-    };
-  }, []);
-
-  // Clear the progress line once generation finishes.
-  useEffect(() => {
-    if (!loading) setToolProgress(null);
-  }, [loading]);
-
   /** The model the DigitalOcean Inference Router selected (from the
    *  x-model-router-selected-model header), surfaced so reasoning models can
    *  be identified when they "overthink". */
   const [routedModel, setRoutedModel] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | null = null;
     listen<string>("model-routed", (event) => {
       if (event.payload) setRoutedModel(event.payload);
-    }).then((fn) => { unlisten = fn; });
-    return () => { if (unlisten) unlisten(); };
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   }, []);
 
   // ---- Sub-agents: live windows streamed from `subagent-*` events ----------
   const [subAgents, setSubAgents] = useState<SubAgentLiveState[]>([]);
 
   useEffect(() => {
+    // `cancelled` guards against React StrictMode's double-mount: a listener
+    // whose registration promise resolves *after* cleanup would otherwise leak,
+    // and its handler would run twice — duplicating windows and streamed tokens.
+    let cancelled = false;
     const unlisteners: (() => void)[] = [];
-    listen<{ id: string; agent: string; task: string; model: string }>("subagent-start", (e) => {
-      setSubAgents((prev) => [...prev, {
-        id: e.payload.id,
-        agent: e.payload.agent,
-        task: e.payload.task,
-        model: e.payload.model,
-        status: "running",
-        content: "",
-        thinking: "",
-        toolCalls: [],
-      }]);
-    }).then((fn) => unlisteners.push(fn));
+    const track = (p: Promise<() => void>) => {
+      p.then((fn) => {
+        if (cancelled) fn();
+        else unlisteners.push(fn);
+      });
+    };
 
-    listen<{ id: string; token: string; thinking: boolean }>("subagent-token", (e) => {
+    track(listen<{ id: string; agent: string; task: string; model: string }>("subagent-start", (e) => {
+      setSubAgents((prev) => {
+        // De-dup by agent + task so a repeated spawn doesn't open a second window.
+        if (prev.some((sa) => sa.agent === e.payload.agent && sa.task === e.payload.task)) {
+          return prev;
+        }
+        return [...prev, {
+          id: e.payload.id,
+          agent: e.payload.agent,
+          task: e.payload.task,
+          model: e.payload.model,
+          status: "running",
+          content: "",
+          thinking: "",
+          toolCalls: [],
+        }];
+      });
+    }));
+
+    track(listen<{ id: string; token: string; thinking: boolean }>("subagent-token", (e) => {
       setSubAgents((prev) => prev.map((sa) => {
         if (sa.id !== e.payload.id) return sa;
         if (e.payload.thinking) return { ...sa, thinking: sa.thinking + e.payload.token };
         return { ...sa, content: sa.content + e.payload.token };
       }));
-    }).then((fn) => unlisteners.push(fn));
+    }));
 
-    listen<{ id: string; type: string; name: string; path?: string }>("subagent-tool-progress", (e) => {
+    track(listen<{ id: string; type: string; name: string; path?: string }>("subagent-tool-progress", (e) => {
       setSubAgents((prev) => prev.map((sa) => {
         if (sa.id !== e.payload.id) return sa;
         if (e.payload.type === "start") {
@@ -902,13 +908,16 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         }
         return { ...sa, toolCalls: next };
       }));
-    }).then((fn) => unlisteners.push(fn));
+    }));
 
-    listen<{ id: string; result: string }>("subagent-done", (e) => {
+    track(listen<{ id: string; result: string }>("subagent-done", (e) => {
       setSubAgents((prev) => prev.map((sa) => sa.id === e.payload.id ? { ...sa, status: "done" } : sa));
-    }).then((fn) => unlisteners.push(fn));
+    }));
 
-    return () => unlisteners.forEach((fn) => fn());
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((fn) => fn());
+    };
   }, []);
 
   // ---- Hooks: run cards + concurrency ----
@@ -2188,11 +2197,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 {m.toolCalls && m.toolCalls.length > 0 && (
                   <ToolCallBlock calls={m.toolCalls} />
                 )}
-                {m.toolCalls && m.toolCalls.some((c) => c.file_changes && c.file_changes.length > 0) && (
-                  <FileChangesBlock
-                    changes={m.toolCalls.flatMap((c) => c.file_changes || [])}
-                  />
-                )}
                 {m.role === "assistant" ? (
               <div className="assistant-content">
                 {/* Thinking indicator — shown transiently while thinking tokens stream in */}
@@ -2552,29 +2556,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             <button className="context-warning-action" onClick={() => void startNewSession()}>
               New session
             </button>
-          </div>
-        )}
-
-        {/* Live tool progress — transient status line while the agent runs */}
-        {loading && toolProgress && (
-          <div className={`tool-progress-line tool-progress-${toolProgress.status}`}>
-            {toolProgress.status === "start" && (
-              <span className="tool-progress-label">
-                {toolProgress.path
-                  ? `${toolProgress.name}: ${toolProgress.path}`
-                  : `${toolProgress.name}`}…
-              </span>
-            )}
-            {toolProgress.status === "done" && (
-              <span className="tool-progress-label">
-                {toolProgress.path
-                  ? `${toolProgress.name}: ${toolProgress.path}`
-                  : `${toolProgress.name}`} done
-              </span>
-            )}
-            {toolProgress.status === "error" && (
-              <span className="tool-progress-label">{toolProgress.name} failed</span>
-            )}
           </div>
         )}
 

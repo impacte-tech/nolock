@@ -1480,6 +1480,15 @@ html, body, #root {
   overflow: auto;
 }
 
+.tool-call-window-note {
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+}
+
 /* ---- File changes block (Part C) ---- */
 .file-changes {
   margin-bottom: 6px;
