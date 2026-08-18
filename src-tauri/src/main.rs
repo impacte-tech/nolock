@@ -3805,7 +3805,10 @@ fn build_initial_messages(
             "content": "When the `spawn_subagent` tool is available, delegate focused tasks that \
                         match a sub-agent's specialty (e.g. code review, research, writing) to the \
                         appropriate sub-agent instead of doing everything yourself. Spawn each \
-                        sub-agent at most once per task."
+                        sub-agent at most once per task. After a sub-agent returns its result, \
+                        incorporate that result into a complete final answer that directly \
+                        addresses the user's original request: do not stop after spawning — wait \
+                        for their results and then write the final response."
         }));
     }
 
@@ -4354,7 +4357,10 @@ async fn run_openai_tool_loop(
                 "\n\nWhen the `spawn_subagent` tool is available, delegate focused tasks that \
                  match a sub-agent's specialty (e.g. code review, research, writing) to the \
                  appropriate sub-agent instead of doing everything yourself. Spawn each \
-                 sub-agent at most once per task.",
+                 sub-agent at most once per task. After a sub-agent returns its result, \
+                 incorporate that result into a complete final answer that directly addresses \
+                 the user's original request: do not stop after spawning — wait for their \
+                 results and then write the final response.",
             );
         }
         openai_msgs.insert(0, serde_json::json!({
