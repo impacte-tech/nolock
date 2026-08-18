@@ -1,0 +1,41 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "nemotron-3.5-lightning:30b-mlx": {
+          "name": "Nemotron 3.5 Lightning 30B MLX",
+          "tools": true
+        },
+        "qwen3.5:9b-mlx": {
+          "name": "Qwen 3.5 9B MLX",
+          "tools": true
+        },
+        "gemma4:12b-mlx": {
+          "name": "Gemma 4 12B MLX",
+          "tools": true
+        }
+      }
+    }
+  },
+  "permission": {
+    "websearch": "allow"
+  },
+  "agent": {
+    "build": {
+      "permission": {
+        "task": "allow"
+      }
+    },
+    "plan": {
+      "permission": {
+        "task": "allow"
+      }
+    }
+  }
+}
