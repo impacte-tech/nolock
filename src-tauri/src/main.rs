@@ -880,10 +880,11 @@ const READ_FILE_MAX_BYTES_CLOUD: usize = 1024 * 1024; // 1MB
 const WEB_FETCH_MAX_CHARS_CLOUD: usize = 256 * 1024; // 256KB
 
 /// Default output-token budget for cloud providers when the user hasn't set one
-/// explicitly. Matches the large context windows of modern routed models so long
-/// agentic tool-loop runs aren't truncated. The user can override it via the
-/// "Cloud Max Tokens" setting in the Chat Model panel.
-const CLOUD_DEFAULT_MAX_TOKENS: u32 = 256_000;
+/// explicitly. Kept well below the model's context window so there's always room
+/// for the input prompt (the API rejects `input + max_completion_tokens` when it
+/// exceeds the context). The user can override it via the "Cloud Max Tokens"
+/// setting in the Chat Model panel.
+const CLOUD_DEFAULT_MAX_TOKENS: u32 = 65_536;
 
 /// Default output-token budget for local backends when tools are enabled and the
 /// user hasn't set one. Large enough for multi-tool agent loops on models with
@@ -1915,6 +1916,11 @@ struct ChatRequest {
     temperature: Option<f64>,
     #[serde(default)]
     max_tokens: Option<u32>,
+    /// The model's context window (in tokens), used to cap `max_completion_tokens`
+    /// so `input + output` never exceeds the context. Passed from the frontend
+    /// (the "Context Window" setting / auto-detected value).
+    #[serde(default)]
+    context_length: Option<u32>,
     #[serde(default)]
     system_prompt: Option<String>,
     /// The root folder path currently open in the editor.
@@ -5067,10 +5073,25 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     // Cloud providers must NOT be auto-scaled. Their max_tokens /
     // max_completion_tokens budget is the only thing the user controls, and
     // DigitalOcean scopes `max_completion_tokens` across the *entire* tool loop
-    // (all iterations). When the user hasn't set a budget we apply a large
-    // default so long agentic runs aren't truncated.
-    let cloud_max_tokens: Option<u32> =
-        Some(req.max_tokens.unwrap_or(CLOUD_DEFAULT_MAX_TOKENS));
+    // (all iterations). When the user hasn't set a budget we apply a default,
+    // and we cap the result so `input + output` stays within the model's context
+    // window (the API rejects requests that exceed it).
+    let context_len = req.context_length.unwrap_or(128_000);
+    // Rough input-token estimate (~4 chars/token) plus a margin for the system
+    // prompt + tool definitions the backend adds.
+    let input_estimate: u32 = req
+        .messages
+        .iter()
+        .map(|m| (m.content.len() as u32 / 4) + 1)
+        .sum();
+    let max_output = context_len
+        .saturating_sub(input_estimate)
+        .saturating_sub(16_384);
+    let cloud_max_tokens: Option<u32> = Some(
+        req.max_tokens
+            .unwrap_or(CLOUD_DEFAULT_MAX_TOKENS)
+            .min(max_output.max(1)),
+    );
     eprintln!(
         "[nolock] ai_chat resolved max_tokens={} (local, user={:?}, has_tools={}) cloud_max_tokens={:?}",
         max_tokens, req.max_tokens, has_tools, cloud_max_tokens
