@@ -368,6 +368,90 @@ After installation, configure your preferred AI backend:
    - **OpenCode Zen** — Remote at `https://opencode.ai/zen/v1`, some models available with a free tier
 3. Enter your model names and save.
 
+### Multi-Provider Model Configuration
+
+nolock lets you run **multiple model providers side-by-side**, with a clear split
+between the *planning* model and cheap *task-executor* models. Each provider is
+configured independently (URL + API key), and each `@agent` can be sourced from a
+**different provider/model** at chat time.
+
+#### Planning vs Task Executor roles
+
+| Role | Providers | Purpose |
+|---|---|---|
+| **Planning** (online) | OpenRouter, OpenCode Zen, DigitalOcean Inference Router | The main orchestrator model — plans, delegates to sub-agents, and synthesizes answers. Use a strong hosted model here. |
+| **Task Executor** (local) | Ollama, llama.cpp | Small, cheap models that run focused sub-agent tasks and report back with a concise answer. Saves tokens on long agentic runs. |
+
+- **Model Providers** panel (`Ctrl+A, P`) shows every provider with its role badge.
+- **Chat Model** panel (`Ctrl+A, M`) labels the chat model as the *Planning provider*.
+
+> **Recommended setup:** pick an online provider (OpenRouter / DigitalOcean) as the
+> planning provider for the main chat model, and configure your `.agents/` files to run
+> on local executor models (Ollama / llama.cpp). The planning model delegates focused
+> tasks to these local sub-agents, so you only pay (in tokens or GPU) for the sub-agent's
+> final answer — not its whole tool-call trace.
+
+#### Per-agent provider at `@` trigger
+
+Each agent file (`.agents/<name>.md`) can set its own `backend` and `model` in the
+frontmatter. When you invoke `@agent-name` in chat, nolock runs the request on **that
+agent's** provider/model instead of the main chat model:
+
+```yaml
+---
+name: code-reviewer
+description: Reviews code for bugs and security issues
+model: gemma4:12b-mlx
+backend: ollama            # ← runs on the local executor
+temperature: 0.3
+tools: read_file, list_directory, grep
+---
+```
+
+When multiple `@agent` refs are present, nolock keeps the orchestration on the
+**planning** (main chat) model and tells the model to spawn **each** referenced
+agent via `spawn_subagent` — all spawns in a single response so they run in
+**parallel**. Each spawned sub-agent uses the **agent's own** configured
+`backend`/`model`/`tools` (so an agent can come from a different provider than
+the planning model). The message also carries the agent prompts as context so
+the orchestrator knows each agent's specialty.
+
+> **Example parallel invocation** — two agents in one message run concurrently:
+>
+> ```text
+> How do I write a recursive fib in Rust? @researcher search the web for
+> example implementations while @code-reviewer evaluates the quality of the
+> code in parallel.
+> ```
+>
+> nolock resolves both `@` mentions, keeps the orchestrator on the planning
+> model, and instructs it to emit `spawn_subagent` for `researcher` and
+> `code-reviewer` in the same turn. Each sub-agent runs on its own provider,
+> and both results are synthesized into one final answer.
+
+#### How sub-agents pass context back to the main model
+
+This is the heart of the token-saving design:
+
+1. The **planning model** (main chat) decides a focused task matches a sub-agent's
+   specialty and calls the `spawn_subagent` tool with `{ agent, task }`. When
+   several agents are warranted, it emits all `spawn_subagent` calls in one turn
+   so they run in parallel.
+2. The sub-agent runs on **its own** configured provider/model with a **fresh, isolated
+   tool loop** — it sees only the task + its own system prompt, *not* the whole main
+   conversation. This is the token saving.
+3. The sub-agent returns a **single final answer** (structured-output JSON from
+   some models is unwrapped to the `final_answer` field). That answer is injected
+   back into the main model's tool loop as the result of the `spawn_subagent` tool call.
+4. The main model incorporates that answer into its own context and continues planning /
+   synthesizing. The full sub-agent trace (tool calls + result) is returned to the
+   frontend for an expandable inspection window in the conversation.
+
+**Net effect:** the main model only ever pays for each sub-agent's *final answer*, not
+its entire tool-call trace — a large saving on long agentic runs. Each provider's API
+key is stored independently (OS keychain), so a sub-agent can route to a different
+provider than the main model without leaking credentials.
+
 ### Recommended Ollama Models
 
 For the best experience with nolock, here are the recommended Ollama models for each AI feature:

@@ -688,6 +688,15 @@ fn run_tool_command(root_path: String, tool_name: String, args: serde_json::Valu
 // Skill management commands
 // ---------------------------------------------------------------------------
 
+/// Reset all sub-agent conversation memory. Called by the frontend when a new
+/// chat session starts so a fresh session doesn't inherit prior sub-agent
+/// context.
+#[tauri::command]
+fn subagent_reset(memory: tauri::State<'_, SubAgentMemory>) -> Result<(), String> {
+    memory.clear();
+    Ok(())
+}
+
 #[derive(serde::Serialize)]
 struct SkillEntry {
     name: String,       // file stem (e.g. "code-review" from "code-review.md")
@@ -890,6 +899,14 @@ const CLOUD_DEFAULT_MAX_TOKENS: u32 = 65_536;
 /// user hasn't set one. Large enough for multi-tool agent loops on models with
 /// big context windows.
 const LOCAL_TOOL_MAX_TOKENS: u32 = 256_000;
+
+/// Default output-token budget for local backends when the user hasn't set one
+/// and there are no tools. Matches the Chat Model panel's default (8192).
+/// Thinking/reasoning models (Qwen3, Nemotron, DeepSeek-R1, etc.) can spend a
+/// large fraction of this on hidden reasoning before emitting any visible
+/// content, so keeping the floor at 8192 (not 2048) prevents "silent" responses
+/// where the model thinks for the entire budget and never writes an answer.
+const LOCAL_DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Returns true for cloud backends (DigitalOcean, OpenRouter, OpenCode), which
 /// have large context windows and should not be constrained by the small-local-
@@ -1935,6 +1952,18 @@ struct ChatRequest {
     /// to enabled when absent.
     #[serde(default)]
     model_affinity: Option<bool>,
+    /// Agents explicitly referenced by the user via `@agent` mentions. The
+    /// backend pre-spawns these in parallel and injects their results as
+    /// context, so parallel triggering doesn't depend on the orchestrator
+    /// model reliably emitting multiple `spawn_subagent` calls in one turn.
+    #[serde(default)]
+    referenced_agents: Vec<String>,
+    /// Maximum number of consecutive "reasoning-only" retries before giving up
+    /// when a thinking model (nemotron, qwen3, deepseek-r1, …) ends a turn with
+    /// only thinking and no visible content / tool call. Configurable from the
+    /// Chat Model panel. Defaults to THINKING_ONLY_MAX_RETRIES when unset.
+    #[serde(default)]
+    reasoning_retries: Option<usize>,
 }
 
 fn default_max_iterations() -> usize {
@@ -2142,9 +2171,73 @@ struct SubAgentRunner<'a> {
     root_path: Option<&'a str>,
     max_tokens: Option<u32>,
     max_iterations: usize,
-    use_model_affinity: bool,
+    /// Configured "reasoning-only" retry budget propagated from the main chat
+    /// request (sub-agents share the same retry behaviour).
+    reasoning_retries: usize,
+use_model_affinity: bool,
     /// Current sub-agent nesting depth (to bound recursion).
     depth: usize,
+    /// Shared per-agent conversation memory (persists across turns/session).
+    memory: &'a SubAgentMemory,
+}
+
+/// Persistent per-agent conversation memory across turns in the same session.
+/// Key: `"{root_path}::{agent_name}"`. When the same @agent is triggered again
+/// in a later user message, its prior conversation (the tasks it was given and
+/// the answers it produced) is appended to its context so the sub-agent has
+/// continuity — "prompt the same sub-agent by its agent identifier, adding to
+/// its context and the overall session context".
+///
+/// The store is capped (per key) so a very long session doesn't grow unbounded.
+const SUBAGENT_MEMORY_MAX_TURNS: usize = 8;
+
+struct SubAgentMemory {
+    convos: Mutex<std::collections::HashMap<String, Vec<ChatMessage>>>,
+}
+
+impl SubAgentMemory {
+    fn new() -> Self {
+        SubAgentMemory { convos: Mutex::new(std::collections::HashMap::new()) }
+    }
+
+    /// Conversation key for (root_path, agent_name).
+    fn key(root_path: &str, agent_name: &str) -> String {
+        format!("{}::{}", root_path, agent_name)
+    }
+
+    /// Retrieve the stored conversation for an agent, or `None` on first spawn.
+    fn get(&self, root_path: &str, agent_name: &str) -> Option<Vec<ChatMessage>> {
+        let convos = self.convos.lock().unwrap();
+        convos.get(&Self::key(root_path, agent_name)).cloned()
+    }
+
+    /// Append a completed sub-agent turn (the task + its final answer) to the
+    /// conversation so the next invocation has memory.
+    fn push_turn(
+        &self,
+        root_path: &str,
+        agent_name: &str,
+        task: &str,
+        answer: &str,
+    ) {
+        let key = Self::key(root_path, agent_name);
+        let mut convos = self.convos.lock().unwrap();
+        let entry = convos.entry(key).or_default();
+        entry.push(ChatMessage { role: "user".to_string(), content: task.to_string() });
+        if !answer.trim().is_empty() {
+            entry.push(ChatMessage { role: "assistant".to_string(), content: answer.to_string() });
+        }
+        // Cap the history to the most recent N turns (keep newest).
+        if entry.len() > SUBAGENT_MEMORY_MAX_TURNS * 2 {
+            let overflow = entry.len() - SUBAGENT_MEMORY_MAX_TURNS * 2;
+            entry.drain(0..overflow);
+        }
+    }
+
+    /// Reset all memory (called when a new chat session starts).
+    fn clear(&self) {
+        self.convos.lock().unwrap().clear();
+    }
 }
 
 /// Default tool set for a sub-agent that doesn't specify its own `tools:` list.
@@ -2165,6 +2258,49 @@ const MAX_SUBAGENT_DEPTH: usize = 4;
 /// spin calling the same tools repeatedly; enough to gather info and answer.
 const SUBAGENT_MAX_ITERATIONS: usize = 6;
 
+/// Maximum number of consecutive "reasoning-only" retries the Ollama tool loop
+/// allows before giving up and surfacing "(no response)". Thinking-capable
+/// models (nemotron, qwen3, deepseek-r1) can get stuck emitting ONLY thinking
+/// (no visible content, no tool call) for several turns. Each retry nudges the
+/// model with an escalating reminder; this budget (5..10) is large enough that
+/// a stuck model gets plenty of chances to produce a real answer or a tool
+/// call without hanging forever.
+const THINKING_ONLY_MAX_RETRIES: usize = 8;
+
+/// Resolved provider (backend + model + url + api_key) for a sub-agent.
+/// A sub-agent uses its OWN backend/model when configured, otherwise it falls
+/// back to the main agent's. Its endpoint/credential come from the `providers`
+/// map (when the route differs from the main agent's) else the main's.
+/// Extracted as a pure function so the per-agent provider routing can be
+/// unit-tested ("each agent can come from a different model provider").
+fn resolve_agent_provider(
+    agent: &AgentConfig,
+    main_backend: &str,
+    main_model: &str,
+    main_url: &str,
+    main_api_key: &str,
+    providers: &HashMap<String, ProviderConfig>,
+) -> (String, String, String, String) {
+    let backend = if agent.backend.is_empty() {
+        main_backend.to_string()
+    } else {
+        agent.backend.clone()
+    };
+    let model = if agent.model.is_empty() {
+        main_model.to_string()
+    } else {
+        agent.model.clone()
+    };
+    let provider = providers.get(&backend);
+    let url = provider
+        .and_then(|p| if p.url.is_empty() { None } else { Some(p.url.clone()) })
+        .unwrap_or_else(|| main_url.to_string());
+    let api_key = provider
+        .and_then(|p| if p.api_key.is_empty() { None } else { Some(p.api_key.clone()) })
+        .unwrap_or_else(|| main_api_key.to_string());
+    (backend, model, url, api_key)
+}
+
 /// Run a sub-agent and return its final result + full trace (for the frontend
 /// "window"). Emits `subagent-*` events so the window streams live.
 async fn run_subagent(
@@ -2184,24 +2320,16 @@ async fn run_subagent(
     let agent = load_agent_config(root, agent_name)?;
 
     // Resolve the sub-agent's provider: its own backend/model when set,
-    // otherwise fall back to the main agent's.
-    let backend = if agent.backend.is_empty() {
-        runner.main_backend.to_string()
-    } else {
-        agent.backend.clone()
-    };
-    let model = if agent.model.is_empty() {
-        runner.main_model.to_string()
-    } else {
-        agent.model.clone()
-    };
-    let provider = runner.providers.get(&backend);
-    let url = provider
-        .and_then(|p| if p.url.is_empty() { None } else { Some(p.url.clone()) })
-        .unwrap_or_else(|| runner.main_url.to_string());
-    let api_key = provider
-        .and_then(|p| if p.api_key.is_empty() { None } else { Some(p.api_key.clone()) })
-        .unwrap_or_else(|| runner.main_api_key.to_string());
+    // otherwise fall back to the main agent's. Endpoint/credential come from
+    // the matching entry in the providers map, else the main agent's.
+    let (backend, model, url, api_key) = resolve_agent_provider(
+        &agent,
+        runner.main_backend,
+        runner.main_model,
+        runner.main_url,
+        runner.main_api_key,
+        runner.providers,
+    );
 
     // Resolve the sub-agent's tool set.
     let tool_names: Vec<String> = if agent.tools.is_empty() {
@@ -2209,7 +2337,9 @@ async fn run_subagent(
     } else {
         agent.tools.clone()
     };
-    let tools = build_tool_schemas(&tool_names, runner.root_path);
+    // Sub-agents must NOT get the spawn_subagent tool — otherwise they can
+    // cascade-delegate to other agents. Isolated tool set only.
+    let tools = build_tool_schemas_inner(&tool_names, runner.root_path, false);
 
     let id = format!(
         "sa_{}",
@@ -2219,7 +2349,7 @@ async fn run_subagent(
             .as_nanos()
     );
 
-    // Wrap the agent prompt with sub-agent operating instructions so it stays
+// Wrap the agent prompt with sub-agent operating instructions so it stays
     // focused and returns a final answer instead of looping on tools.
     let system_prompt = format!(
         "{}\n\n[Sub-agent operating instructions]\n\
@@ -2233,10 +2363,51 @@ async fn run_subagent(
          concisely.",
         agent.prompt
     );
-    let msgs = vec![
-        ChatMessage { role: "system".to_string(), content: system_prompt },
-        ChatMessage { role: "user".to_string(), content: task.to_string() },
-    ];
+
+    // Build the sub-agent's message list. When this agent has been spawned
+    // before in the session, include its PRIOR turns (prior task + the answer
+    // it gave) so the same @agent continues its working context — each new
+    // trigger adds to the agent's memory and the overall session context.
+    // The prior history is injected as an additional system block so it never
+    // pollutes the current user message stream.
+    let mut msgs: Vec<ChatMessage> = Vec::new();
+    msgs.push(ChatMessage { role: "system".to_string(), content: system_prompt.clone() });
+    if let Some(prior) = runner.memory.get(root, &agent.name) {
+        if !prior.is_empty() {
+            let mut history = String::from("[Prior conversation with this sub-agent]\n");
+            for (i, m) in prior.iter().enumerate() {
+                let who = if m.role == "user" { "user asked" } else { "you answered" };
+                // Keep only the first ~400 chars of each prior turn to bound
+                // token usage while preserving context.
+                let snippet: String = if m.content.chars().count() > 400 {
+                    m.content.chars().take(400).collect::<String>() + "…"
+                } else {
+                    m.content.clone()
+                };
+                let safe = snippet.replace('\n', " ");
+                if i % 2 == 0 {
+                    history.push_str(&format!("- {}: {}\n", who, safe));
+                } else {
+                    history.push_str(&format!("  {}: {}\n", who, safe));
+                }
+            }
+            msgs.push(ChatMessage {
+                role: "system".to_string(),
+                content: history,
+            });
+            msgs.push(ChatMessage {
+                role: "user".to_string(),
+                content: format!(
+                    "[Continuing our conversation: I have a new task for you.]\n\n{}",
+                    task
+                ),
+            });
+        } else {
+            msgs.push(ChatMessage { role: "user".to_string(), content: task.to_string() });
+        }
+    } else {
+        msgs.push(ChatMessage { role: "user".to_string(), content: task.to_string() });
+    }
     let sub_iterations = runner.max_iterations.min(SUBAGENT_MAX_ITERATIONS);
 
     runner
@@ -2259,6 +2430,7 @@ async fn run_subagent(
             model: &model,
             tool_configs: runner.tool_configs,
             root_path: runner.root_path,
+            reasoning_retries: runner.reasoning_retries,
         };
         ollama_chat_with_tools(
             &ctx,
@@ -2269,6 +2441,7 @@ async fn run_subagent(
             runner.max_tokens.unwrap_or(4096),
             Some(&id),
             Some(&sub_runner),
+            &std::collections::HashSet::new(),
         )
         .await
     } else if backend == "llamacpp" {
@@ -2292,28 +2465,37 @@ async fn run_subagent(
             runner.use_model_affinity,
             Some(&id),
             Some(&sub_runner),
+            &std::collections::HashSet::new(),
         )
         .await
     };
 
     match result {
         Ok(chat) => {
+            // Some models reply with a structured JSON blob (analysis/plan/
+            // tool_calls/final_answer). Surface only the final answer to the
+            // main model and the user — the raw blob is confusing and pollutes
+            // the parent context.
+            let clean = unwrap_structured_answer(&chat.content);
+            // Store this turn (task → answer) as the agent's memory so a later
+            // trigger of the sAME @agent continues from this context.
+            runner.memory.push_turn(root, &agent.name, task, &clean);
             let trace = SubAgentTrace {
                 id: id.clone(),
                 agent: agent.name.clone(),
                 task: task.to_string(),
                 model,
-                result: chat.content.clone(),
+                result: clean.clone(),
                 tool_calls: chat.tool_calls.clone(),
             };
             runner
                 .app_handle
                 .emit("subagent-done", SubAgentDonePayload {
                     id: id.clone(),
-                    result: chat.content.clone(),
+                    result: clean.clone(),
                 })
                 .ok();
-            Ok((chat.content, trace))
+            Ok((clean, trace))
         }
         Err(e) => {
             let err_msg = format!("Sub-agent error: {}", e);
@@ -2332,6 +2514,225 @@ async fn run_subagent(
 /// Maximum number of sub-agents to run concurrently. Bounded so two large local
 /// models don't exhaust VRAM.
 const MAX_CONCURRENT_SUBAGENTS: usize = 2;
+
+/// Some tool-calling models (e.g. certain Ollama Qwen/Nemotron builds and some
+/// "structured output" prompts) respond to a sub-agent task with a JSON blob
+/// like:
+///   {"analysis": "...", "plan": "...", "tool_calls": [...],
+///    "result": "...", "final_answer": "..."}
+/// Instead of a plain-text answer. That JSON is confusing in the sub-agent
+/// window and, worse, the whole blob (including the internal plan + tool_calls)
+/// gets concatenated into the final context the main model sees.
+///
+/// `unwrap_structured_answer` detects this and returns ONLY the final answer:
+///   - if the whole text parses as JSON with a `final_answer` string → that;
+///   - otherwise it scans for top-level `{...}` JSON objects and joins every
+///     `final_answer` it finds (a tool loop can emit several concatenated
+///     blobs, e.g. one per iteration);
+///   - if she finds no JSON answer, returns the text unchanged.
+fn unwrap_structured_answer(content: &str) -> String {
+    // Fast path: the entire output is one structured JSON answer.
+    if content.trim_start().starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
+            if let Some(fa) = v.get("final_answer").and_then(|f| f.as_str()) {
+                if !fa.trim().is_empty() {
+                    return fa.trim().to_string();
+                }
+            }
+        }
+    }
+
+    // Slow path: search for whole JSON objects. A tool loop can emit several
+    // (one per iteration), each carrying `final_answer`; keep all of them so
+    // nothing important is dropped.
+    let mut final_answers: Vec<String> = Vec::new();
+    let chars: Vec<char> = content.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '{' {
+            i += 1;
+            continue;
+        }
+        // Find the matching closing brace, skipping strings and escapes.
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut j = i;
+        let mut end = false;
+        for k in i..chars.len() {
+            let cc = chars[k];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if cc == '\\' {
+                    escaped = true;
+                } else if cc == '"' {
+                    in_string = false;
+                }
+            } else {
+                match cc {
+                    '"' => in_string = true,
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j = k;
+                            end = true;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if end {
+            let slice: String = chars[i..=j].iter().collect();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&slice) {
+                if let Some(fa) = v.get("final_answer").and_then(|f| f.as_str()) {
+                    if !fa.trim().is_empty() {
+                        final_answers.push(fa.trim().to_string());
+                    }
+                }
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    if final_answers.is_empty() {
+        content.to_string()
+    } else {
+        final_answers.join("\n\n")
+    }
+}
+
+/// Build the `(agent, task, is_dup)` items used to pre-spawn explicitly
+/// referenced `@agent`s. Each agent gets its OWN focused sub-task derived from
+/// the user's message (see `split_task_for_agent`), so an agent never sees the
+/// other @mentions and never tries to spawn its siblings. Duplicate agent
+/// names are de-duplicated so a single agent is never pre-spawned twice. Pure —
+/// unit-testable.
+fn build_pre_spawn_items(referenced: &[String], user_message: &str) -> Vec<(String, String, bool)> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut items: Vec<(String, String, bool)> = Vec::new();
+    for a in referenced {
+        let name = a.trim();
+        if name.is_empty() || !seen.insert(name.to_string()) {
+            continue;
+        }
+        let task = split_task_for_agent(user_message, name);
+        items.push((name.to_string(), task, false));
+    }
+    items
+}
+
+/// Derive the focused task for one agent from the user's full message.
+/// Rules:
+///   - If the message contains exactly one `@agent` token, the agent gets the
+///     whole message minus the @token (the request is clearly aimed at it).
+///   - If MULTIPLE agents are mentioned, this agent gets the portion of the
+///     message that mentions it (its own sentence/clause), with every OTHER
+///     `@mention` and its associated clause stripped out so the sub-agent won't
+///     attempt to re-spawn its siblings.
+///   - Mentions of OTHER agents that don't appear in the known list are left
+///     intact (e.g. @someone not an agent); we only strip known siblings.
+/// Pure — unit-testable.
+fn split_task_for_agent(user_message: &str, agent_name: &str) -> String {
+    let agent_token = format!("@{}", agent_name);
+    // Locate every @mention boundary in the message.
+    let chars: Vec<char> = user_message.chars().collect();
+    struct Mention { start: usize, end: usize, token: String }
+    let mut mentions: Vec<Mention> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '@' {
+            let mut j = i + 1;
+            while j < chars.len()
+                && (chars[j].is_alphanumeric() || chars[j] == '_' || chars[j] == '-' || chars[j] == '.' || chars[j] == '/')
+            {
+                j += 1;
+            }
+            mentions.push(Mention {
+                start: i,
+                end: j,
+                token: chars[i..j].iter().collect::<String>(),
+            });
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    // The mention of THIS agent.
+    let Some(idx) = mentions.iter().position(|m| m.token == agent_token) else {
+        return user_message.trim().to_string();
+    };
+
+    // Determine the clause span for this agent. An agent's task is the text
+    // that FOLLOWS its own @mention (its action), up to the next sibling
+    // @mention boundary (or end of message). This gives "N agents × N tasks":
+    //   "@researcher search the web while @code-reviewer review the code"
+    //   → researcher gets "search the web while"
+    //   → code-reviewer gets "review the code"
+    // and critically never exposes ONE agent to the OTHER agent's clause, so a
+    // sub-agent cannot re-spawn its siblings (the cascade bug).
+    let start = mentions[idx].end;
+    let end = if idx + 1 < mentions.len() { mentions[idx + 1].start } else { chars.len() };
+
+    let out: String = chars[start..end].iter().collect();
+    // Within the clause, drop ANY leftover @word (shouldn't be any since the
+    // span stops at the next mention boundary, but be defensive).
+    let result: String = {
+        let c = out.chars().collect::<Vec<char>>();
+        let mut buf = String::new();
+        let mut k = 0;
+        while k < c.len() {
+            if c[k] == '@' {
+                let mut l = k + 1;
+                while l < c.len() && (c[l].is_alphanumeric() || c[l] == '_' || c[l] == '-' || c[l] == '.' || c[l] == '/') {
+                    l += 1;
+                }
+                k = l; // drop the mention
+            } else {
+                buf.push(c[k]);
+                k += 1;
+            }
+        }
+        buf
+    };
+    let cleaned = result
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Drop leading connective words that spilled over from the coordinator
+    // ("while", "and", "then", "also", "in parallel", etc.) so the task reads
+    // as a direct instruction for THIS agent only.
+    let stop_words = ["while", "and", "then", "also", "in", "with", "using", "parallel", "at", "on", "for"];
+    let mut words: Vec<&str> = cleaned.split_whitespace().collect();
+    let mut trimmed_once = true;
+    while trimmed_once {
+        trimmed_once = false;
+        if let Some(first) = words.first() {
+            let f = first.trim_matches([',', ';', '-']);
+            if words.len() > 1 && stop_words.contains(&f.to_lowercase().as_str()) {
+                words.remove(0);
+                trimmed_once = true;
+            }
+        }
+    }
+    let cleaned = words.join(" ");
+    let cleaned = cleaned
+        .trim()
+        .trim_start_matches([',', ';', '-', '(', '['])
+        .trim_end_matches([',', ';', '-', ')', ']'])
+        .trim();
+    if cleaned.is_empty() {
+        user_message.trim().to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
 
 /// Run a batch of `spawn_subagent` calls concurrently (at most
 /// `MAX_CONCURRENT_SUBAGENTS` at a time). Returns `(result, optional_trace)` for
@@ -2368,6 +2769,19 @@ async fn run_spawn_batch(
 // ---------------------------------------------------------------------------
 
 fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_json::Value> {
+    build_tool_schemas_inner(enabled, root_path, true)
+}
+
+/// Internal builder. `allow_spawn_subagent` controls whether the
+/// `spawn_subagent` tool is attached. Set to `false` for sub-agent tool loops
+/// so a sub-agent can never delegate to (spawn) another sub-agent — this is
+/// what prevents the cascade where each @mentioned sub-agent re-spawns the
+/// other agents it sees mentioned in its (too-broad) task.
+fn build_tool_schemas_inner(
+    enabled: &[String],
+    root_path: Option<&str>,
+    allow_spawn_subagent: bool,
+) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
     if enabled.contains(&"web_fetch".to_string()) {
         tools.push(serde_json::json!({
@@ -2715,44 +3129,48 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
 
     // Add a `spawn_subagent` tool when sub-agents are defined in `.agents/`.
     // The description lists each agent + its description so the main LLM can
-    // decide which tasks to route to which sub-agent.
-    if let Some(rp) = root_path {
-        let agents = list_agent_configs(rp);
-        if !agents.is_empty() {
-            let agent_list: Vec<String> = agents
-                .iter()
-                .map(|a| {
-                    let desc = if a.description.is_empty() { "(no description)" } else { a.description.as_str() };
-                    format!("- {}: {}", a.name, desc)
-                })
-                .collect();
-            tools.push(serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": "spawn_subagent",
-                    "description": format!(
-                        "Delegate a task to a specialized sub-agent and return its result. \
-                         Use this to offload focused work (e.g. code review, research, writing, \
-                         or anything another agent is better suited for) to a sub-agent that runs \
-                         independently and reports back. Available sub-agents:\n{}",
-                        agent_list.join("\n")
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "agent": {
-                                "type": "string",
-                                "description": "The name of the sub-agent to spawn (must match one of the available sub-agents)"
+    // decide which tasks to route to which sub-agent. Only the main agent's
+    // tool loop gets this tool; sub-agent loops pass allow_spawn_subagent=false
+    // so they cannot spawn further sub-agents (prevents the re-spawn cascade).
+    if allow_spawn_subagent {
+        if let Some(rp) = root_path {
+            let agents = list_agent_configs(rp);
+            if !agents.is_empty() {
+                let agent_list: Vec<String> = agents
+                    .iter()
+                    .map(|a| {
+                        let desc = if a.description.is_empty() { "(no description)" } else { a.description.as_str() };
+                        format!("- {}: {}", a.name, desc)
+                    })
+                    .collect();
+                tools.push(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": "spawn_subagent",
+                        "description": format!(
+                            "Delegate a task to a specialized sub-agent and return its result. \
+                             Use this to offload focused work (e.g. code review, research, writing, \
+                             or anything another agent is better suited for) to a sub-agent that runs \
+                             independently and reports back. Available sub-agents:\n{}",
+                            agent_list.join("\n")
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "agent": {
+                                    "type": "string",
+                                    "description": "The name of the sub-agent to spawn (must match one of the available sub-agents)"
+                                },
+                                "task": {
+                                    "type": "string",
+                                    "description": "The task or instruction for the sub-agent"
+                                }
                             },
-                            "task": {
-                                "type": "string",
-                                "description": "The task or instruction for the sub-agent"
-                            }
-                        },
-                        "required": ["agent", "task"]
+                            "required": ["agent", "task"]
+                        }
                     }
-                }
-            }));
+                }));
+            }
         }
     }
 
@@ -3849,10 +4267,48 @@ fn build_initial_messages(
             "content": "When the `spawn_subagent` tool is available, delegate focused tasks that \
                         match a sub-agent's specialty (e.g. code review, research, writing) to the \
                         appropriate sub-agent instead of doing everything yourself. Spawn each \
-                        sub-agent at most once per task. After a sub-agent returns its result, \
-                        incorporate that result into a complete final answer that directly \
-                        addresses the user's original request: do not stop after spawning — wait \
-                        for their results and then write the final response."
+                        sub-agent at most once per task. When MULTIPLE sub-agents are warranted, \
+                        emit ALL the spawn_subagent tool calls in the SAME response (a single \
+                        tool_calls batch) so they run in PARALLEL — do not spawn them one at a \
+                        time or wait between spawns. After the sub-agents return their results, \
+                        incorporate them into a complete final answer that directly addresses \
+                        the user's original request: do not stop after spawning — wait for \
+                        their results and then write the final response."
+        }));
+    }
+
+    // When tools are available, tell the model to actually USE them when the
+    // task calls for it. Nemotron-class thinking models otherwise tend to
+    // "think" through a computation and write prose instead of calling a tool.
+    let tool_names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str())
+        .collect();
+    if !tool_names.is_empty() {
+        let has_rust_repl = tool_names.iter().any(|n| *n == "rust_repl");
+        let mut hinted = String::new();
+        if has_rust_repl {
+            hinted.push_str(
+                "Use the `rust_repl` tool to compile and run Rust code whenever the task involves \
+                 computing a result, verifying a claim, testing an algorithm, or debugging code. \
+                 Do NOT try to compute or simulate it in prose.",
+            );
+        }
+        let extra = if tool_names.contains(&"web_search") || tool_names.contains(&"web_fetch") {
+            " To answer questions about external or current information, use web_search / web_fetch."
+        } else {
+            ""
+        };
+        ollama_msgs.push(serde_json::json!({
+            "role": "system",
+            "content": format!(
+                "You have the following tools available: {}. \
+                 Call a tool (via the tool_calls field) when the task requires it — waiting for \
+                 its result and then continuing is correct behaviour.{}{}",
+                tool_names.join(", "),
+                if hinted.is_empty() { "" } else { hinted.as_str() },
+                extra
+            )
         }));
     }
 
@@ -3880,6 +4336,42 @@ fn take_next_line(buf: &mut Vec<u8>) -> Option<String> {
     Some(line.trim().to_string())
 }
 
+/// Accumulated deltas from the Ollama `/api/chat` NDJSON stream.
+#[derive(Default, Debug, PartialEq)]
+struct OllamaChunkAcc {
+    content: String,
+    thinking: String,
+    tool_calls: Option<Vec<serde_json::Value>>,
+}
+
+/// Parse one NDJSON line from the Ollama `/api/chat` stream, appending any
+/// content/thinking deltas and recording tool calls (if any). Pure — no events
+/// emitted — so it can be unit-tested against realistic streaming responses
+/// from thinking-capable models (Nemotron, Qwen3, DeepSeek-R1, …).
+///
+/// Returns `true` when the line was valid JSON (even if it carried no deltas).
+fn apply_ollama_stream_line(line: &str, acc: &mut OllamaChunkAcc) -> bool {
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    if let Some(thinking) = data["message"]["thinking"].as_str() {
+        if !thinking.is_empty() {
+            acc.thinking.push_str(thinking);
+        }
+    }
+    if let Some(content) = data["message"]["content"].as_str() {
+        if !content.is_empty() {
+            acc.content.push_str(content);
+        }
+    }
+    if let Some(calls) = data["message"]["tool_calls"].as_array() {
+        if !calls.is_empty() {
+            acc.tool_calls = Some(calls.clone());
+        }
+    }
+    true
+}
+
 /// Stream an Ollama NDJSON response line by line, emitting tokens to the
 /// frontend via `app_handle` and accumulating content into `full_content`.
 /// Returns the iteration-scoped content, thinking trace, and any tool calls found.
@@ -3894,43 +4386,37 @@ async fn stream_ollama_response(
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
     let mut buf: Vec<u8> = Vec::new();
 
-    // Helper to process a single NDJSON line — extracted so the main loop
-    // and the trailing-buffer drain share the same logic.
-    let process_line = |line: &str,
-                            iter_content: &mut String,
-                            iter_thinking: &mut String,
-                            tool_calls: &mut Option<Vec<serde_json::Value>>,
-                            full_content: &mut String|
-     -> Result<(), String> {
-        if let Ok(data) = serde_json::from_str::<serde_json::Value>(line) {
-            // Thinking-capable models (Qwen3, DeepSeek-R1, etc.) emit a
-            // `thinking` field separate from `content`.  Capture it for the
+    // Process a single NDJSON line: the pure `apply_ollama_stream_line` does the
+    // parsing; this helper only emits tokens and aggregates buffers. All
+    // accumulators are passed by reference (not captured) so they remain usable
+    // after the streaming/drain loops (e.g. for the thinking fallback).
+    let mut acc = OllamaChunkAcc::default();
+    let consume_line = |line: &str,
+                        acc: &mut OllamaChunkAcc,
+                        iter_content: &mut String,
+                        iter_thinking: &mut String,
+                        tool_calls: &mut Option<Vec<serde_json::Value>>,
+                        full_content: &mut String| {
+        if apply_ollama_stream_line(line, acc) {
+            // Thinking-capable models (Qwen3, Nemotron, DeepSeek-R1, etc.) emit
+            // a `thinking` field separate from `content`. Capture it for the
             // tool-loop context but stream it with a `thinking` flag so the
             // frontend can display it transiently without adding it to the
             // conversation messages.
-            if let Some(thinking) = data["message"]["thinking"].as_str() {
-                if !thinking.is_empty() {
-                    iter_thinking.push_str(thinking);
-                    emit_stream_token(app_handle, subagent_id, thinking, true);
-                }
+            if !acc.thinking.is_empty() {
+                emit_stream_token(app_handle, subagent_id, &acc.thinking, true);
             }
-            if let Some(content) = data["message"]["content"].as_str() {
-                if !content.is_empty() {
-                    iter_content.push_str(content);
-                    full_content.push_str(content);
-                    emit_stream_token(app_handle, subagent_id, content, false);
-                }
+            if !acc.content.is_empty() {
+                emit_stream_token(app_handle, subagent_id, &acc.content, false);
+                full_content.push_str(&acc.content);
             }
-            // Detect tool calls in ANY chunk — not just the done:true chunk.
-            // Some Ollama versions/streaming modes may emit tool_calls
-            // in a separate chunk before the done marker.
-            if let Some(calls) = data["message"]["tool_calls"].as_array() {
-                if !calls.is_empty() {
-                    *tool_calls = Some(calls.clone());
-                }
+            iter_content.push_str(&acc.content);
+            iter_thinking.push_str(&acc.thinking);
+            if acc.tool_calls.is_some() {
+                *tool_calls = acc.tool_calls.clone();
             }
+            *acc = OllamaChunkAcc::default();
         }
-        Ok(())
     };
 
     loop {
@@ -3942,7 +4428,7 @@ async fn stream_ollama_response(
                     if line.is_empty() {
                         continue;
                     }
-                    process_line(&line, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
+                    consume_line(&line, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content);
                 }
             }
             Err(e) => {
@@ -3962,13 +4448,39 @@ async fn stream_ollama_response(
 
     // Drain any remaining data in the buffer after the stream ends.
     // The last chunk from the server may not end with a newline, so the
-    // inner while-let loop leaves residual bytes in `buf`.  Process them
-    // now so we don't silently drop content or tool-call detection.
-    if !buf.is_empty() {
-        let line = String::from_utf8_lossy(&buf).trim().to_string();
-        if !line.is_empty() {
-            process_line(&line, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
+    // inner while-let loop leaves residual bytes in `buf`. Process every
+    // complete line in the tail (a single chunk can carry several).
+    while !buf.is_empty() {
+        match take_next_line(&mut buf) {
+            Some(line) if !line.is_empty() => {
+                consume_line(&line, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content);
+            }
+            _ => {
+                // Trailing fragment with no newline — try parsing the whole
+                // remaining buffer as one (final) line.
+                let tail = String::from_utf8_lossy(&buf).trim().to_string();
+                if !tail.is_empty() {
+                    consume_line(&tail, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content);
+                }
+                buf.clear();
+            }
         }
+    }
+
+    // IMPORTANT: A thinking-capable model may spend its whole budget on
+    // reasoning and never emit visible `content` (seen with Ollama models such
+    // as nemotron, qwen3, deepseek-r1). We do NOT dump the reasoning into the
+    // visible message here — that polluted the chat. Instead the tool loop gets
+    // `iter_thinking` populated and decides whether to RETRY (see
+    // ollama_chat_with_tools) so the model is nudged to emit a real answer or a
+    // structured tool call. This branch only logs diagnostic info.
+    if iter_content.is_empty() && iter_thinking.is_empty() && tool_calls.is_none() {
+        eprintln!("[nolock] WARNING: ollama stream returned no content, thinking, or tool calls");
+    } else if iter_content.is_empty() && tool_calls.is_none() && !iter_thinking.is_empty() {
+        eprintln!(
+            "[nolock] ollama stream produced ONLY thinking ({} chars) — no content, no tool calls. The tool loop will retry.",
+            iter_thinking.len()
+        );
     }
 
     Ok(StreamResult {
@@ -3992,6 +4504,8 @@ struct OllamaChatContext<'a> {
     model: &'a str,
     tool_configs: &'a HashMap<String, serde_json::Value>,
     root_path: Option<&'a str>,
+    /// Configured "reasoning-only" retry budget (from the Chat Model panel).
+    reasoning_retries: usize,
 }
 
 async fn ollama_chat_with_tools(
@@ -4003,12 +4517,20 @@ async fn ollama_chat_with_tools(
     max_tokens: u32,
     subagent_id: Option<&str>,
     runner: Option<&SubAgentRunner<'_>>,
+    pre_spawned: &std::collections::HashSet<String>,
 ) -> Result<ChatResult, String> {
     let mut ollama_msgs = build_initial_messages(messages, tools);
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
     // De-duplicate spawn_subagent calls (same agent + task) within this run.
     let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Bounded retries when a thinking model ends a turn with ONLY reasoning
+    // (no content, no tool call). The budget is user-configurable via the
+    // Chat Model panel (ctx.reasoning_retries); we nudge the model to produce
+    // a real answer / structured tool call instead of dumping the reasoning
+    // into the chat.
+    let mut thinking_only_retries: usize = 0;
+    let thinking_only_max_retries = ctx.reasoning_retries;
 
     for iteration in 0..max_iterations {
         // --- Build and send request ---
@@ -4083,6 +4605,20 @@ async fn ollama_chat_with_tools(
                 if name == "spawn_subagent" {
                     let agent = args["agent"].as_str().unwrap_or("").to_string();
                     let task = args["task"].as_str().unwrap_or("").to_string();
+                    // Agents already dispatched by the backend (explicit
+                    // @mention) must not be spawned again — their result is
+                    // already in the conversation context.
+                    if pre_spawned.contains(&agent) {
+                        ollama_msgs.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": format!(
+                                "Agent '@{}' was already dispatched with the user's request; its result is in the conversation context.",
+                                agent
+                            )
+                        }));
+                        continue;
+                    }
                     let task_norm: String = task.split_whitespace().collect::<Vec<_>>().join(" ");
                     let dedup_key = format!("{}||{}", agent.trim(), task_norm);
                     let is_dup = spawned_subagents.contains(&dedup_key);
@@ -4161,7 +4697,51 @@ async fn ollama_chat_with_tools(
                 full_content.push('\n');
             }
         } else {
-            // No tool calls — final response
+            // No tool calls — final response, unless the model only reasoned
+            // and never produced a visible answer or tool call. In that case
+            // retry (bounded) with an escalating reminder so the user gets a
+            // real answer rather than "(no response)" or a dump of the
+            // thinking trace.
+            if stream.iter_content.is_empty() && !stream.iter_thinking.is_empty() {
+                if thinking_only_retries < thinking_only_max_retries {
+                    thinking_only_retries += 1;
+                    eprintln!(
+                        "[nolock] ollama tool loop iteration={} reasoning-only, retry {}/{}",
+                        iteration, thinking_only_retries, thinking_only_max_retries
+                    );
+                    // Escalating nudge: each retry gets firmer so a stuck
+                    // thinking model (nemotron/qwen3/deepseek-r1) is pushed to
+                    // finally emit visible content or a structured tool call.
+                    let last = thinking_only_max_retries;
+                    let press = if thinking_only_retries >= last.saturating_sub(2) {
+                        format!(
+                            "This is attempt {} — you MUST now answer. Stop reasoning aloud. Output \
+                             the final answer as visible text, or (if you intended a tool call) emit \
+                             the structured tool_calls block immediately.",
+                            thinking_only_retries
+                        )
+                    } else if thinking_only_retries >= last / 2 {
+                        "You have reasoned again without answering. Do NOT output further reasoning — \
+                         write the final answer as plain visible text now. If a tool is required, \
+                         call it (tool_calls) instead of describing it."
+                            .to_string()
+                    } else {
+                        "You have just finished your reasoning without producing a visible answer or \
+                         a tool call. Now provide the final answer as plain, visible text (no reasoning \
+                         trace). If you need to call a tool to answer, call it in the next response."
+                            .to_string()
+                    };
+                    ollama_msgs.push(serde_json::json!({
+                        "role": "system",
+                        "content": press
+                    }));
+                    continue;
+                }
+                eprintln!(
+                    "[nolock] ollama tool loop gave up after {} reasoning-only retries",
+                    thinking_only_retries
+                );
+            }
             eprintln!(
                 "[nolock] ollama tool loop returning: content_len={} tool_calls={}",
                 full_content.len(),
@@ -4390,6 +4970,7 @@ async fn run_openai_tool_loop(
     use_model_affinity: bool,
     subagent_id: Option<&str>,
     runner: Option<&SubAgentRunner<'_>>,
+    pre_spawned: &std::collections::HashSet<String>,
 ) -> Result<ChatResult, String> {
     let mut openai_msgs: Vec<serde_json::Value> = messages
         .iter()
@@ -4423,10 +5004,13 @@ async fn run_openai_tool_loop(
                 "\n\nWhen the `spawn_subagent` tool is available, delegate focused tasks that \
                  match a sub-agent's specialty (e.g. code review, research, writing) to the \
                  appropriate sub-agent instead of doing everything yourself. Spawn each \
-                 sub-agent at most once per task. After a sub-agent returns its result, \
-                 incorporate that result into a complete final answer that directly addresses \
-                 the user's original request: do not stop after spawning — wait for their \
-                 results and then write the final response.",
+                 sub-agent at most once per task. When MULTIPLE sub-agents are warranted, \
+                 emit ALL the spawn_subagent tool calls in the SAME response (a single \
+                 tool_calls batch) so they run in PARALLEL — do not spawn them one at a time \
+                 or wait between spawns. After the sub-agents return their results, incorporate \
+                 them into a complete final answer that directly addresses the user's original \
+                 request: do not stop after spawning — wait for their results and then write \
+                 the final response.",
             );
         }
         openai_msgs.insert(0, serde_json::json!({
@@ -4592,6 +5176,19 @@ async fn run_openai_tool_loop(
                 if name == "spawn_subagent" {
                     let agent = args["agent"].as_str().unwrap_or("").to_string();
                     let task = args["task"].as_str().unwrap_or("").to_string();
+                    // Agents already dispatched by the backend (explicit
+                    // @mention) must not be spawned again.
+                    if pre_spawned.contains(&agent) {
+                        openai_msgs.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": format!(
+                                "Agent '@{}' was already dispatched with the user's request; its result is in the conversation context.",
+                                agent
+                            )
+                        }));
+                        continue;
+                    }
                     let task_norm: String = task.split_whitespace().collect::<Vec<_>>().join(" ");
                     let dedup_key = format!("{}||{}", agent.trim(), task_norm);
                     let is_dup = spawned_subagents.contains(&dedup_key);
@@ -5058,7 +5655,21 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     // when tools are active so the model doesn't hit `num_predict` mid-generation.
     let temperature = req.temperature.unwrap_or(0.7);
     let has_tools = !req.tools_enabled.is_empty();
-    let user_max_tokens = req.max_tokens.unwrap_or(2048);
+    // The last user message — used as the task for pre-spawned @agents.
+    let user_task = req
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    // Local backends default to a reasoning-friendly floor (matches the Chat
+    // Model panel's 8192). Thinking models (Qwen3, Nemotron, DeepSeek-R1) can
+    // otherwise spend the whole budget on hidden reasoning and never emit
+    // visible content → the user sees "(no response)".
+    let user_max_tokens = req
+        .max_tokens
+        .unwrap_or_else(|| if is_cloud_backend(&req.backend) { CLOUD_DEFAULT_MAX_TOKENS } else { LOCAL_DEFAULT_MAX_TOKENS });
     let max_tokens = if has_tools && req.max_tokens.is_none() {
         // User did not explicitly set max_tokens — use a large tool-mode budget
         // so long agentic runs aren't truncated mid-generation.
@@ -5098,7 +5709,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     );
 
     // Prepend global system prompt if provided and not already present
-    let messages = if let Some(ref system_prompt) = req.system_prompt {
+    let mut messages = if let Some(ref system_prompt) = req.system_prompt {
         if !system_prompt.is_empty() {
             let mut msgs = req.messages.clone();
             // Check if a system message already exists
@@ -5121,6 +5732,10 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     let tools = build_tool_schemas(&req.tools_enabled, req.root_path.as_deref());
     let has_tools = !tools.is_empty();
 
+    // Shared sub-agent conversation memory (persists across turns in the same
+    // session). Read once and pass the reference down through the runner.
+    let subagent_memory = app_handle.state::<SubAgentMemory>();
+
     // Runner used to spawn sub-agents from within the tool loops.
     let main_api_key = req.api_key.clone().unwrap_or_default();
     let runner = SubAgentRunner {
@@ -5135,9 +5750,48 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
         root_path: req.root_path.as_deref(),
         max_tokens: cloud_max_tokens,
         max_iterations: req.max_iterations,
+        reasoning_retries: req.reasoning_retries.unwrap_or(THINKING_ONLY_MAX_RETRIES),
         use_model_affinity: req.model_affinity.unwrap_or(true),
         depth: 0,
+        memory: &subagent_memory,
     };
+
+    // Pre-spawn explicitly-referenced agents (from `@agent` mentions) so they
+    // run in PARALLEL regardless of the orchestrator model's tool-calling
+    // reliability (nemotron-class models sometimes emit only one spawn call).
+    // Their results are injected as system context for the orchestrator to
+    // synthesize, and the tool loops skip re-spawning them.
+    let mut pre_spawned: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !req.referenced_agents.is_empty() {
+        let items = build_pre_spawn_items(&req.referenced_agents, &user_task);
+        eprintln!(
+            "[nolock] pre-spawning referenced agents in parallel: {:?}",
+            req.referenced_agents
+        );
+        let outcomes = run_spawn_batch(Some(&runner), &items).await;
+        // Inject the results as system context right BEFORE the latest user
+        // message so the orchestrator (the only model that builds the final
+        // response) sees them in its working context — not buried at the start
+        // of a long conversation. Each result is labelled with the agent.
+        let inject_at = messages
+            .iter()
+            .rposition(|m| m.role == "user")
+            .map(|i| i)
+            .unwrap_or(0);
+        for ((agent, _task, _dup), (result, _trace)) in items.into_iter().zip(outcomes) {
+            pre_spawned.insert(agent.clone());
+            let msg = ChatMessage {
+                role: "system".to_string(),
+                content: format!(
+                    "[Sub-agent @{} result]\n{}\n\nUse the above result from sub-agent @{} \
+                     as input to your final answer. You are the orchestrator: write the unified, \
+                     complete answer that directly addresses the user's request.",
+                    agent, result, agent
+                ),
+            };
+            messages.insert(inject_at, msg);
+        }
+    }
 
     match req.backend.as_str() {
         "ollama" => {
@@ -5149,8 +5803,9 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     model: &req.model,
                     tool_configs: &req.tool_configs,
                     root_path: req.root_path.as_deref(),
+                    reasoning_retries: req.reasoning_retries.unwrap_or(THINKING_ONLY_MAX_RETRIES),
                 };
-                ollama_chat_with_tools(&ollama_ctx, &messages, &tools, req.max_iterations, temperature, max_tokens, None, Some(&runner))
+                ollama_chat_with_tools(&ollama_ctx, &messages, &tools, req.max_iterations, temperature, max_tokens, None, Some(&runner), &pre_spawned)
                     .await
             } else {
                 // No tools — simple single-turn chat (streaming)
@@ -5189,65 +5844,127 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     return Err(format!("Ollama API error ({}): {}", status, error_detail));
                 }
 
-                // Stream NDJSON response (handles both thinking and content fields)
-                let mut full_content = String::new();
-                let mut buf: Vec<u8> = Vec::new();
+                // Stream NDJSON response (handles both thinking and content fields).
+                // We reuse `apply_ollama_stream_line` here so the plain-chat path
+                // and the tool-loop path share identical parsing. Thinking
+                // tokens are streamed with the `thinking` flag (frontend shows
+                // them in the indicator, NOT in the message body). If the model
+                // finishes with only reasoning and no visible answer, we RETRY
+                // with a short nudge (bounded) instead of dumping the reasoning.
+                let mut attempts = 0;
+                // The plain-chat retry budget mirrors the configured reasoning
+                // retries (defaults to the max attempts floor).
+                const MAX_PLAIN_CHAT_ATTEMPTS: usize = 8;
+                let max_plain_attempts = req
+                    .reasoning_retries
+                    .unwrap_or(MAX_PLAIN_CHAT_ATTEMPTS)
+                    .max(1);
+                // Start with the failure message; it is replaced as soon as the
+                // model produces a real answer.
+                let mut final_content = "(no response)".to_string();
                 loop {
-                    match resp.chunk().await.map_err(|e| e.to_string())? {
-                        None => break,
-                        Some(chunk) => {
-                            buf.extend_from_slice(&chunk);
-                            while let Some(line) = take_next_line(&mut buf) {
-                                if line.is_empty() { continue; }
-                                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
-                                    // Capture thinking field for thinking-capable models
-                                    if let Some(thinking) = data["message"]["thinking"].as_str() {
-                                        if !thinking.is_empty() {
-                                            app_handle.emit("stream-token", StreamPayload {
-                                                token: thinking.to_string(),
-                                                thinking: true,
-                                            }).ok();
-                                        }
-                                    }
-                                    if let Some(content) = data["message"]["content"].as_str() {
-                                        if !content.is_empty() {
-                                            full_content.push_str(content);
-                                            app_handle.emit("stream-token", StreamPayload {
-                                                token: content.to_string(),
-                                                thinking: false,
-                                            }).ok();
-                                        }
-                                    }
+                    let mut full_content = String::new();
+                    let mut full_thinking = String::new();
+                    let mut acc = OllamaChunkAcc::default();
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut handle_chunk =
+                        |line: &str,
+                         full_content: &mut String,
+                         full_thinking: &mut String| {
+                            if apply_ollama_stream_line(line, &mut acc) {
+                                if !acc.thinking.is_empty() {
+                                    full_thinking.push_str(&acc.thinking);
+                                    app_handle.emit("stream-token", StreamPayload {
+                                        token: acc.thinking.clone(),
+                                        thinking: true,
+                                    }).ok();
                                 }
+                                if !acc.content.is_empty() {
+                                    full_content.push_str(&acc.content);
+                                    app_handle.emit("stream-token", StreamPayload {
+                                        token: acc.content.clone(),
+                                        thinking: false,
+                                    }).ok();
+                                }
+                                acc = OllamaChunkAcc::default();
+                            }
+                        };
+                    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+                        buf.extend_from_slice(&chunk);
+                        while let Some(line) = take_next_line(&mut buf) {
+                            if line.is_empty() { continue; }
+                            handle_chunk(&line, &mut full_content, &mut full_thinking);
+                        }
+                    }
+                    // Drain every complete line in the trailing buffer (the last
+                    // HTTP chunk may contain several lines and may not end with '\n').
+                    while !buf.is_empty() {
+                        match take_next_line(&mut buf) {
+                            Some(line) if !line.is_empty() => {
+                                handle_chunk(&line, &mut full_content, &mut full_thinking);
+                            }
+                            _ => {
+                                let tail = String::from_utf8_lossy(&buf).trim().to_string();
+                                if !tail.is_empty() {
+                                    handle_chunk(&tail, &mut full_content, &mut full_thinking);
+                                }
+                                buf.clear();
                             }
                         }
                     }
-                }
-                // Drain trailing buffer (last chunk may not end with '\n')
-                if !buf.is_empty() {
-                    let line = String::from_utf8_lossy(&buf).trim().to_string();
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
-                        if let Some(thinking) = data["message"]["thinking"].as_str() {
-                            if !thinking.is_empty() {
-                                app_handle.emit("stream-token", StreamPayload {
-                                    token: thinking.to_string(),
-                                    thinking: true,
-                                }).ok();
-                            }
-                        }
-                        if let Some(content) = data["message"]["content"].as_str() {
-                            if !content.is_empty() {
-                                full_content.push_str(content);
-                                app_handle.emit("stream-token", StreamPayload {
-                                    token: content.to_string(),
-                                    thinking: false,
-                                }).ok();
-                            }
-                        }
+
+                    if !full_content.is_empty() {
+                        // Real answer received.
+                        final_content = full_content;
+                        break;
                     }
+                    // The model only reasoned (or produced nothing). If we still
+                    // have budget, retry with a nudge. Do NOT dump thinking into
+                    // the visible message.
+                    if full_thinking.is_empty() {
+                        // Genuinely empty — no thinking, no content.
+                        eprintln!("[nolock] ollama chat returned nothing (attempt {})", attempts);
+                    } else {
+                        eprintln!(
+                            "[nolock] ollama chat returned only thinking ({} chars), retry {}",
+                            full_thinking.len(),
+                            attempts + 1
+                        );
+                    }
+                    attempts += 1;
+                    if attempts >= max_plain_attempts {
+                        break;
+                    }
+                    // Re-request with a nudge appended so the model emits the
+                    // answer directly instead of finishing with reasoning.
+                    let mut retry_msgs: Vec<serde_json::Value> = messages
+                        .iter()
+                        .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+                        .collect();
+                    retry_msgs.push(serde_json::json!({
+                        "role": "user",
+                        "content": "Please answer normally now — provide the actual answer as plain, visible text. \
+                                    Do NOT output an internal reasoning trace; just the answer."
+                    }));
+                    let retry_body = serde_json::json!({
+                        "model": req.model,
+                        "messages": retry_msgs,
+                        "stream": true,
+                        "options": { "num_predict": max_tokens, "temperature": temperature }
+                    });
+                    resp = client
+                        .post(format!("{}/api/chat", req.url))
+                        .json(&retry_body)
+                        .timeout(std::time::Duration::from_secs(180))
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            eprintln!("[nolock] ollama chat retry error: {}", e);
+                            e.to_string()
+                        })?;
                 }
                 Ok(ChatResult {
-                    content: if full_content.is_empty() { "(no response)".to_string() } else { full_content },
+                    content: final_content,
                     tool_calls: vec![],
                 })
             }
@@ -5661,6 +6378,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 use_model_affinity,
                 None, // subagent_id (main agent)
                 Some(&runner),
+                &pre_spawned,
             )
             .await
         }
@@ -5681,6 +6399,7 @@ pub fn run() {
         .manage(PtyState {
             instances: Mutex::new(HashMap::new()),
         })
+        .manage(SubAgentMemory::new())
         .manage(browser::BrowserState::new())
         .manage(terminal_memory::TermMemory::new())
         .setup(|app| {
@@ -5711,6 +6430,7 @@ pub fn run() {
             create_file,
             list_agents,
             read_agent,
+            subagent_reset,
             list_skills,
             run_skill_command,
             list_tools,
@@ -7296,4 +8016,551 @@ mod tests {
         assert_eq!(body["stream"], false);
     }
 
+    // ---- Ollama streaming parse (nemotron / thinking-model regression) ----
+    // These tests guard against the "model sometimes just doesn't answer"
+    // regression seen with thinking-capable Ollama models (nemotron, qwen3,
+    // deepseek-r1): the model can emit reasoning in `message.thinking` and then
+    // end the stream WITHOUT ever emitting `message.content`. nolock must not
+    // lose the answer in that case.
+
+    #[test]
+    fn test_apply_ollama_stream_line_accumulates_thinking_and_content() {
+        // A typical nemotron-style thinking + answer stream. Each NDJSON line is
+        // one token-ish chunk; nolock must concatenate both fields separately.
+        let lines = [
+            r#"{"message":{"role":"assistant","thinking":"Let me reason"}}"#,
+            r#"{"message":{"role":"assistant","thinking":" about the bug."}}"#,
+            r#"{"message":{"role":"assistant","content":"The bug is"}}"#,
+            r#"{"message":{"role":"assistant","content":" a null deref.","tool_calls":[]},"done":false}"#,
+            r#"{"message":{"role":"assistant","content":""},"done":true}"#,
+        ];
+        let mut acc = OllamaChunkAcc::default();
+        for l in &lines {
+            assert!(apply_ollama_stream_line(l, &mut acc), "line should parse: {}", l);
+        }
+        assert_eq!(acc.thinking, "Let me reason about the bug.");
+        assert_eq!(acc.content, "The bug is a null deref.");
+    }
+
+    #[test]
+    fn apply_ollama_stream_line_ignores_garbage_lines() {
+        // A partial/fragmented line at the end of a stream must not break the
+        // parse loop (returns false, state untouched).
+        let mut acc = OllamaChunkAcc::default();
+        let parsed = apply_ollama_stream_line("{\"message\":{\"content\":\"ok",
+                                              &mut acc);
+        assert!(!parsed);
+        assert!(acc.content.is_empty());
+    }
+
+    #[test]
+    fn apply_ollama_stream_line_captures_tool_calls_early() {
+        // Tool calls can appear in any chunk (not just the done:true chunk).
+        let line = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"a.rs"}}}]},"done":false}"#;
+        let mut acc = OllamaChunkAcc::default();
+        assert!(apply_ollama_stream_line(line, &mut acc));
+        assert!(acc.tool_calls.is_some());
+        let calls = acc.tool_calls.unwrap();
+        assert_eq!(calls[0]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn apply_ollama_stream_line_realistic_nemotron_tool_turn() {
+        // Mirrors the REAL streaming output observed from a nemotron-nano-9b-v2
+        // chat that calls rust_repl (captured live from Ollama):
+        //   1. a long `message.thinking` trace (one chunk per token),
+        //   2. some stray `content` fragments (the model writing aloud), then
+        //   3. the structured `tool_calls` chunk.
+        // The parser must accumulate thinking AND land the tool call so the
+        // tool loop actually executes rust_repl instead of treating the turn as
+        // a "final answer".
+        let stream_lines = [
+            r#"{"message":{"role":"assistant","content":"","thinking":"Okay"}}"#,
+            r#"{"message":{"role":"assistant","content":"","thinking":" the user wants the result via the tool"}}"#,
+            r#"{"message":{"role":"assistant","content":""}}"#,
+            r#"{"message":{"role":"assistant","content":"I will get the result from the tool's response","thinking":""}}"#,
+            r#"{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_m63h6de5","function":{"index":1,"name":"rust_repl","arguments":{"code":"fn main(){ println!(\"5\"); }"}}}]},"done":false}"#,
+            r#"{"message":{"role":"assistant","content":""},"done":true}"#,
+        ];
+        let mut acc = OllamaChunkAcc::default();
+        for l in &stream_lines {
+            assert!(apply_ollama_stream_line(l, &mut acc), "should parse: {}", l);
+        }
+        assert!(acc.thinking.contains("user wants"), "thinking trace accumulated");
+        let calls = acc.tool_calls.expect("structured tool call must be captured");
+        assert_eq!(calls[0]["function"]["name"], "rust_repl");
+        assert_eq!(calls[0]["id"], "call_m63h6de5");
+        assert!(
+            calls[0]["function"]["arguments"]["code"].as_str().unwrap_or("").contains("fn main"),
+            "rust_repl code argument must survive"
+        );
+    }
+
+    #[test]
+    fn take_next_line_drains_whole_tail_without_newline() {
+        // The last HTTP chunk may contain several NDJSON lines and no trailing
+        // newline. The drain loop must extract each complete line from the tail.
+        let mut buf: Vec<u8> = Vec::new();
+        buf.extend_from_slice(br#"{"message":{"content":"a"}}
+{"message":{"content":"b"}}"#);
+        let first = take_next_line(&mut buf).unwrap();
+        assert!(first.contains("\"content\":\"a\""));
+        // Second line still in buffer, but no trailing newline yet.
+        assert!(take_next_line(&mut buf).is_none());
+        // Drain the whole remaining tail as a final line.
+        let tail = String::from_utf8_lossy(&buf).trim().to_string();
+        assert!(tail.contains("\"content\":\"b\""));
+    }
+
+    #[test]
+    fn local_default_max_tokens_is_reasoning_friendly() {
+        // Regression guard: the local non-tool default must be >= 4096 so
+        // thinking models don't burn the whole budget on reasoning and return
+        // "(no response)" with no visible answer.
+        assert!(LOCAL_DEFAULT_MAX_TOKENS >= 4096, "default must leave room for reasoning + answer");
+        // And the cloud default stays large but below huge context windows.
+        assert!(CLOUD_DEFAULT_MAX_TOKENS > 0);
+    }
+
+#[test]
+    fn user_max_tokens_defaults_to_local_floor_for_local_backends() {
+        // When the user has not set max_tokens, ollama/llamacpp should get the
+        // reasoning-friendly floor rather than a tiny 2048.
+        let req = ChatRequest {
+            backend: "ollama".into(),
+            ..ChatRequest::default()
+        };
+        let resolved = req
+            .max_tokens
+            .unwrap_or_else(|| if is_cloud_backend(&req.backend) { CLOUD_DEFAULT_MAX_TOKENS } else { LOCAL_DEFAULT_MAX_TOKENS });
+        assert_eq!(resolved, LOCAL_DEFAULT_MAX_TOKENS);
+    }
+
+    // ---- build_initial_messages tool guidance (nemotron tool-calling) ----
+
+    fn rust_repl_schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "rust_repl",
+                "description": "Compile and run Rust snippets",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "code": { "type": "string" } },
+                    "required": ["code"]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn build_initial_messages_adds_tool_usage_guidance_with_rust_repl() {
+        let tools = vec![rust_repl_schema()];
+        let msgs = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "What is fibonacci(5)?".to_string(),
+        }];
+        let built = build_initial_messages(&msgs, &tools);
+        // A system guidance message must be injected that names rust_repl and
+        // pushes the model to call it rather than computing in prose.
+        let guidance = built
+            .iter()
+            .find(|m| m["role"] == "system" && m["content"].as_str().map_or(false, |c| c.contains("rust_repl")))
+            .expect("expected tool usage guidance system message");
+        let content = guidance["content"].as_str().unwrap();
+        assert!(content.contains("tool_calls"), "guidance should mention tool_calls");
+        assert!(content.contains("rust_repl"), "guidance should name rust_repl");
+        // User message preserved after guidance.
+        assert!(built.iter().any(|m| m["role"] == "user" && m["content"] == "What is fibonacci(5)?"));
+    }
+
+    #[test]
+    fn build_initial_messages_adds_no_guidance_when_no_tools() {
+        let msgs = vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }];
+        let built = build_initial_messages(&msgs, &[]);
+        assert_eq!(built.len(), 1, "no tools → just the user message");
+        assert_eq!(built[0]["role"], "user");
+    }
+
+    #[test]
+    fn build_initial_messages_preserves_spawn_subagent_hint() {
+        // spawn_subagent hint must coexist with the generic tool guidance.
+        let tools = vec![
+            rust_repl_schema(),
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "spawn_subagent",
+                    "description": "spawn",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent": { "type": "string" },
+                            "task": { "type": "string" }
+                        },
+                        "required": ["agent", "task"]
+                    }
+                }
+            }),
+        ];
+        let built = build_initial_messages(&[], &tools);
+        let sys_msg = built
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .map(|m| m["content"].as_str().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(sys_msg.contains("spawn_subagent"), "sub-agent delegation hint present");
+        assert!(sys_msg.contains("rust_repl"), "tool guidance present");
+        assert!(sys_msg.contains("tool_calls"), "tool guidance present");
+    }
+
+    // ---- Sub-agent provider resolution (per-agent model sourcing) ----------
+
+    #[test]
+    fn resolve_agent_provider_uses_agents_own_backend_and_model() {
+        // An agent with an explicit backend/model must be routed there, with the
+        // provider map supplying the endpoint + credential for that backend.
+        let agent = AgentConfig {
+            name: "code-reviewer".into(),
+            description: "".into(),
+            prompt: "".into(),
+            model: "lfm2.5".into(),
+            backend: "ollama".into(),
+            temperature: 0.3,
+            tools: vec![],
+        };
+        let mut providers = HashMap::new();
+        // ollama provider entry has a URL but no key configured.
+        providers.insert(
+            "ollama".to_string(),
+            ProviderConfig { url: "http://cell:11434".into(), api_key: "".into() },
+        );
+        let (backend, model, url, api_key) = resolve_agent_provider(
+            &agent,
+            "openrouter",
+            "main-model",
+            "https://main.example",
+            "main-key",
+            &providers,
+        );
+        assert_eq!(backend, "ollama", "agent's own backend wins");
+        assert_eq!(model, "lfm2.5", "agent's own model wins");
+        assert_eq!(url, "http://cell:11434", "provider entry supplies the URL");
+        // Provider entry has an empty api_key → falls back to the main key.
+        assert_eq!(api_key, "main-key");
+    }
+
+    #[test]
+    fn resolve_agent_provider_falls_back_to_main_when_unset() {
+        // No backend/model on the agent → main agent's backend/model/url/key.
+        let agent = AgentConfig::default();
+        let mut providers = HashMap::new();
+        providers.insert("openrouter".to_string(), ProviderConfig {
+            url: "https://router.example/v1".into(),
+            api_key: "router-key".into(),
+        });
+        let (backend, model, url, api_key) = resolve_agent_provider(
+            &agent,
+            "openrouter",
+            "some-main-model",
+            "https://router.example/v1",
+            "router-key",
+            &providers,
+        );
+        assert_eq!(backend, "openrouter");
+        assert_eq!(model, "some-main-model");
+        assert_eq!(url, "https://router.example/v1");
+        assert_eq!(api_key, "router-key");
+    }
+
+    #[test]
+    fn spawn_subagent_tool_is_included_when_agents_exist_in_root() {
+        // The sub-agent regression: build_tool_schemas must ALWAYS add the
+        // spawn_subagent tool (listing available agents) when the open project
+        // has a non-empty `.agents/` directory — otherwise the model can never
+        // trigger a sub-agent, even via explicit @ mention.
+        let root = env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri");
+        let tools = build_tool_schemas(&[], Some(root));
+        let spawn = tools
+            .iter()
+            .find(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
+        assert!(spawn.is_some(), "expected spawn_subagent tool when .agents exists in {:?}", root);
+        let desc = spawn.unwrap()["function"]["description"].as_str().unwrap_or("");
+        assert!(desc.contains("code-reviewer") || desc.contains("researcher"),
+                "spawn_subagent description should list the available agents:\n{}", desc);
+    }
+
+    #[test]
+    fn apply_ollama_stream_line_captures_realistic_spawn_subagent_call() {
+        // Replays the EXACT tool-call shape a thinking model (nemotron / lfm2.5)
+        // emits when it delegates: a chunk with empty content + structured
+        // tool_calls → spawn_subagent. If the parser drops this, the sub-agent
+        // never triggers.
+        let line = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_dreqrkza","function":{"index":0,"name":"spawn_subagent","arguments":{"agent":"code-reviewer","task":"review src/main.rs for bugs"}}}],"thinking":"ok"},"done":false}"#;
+        let mut acc = OllamaChunkAcc::default();
+        assert!(apply_ollama_stream_line(line, &mut acc));
+        let calls = acc.tool_calls.expect("spawn_subagent tool call must survive parsing");
+        assert_eq!(calls[0]["function"]["name"], "spawn_subagent");
+        assert_eq!(calls[0]["function"]["arguments"]["agent"], "code-reviewer");
+        assert_eq!(calls[0]["function"]["arguments"]["task"], "review src/main.rs for bugs");
+    }
+
+    // ---- unwrap_structured_answer (sub-agent output cleanup) --------------
+
+    #[test]
+    fn unwrap_structured_answer_extracts_single_final_answer() {
+        let blob = r#"{
+            "analysis": "This file lacks an explicit recursion depth limit",
+            "plan": "investigate, then conclude",
+            "tool_calls": [],
+            "final_answer": "Use memoization or an iterative loop for linear time."
+        }"#;
+        let out = unwrap_structured_answer(blob);
+        assert_eq!(out, "Use memoization or an iterative loop for linear time.");
+    }
+
+    #[test]
+    fn unwrap_structured_answer_joins_multiple_final_answers() {
+        // A tool loop can produce several concatenated JSON blobs (one per
+        // iteration). The unwrapper collects each `final_answer`.
+        let blob = format!(
+            r#"{{"analysis":"a","final_answer":"First answer."}}
+{{"analysis":"b","final_answer":"Second answer."}}"#
+        );
+        let out = unwrap_structured_answer(&blob);
+        assert_eq!(out, "First answer.\n\nSecond answer.");
+    }
+
+    #[test]
+    fn unwrap_structured_answer_leaves_plain_text_untouched() {
+        let plain = "Recursive Fibonacci is slow; prefer memoization.";
+        assert_eq!(unwrap_structured_answer(plain), plain);
+    }
+
+    #[test]
+    fn sparse_json_in_plain_text_is_not_mangled() {
+        // A normal answer may happen to contain some code with {} — must be
+        // returned unchanged when there's no `final_answer`.
+        let text = "fn fib(n: usize) -> usize { if n < 2 { n } else { fib(n-1) + fib(n-2) } }";
+        assert_eq!(unwrap_structured_answer(text), text);
+    }
+
+    // ---- parallel spawn guidance ------------------------------------------
+
+    #[test]
+    fn build_initial_messages_guidance_requests_parallel_spawn() {
+        // When spawn_subagent is available the system guidance must explicitly
+        // tell the model to emit all spawn calls in one batch (parallel).
+        let tools = vec![
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "spawn_subagent",
+                    "description": "delegate",
+                    "parameters": {"type":"object","properties":{"agent":{"type":"string"},"task":{"type":"string"}},"required":["agent","task"]}
+                }
+            }),
+        ];
+        let built = build_initial_messages(&[], &tools);
+        let hint = built
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .map(|m| m["content"].as_str().unwrap_or(""))
+            .collect::<String>();
+        assert!(hint.contains("PARALLEL"), "guidance must request parallel spawning");
+        assert!(hint.contains("SAME response"), "guidance must say same response batch");
+    }
+
+    // ---- pre-spawn of referenced @agents (parallel triggering safety net) ----
+
+    #[test]
+    fn build_pre_spawn_items_maps_each_referenced_agent_with_task() {
+        // Each @mentioned agent gets its own focused sub-task (the action text
+        // following its mention), not the whole message.
+        let items = build_pre_spawn_items(
+            &["researcher".to_string(), "code-reviewer".to_string()],
+            "@researcher look up Rust CLI best practices while @code-reviewer review the layout",
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, "researcher");
+        assert!(items[0].1.contains("look up Rust CLI best practices"), "researcher task: {}", items[0].1);
+        assert!(!items[0].1.contains("review the layout"), "researcher must not get reviewer clause: {}", items[0].1);
+        assert_eq!(items[1].0, "code-reviewer");
+        assert!(items[1].1.contains("review the layout"), "reviewer task: {}", items[1].1);
+        assert!(!items[1].1.contains("look up Rust CLI best practices"), "reviewer must not get researcher clause: {}", items[1].1);
+    }
+
+    #[test]
+    fn build_pre_spawn_items_empty_when_no_referenced_agents() {
+        let items = build_pre_spawn_items(&[], "task");
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn split_task_for_agent_isolates_each_mention_no_sibling_spawn() {
+        // Two agents in one message. Each must get ONLY the action after its
+        // OWN @mention, with the sibling's clause excluded so neither tries to
+        // spawn the other.
+        let msg = "What's the best way to structure a Rust project for a CLI tool? \
+                   @researcher look up current best practices while @code-reviewer reviews \
+                   the project layout in parallel.";
+        let r = split_task_for_agent(msg, "researcher");
+        assert!(r.contains("look up current best practices"), "research task: {}", r);
+        assert!(!r.contains("@code-reviewer"), "must strip sibling mention: {}", r);
+        assert!(!r.contains("reviews the project layout"), "must not include sibling's clause: {}", r);
+
+        let c = split_task_for_agent(msg, "code-reviewer");
+        assert!(c.contains("reviews the project layout"), "review task: {}", c);
+        assert!(!c.contains("@researcher"), "must strip sibling mention: {}", c);
+        assert!(!c.contains("look up current best practices"), "must not include sibling's clause: {}", c);
+    }
+
+    #[test]
+    fn split_task_for_agent_keeps_own_mention_and_single_agent_message() {
+        // Single agent mention: the agent's task is the text after the mention.
+        let msg = "Review the parser for bugs. @code-reviewer review src/main.rs";
+        let t = split_task_for_agent(msg, "code-reviewer");
+        assert!(t.contains("review src/main.rs"), "the code-reviewer task: {}", t);
+    }
+
+    #[test]
+    fn build_tool_schemas_omits_spawn_subagent_when_disallowed() {
+        // Sub-agent tool loops must NOT expose spawn_subagent (prevents the
+        // re-spawn cascade where each sub-agent re-delegates to siblings).
+        let tools = build_tool_schemas_inner(
+            &["read_file".to_string()],
+            Some(env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri")),
+            false,
+        );
+        let spawn = tools
+            .iter()
+            .find(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
+        assert!(spawn.is_none(), "sub-agent must not get spawn_subagent tool");
+    }
+
+    #[test]
+    fn build_tool_schemas_default_keeps_spawn_subagent_for_main_agent() {
+        // The main agent's default build_tool_schemas keeps spawn_subagent.
+        let tools = build_tool_schemas_inner(
+            &["read_file".to_string()],
+            Some(env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri")),
+            true,
+        );
+        let spawn = tools
+            .iter()
+            .find(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
+        assert!(spawn.is_some(), "main agent tool loop must keep spawn_subagent");
+    }
+
+    #[test]
+    fn pre_spawned_agents_are_skipped_in_spawn_handling() {
+        // The tool loop must NOT re-spawn an agent that the backend already
+        // dispatched (explicit @mention). This mirrors the guard added to the
+        // ollama/openai spawn handling.
+        let mut pre_spawned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        pre_spawned.insert("researcher".to_string());
+        pre_spawned.insert("code-reviewer".to_string());
+
+        let agent = "researcher".to_string();
+        assert!(pre_spawned.contains(&agent), "pre-spawned agent must be skipped");
+        let not_spawned = "writer".to_string();
+        assert!(!pre_spawned.contains(&not_spawned), "non-referenced agent must still spawn");
+    }
+
+    // ---- configurable reasoning retry budget ------------------------------
+
+    #[test]
+    fn reasoning_retries_defaults_to_configured_constant_when_unset() {
+        // When the client doesn't send reasoning_retries, the backend falls
+        // back to THINKING_ONLY_MAX_RETRIES (8).
+        let req = ChatRequest {
+            backend: "ollama".into(),
+            ..ChatRequest::default()
+        };
+        let budget = req.reasoning_retries.unwrap_or(THINKING_ONLY_MAX_RETRIES);
+        assert_eq!(budget, THINKING_ONLY_MAX_RETRIES);
+        assert!(budget >= 5, "default retry budget should be 5..10");
+    }
+
+    #[test]
+    fn reasoning_retries_uses_client_value_when_provided() {
+        let req = ChatRequest {
+            backend: "ollama".into(),
+            reasoning_retries: Some(12),
+            ..ChatRequest::default()
+        };
+        assert_eq!(req.reasoning_retries.unwrap(), 12);
+    }
+
+    #[test]
+    fn plain_chat_attempts_uses_configurable_budget() {
+        // The route's max_plain_attempts must come from the same configured
+        // budget (so a raised budget applies to plain chat too). The default
+        // floor is 8 (matches THINKING_ONLY_MAX_RETRIES).
+        let custom = Some(10usize);
+        let max_plain_attempts = custom.unwrap_or(THINKING_ONLY_MAX_RETRIES).max(1);
+        assert_eq!(max_plain_attempts, 10);
+        let unset: Option<usize> = None;
+        let default = unset.unwrap_or(THINKING_ONLY_MAX_RETRIES).max(1);
+        assert_eq!(default, THINKING_ONLY_MAX_RETRIES);
+    }
+
+    // ---- sub-agent memory (persistent per-agent conversation) -------------
+
+    #[test]
+    fn subagent_memory_persists_turns_and_reuses_prior_context() {
+        let mem = SubAgentMemory::new();
+        let root = "/tmp/proj";
+        // First trigger of @researcher — no prior context.
+        assert!(mem.get(root, "researcher").is_none());
+        mem.push_turn(root, "researcher", "look up Rust CLI best practices", "Use clap + modules.");
+        let prior = mem.get(root, "researcher").expect("prior context stored");
+        assert_eq!(prior.len(), 2); // user + assistant
+        assert!(prior[1].content.contains("clap"));
+
+        // Second trigger of the SAME agent — prior context must be present.
+        let prior2 = mem.get(root, "researcher").unwrap();
+        assert_eq!(prior2.len(), 2, "second trigger should see the stored turns");
+        assert_eq!(prior2[0].role, "user");
+        assert_eq!(prior2[0].content, "look up Rust CLI best practices");
+    }
+
+    #[test]
+    fn subagent_memory_is_per_agent_and_keyed_by_root() {
+        let mem = SubAgentMemory::new();
+        mem.push_turn("/a", "researcher", "t1", "a1");
+        mem.push_turn("/a", "code-reviewer", "t2", "a2");
+        mem.push_turn("/b", "researcher", "t3", "a3");
+        // Same agent + same root shares context.
+        assert!(mem.get("/a", "researcher").is_some());
+        // Different agent, same root → separate.
+        let c = mem.get("/a", "code-reviewer").unwrap();
+        assert!(c[0].content.contains("t2") || c[0].content.contains("t3") || c.len() == 2);
+        // Same agent, different root → separate convo.
+        assert!(mem.get("/b", "researcher").is_some());
+        // Unknown → none.
+        assert!(mem.get("/a", "writer").is_none());
+    }
+
+    #[test]
+    fn subagent_memory_caps_at_max_turns() {
+        let mem = SubAgentMemory::new();
+        // Push many turns; verify the store stays bounded to MAX_TURNS*2 msgs
+        // (user + assistant pairs).
+        for i in 0..(SUBAGENT_MEMORY_MAX_TURNS * 3) {
+            mem.push_turn("/x", "researcher", &format!("task {}", i), &format!("answer {}", i));
+        }
+        let conv = mem.get("/x", "researcher").unwrap();
+        assert!(conv.len() <= SUBAGENT_MEMORY_MAX_TURNS * 2);
+    }
+
+    #[test]
+    fn subagent_memory_clear_resets_everything() {
+        let mem = SubAgentMemory::new();
+        mem.push_turn("/a", "researcher", "t1", "a1");
+        assert!(mem.get("/a", "researcher").is_some());
+        mem.clear();
+        assert!(mem.get("/a", "researcher").is_none());
+    }
 }

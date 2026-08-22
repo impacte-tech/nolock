@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getSecret, setSecret } from "../lib/secrets";
-import { BACKENDS } from "../lib/backends";
+import { BACKENDS, isPlanningBackend } from "../lib/backends";
 import Select from "./Select";
 
 interface Props {
@@ -137,9 +137,17 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
               >
                 <span className="backend-name">{b.label}</span>
                 <span className="backend-url">{b.defaultUrl}</span>
+                <span className={`backend-role ${isPlanningBackend(b.value) ? "planning" : "executor"}`}>
+                  {isPlanningBackend(b.value) ? "Planning · online" : "Task executor · local"}
+                </span>
               </div>
             ))}
           </div>
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4, lineHeight: 1.5 }}>
+            <strong>Planning</strong> providers (online) act as the main orchestrator model.{" "}
+            <strong>Task executor</strong> providers (local Ollama / llama.cpp) run small,
+            cheap sub-agents that report back — saving tokens on long agentic runs.
+          </span>
 
           <label className="field-label">Server URL</label>
           <input

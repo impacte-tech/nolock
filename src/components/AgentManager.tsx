@@ -392,14 +392,16 @@ ${editing.prompt}`;
               onChange={(e) => updateAgentField("backend", e.target.value)}
             >
               <option value="">Use default chat backend</option>
-              <option value="ollama">Ollama</option>
-              <option value="llamacpp">llama.cpp</option>
-              <option value="openrouter">OpenRouter</option>
-              <option value="opencode">OpenCode Zen</option>
-              <option value="digitalocean">DigitalOcean Inference Router</option>
+              <option value="ollama">Ollama (local executor)</option>
+              <option value="llamacpp">llama.cpp (local executor)</option>
+              <option value="openrouter">OpenRouter (online planning)</option>
+              <option value="opencode">OpenCode Zen (online planning)</option>
+              <option value="digitalocean">DigitalOcean Inference Router (online planning)</option>
             </select>
             <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
               When this agent runs as a sub-agent, it uses this provider instead of the main chat backend.
+              Local executors (Ollama / llama.cpp) are cheap for focused tasks; online planning providers
+              are better for complex reasoning.
             </span>
 
             <label className="field-label">Allowed Tools (comma-separated, optional)</label>

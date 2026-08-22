@@ -21,6 +21,9 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   // Context window used for the context % meter denominator.
   const [contextLength, setContextLength] = useState(128_000);
   const [showThinking, setShowThinking] = useState(false);
+  // Reasoning-only retries — how many times nolock re-prompt after a thinking
+  // model finishes with only reasoning and no answer / tool call.
+  const [reasoningRetries, setReasoningRetries] = useState(8);
 
   useEffect(() => {
     if (!visible) return;
@@ -34,6 +37,8 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     setCloudMaxTokens(localStorage.getItem("nolock.chatCloudMaxTokens") || "");
     const savedCtx = localStorage.getItem("nolock.contextLength");
     setContextLength(savedCtx ? parseInt(savedCtx, 10) : 128_000);
+    const savedRetries = localStorage.getItem("nolock.reasoningRetries");
+    setReasoningRetries(savedRetries ? parseInt(savedRetries, 10) : 8);
     // Chat uses its own provider (falls back to the global one).
     const chatBackend = getChatBackend();
     setBackend(chatBackend);
@@ -55,6 +60,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.chatCloudMaxTokens", cloudMaxTokens);
     localStorage.setItem("nolock.contextLength", String(contextLength));
     localStorage.setItem("nolock.showThinking", String(showThinking));
+    localStorage.setItem("nolock.reasoningRetries", String(reasoningRetries));
     onClose();
   };
 
@@ -74,6 +80,11 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
             onChange={selectBackend}
             options={BACKENDS.map((b) => ({ value: b.value, label: b.label }))}
           />
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+            This is the <strong>Planning provider</strong> — the main orchestrator model that
+            plans, delegates to sub-agents, and synthesizes. Use an online provider (OpenRouter,
+            DigitalOcean) here for the best planning quality, and local models as task executors.
+          </span>
 
           <ModelSelector
             provider={backend}
@@ -176,6 +187,24 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
             Model context window size used to compute the context % meter.
             For Ollama this is auto-detected from the model; set it manually for cloud
             models (e.g. 65536, 128000, 200000).
+          </span>
+
+          <label className="field-label">Reasoning-Only Retries</label>
+          <input
+            className="field-input"
+            type="number"
+            min={1}
+            max={20}
+            step={1}
+            value={reasoningRetries}
+            onChange={(e) => setReasoningRetries(Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 8)))}
+            style={{ width: 90 }}
+          />
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+            How many times nolock re-prompts when a thinking model (nemotron, Qwen3, DeepSeek-R1)
+            finishes a turn with <strong>only reasoning</strong> and no visible answer or tool call.
+            Higher values give stuck models more chances to produce an answer (and are applied to
+            both the agent tool loop and plain chat). Default <strong>8</strong>.
           </span>
 
           <label className="field-label" style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>

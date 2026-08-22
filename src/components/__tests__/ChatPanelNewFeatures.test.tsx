@@ -516,3 +516,127 @@ describe("ChatPanel — stop clears thinking", () => {
     expect(document.querySelector(".thinking-indicator")).toBeNull();
   });
 });
+
+// =========================================================================
+// ChatPanel — nemotron "no answer" regression smoke tests
+//
+// Thinking-capable Ollama models (nemotron, qwen3, deepseek-r1) can behave
+// like this:
+//   * stream a long `thinking` trace, then
+//   * end the generation WITHOUT emitting any `content` token,
+//   * OR produce a response whose only visible content is an empty string.
+// nolock must not leave the user with a silently blank assistant bubble.
+// These smoke tests lock in the frontend contract so a regression that
+// reintroduces "sometimes it just doesn't answer" fails the suite.
+// =========================================================================
+describe("ChatPanel — nemotron no-answer regression", () => {
+  let streamTokenHandler: ((payload: { token: string; thinking: boolean }) => void) | null = null;
+  let resolveInvoke: ((value: any) => void) | null = null;
+
+  beforeEach(() => {
+    resetTauriMocks();
+    localStorage.clear();
+    localStorage.setItem("nolock.backend", "ollama");
+    localStorage.setItem("nolock.url", "http://localhost:11434");
+    localStorage.setItem("nolock.chatModel", "nemotron:9b");
+    streamTokenHandler = null;
+    resolveInvoke = null;
+
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_model_info") return Promise.resolve({ context_length: 8192 });
+      if (cmd === "get_secret") return Promise.resolve(null);
+      if (cmd === "store_secret") return Promise.resolve(null);
+      return new Promise((resolve) => {
+        resolveInvoke = resolve;
+      });
+    });
+
+    (mockListen as any).mockImplementation(async (event: string, cb: any) => {
+      if (event === "stream-token") {
+        streamTokenHandler = cb;
+      }
+      return vi.fn();
+    });
+  });
+
+  afterEach(() => {
+    streamTokenHandler = null;
+    resolveInvoke = null;
+    vi.clearAllTimers();
+  });
+
+  async function sendMessageAndWaitForStream(text: string) {
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
+    const input = screen.getByPlaceholderText(/Ask the AI/);
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.click(screen.getByText("Send"));
+    await waitFor(() => expect(streamTokenHandler).not.toBeNull());
+  }
+
+  it("never dumps thinking into the main chat even when the model returns no real content", async () => {
+    // Nemotron-style: only thinking tokens stream in, then invoke resolves with
+    // empty content. The backend no longer dumps reasoning into the message —
+    // the frontend must show a clear fallback, NOT the model's internal
+    // reasoning trace.
+    await sendMessageAndWaitForStream("Why is this crashing?");
+
+    // Long reasoning bursts stream in with thinking:true. showThinking is OFF
+    // here, so they must be silently discarded (the main chat must not show them).
+    await act(async () => {
+      streamTokenHandler!({ payload: { token: "The stack shows an out-of-bounds read", thinking: true } } as any);
+      streamTokenHandler!({ payload: { token: " in the ring buffer.", thinking: true } } as any);
+    });
+
+    // Invoke resolves with empty content (the "no answer" regression case).
+    await act(async () => {
+      resolveInvoke!({ content: "", tool_calls: [] });
+    });
+
+    // The assistant message must not contain the reasoning trace, and must not
+    // be a visually blank empty string — the frontend's
+    // `responseText || "(no response)"` fallback kicks in.
+    const assistantMsgs = document.querySelectorAll(".chat-msg.assistant .chat-markdown");
+    expect(assistantMsgs.length).toBeGreaterThan(0);
+    const lastMsg = assistantMsgs[assistantMsgs.length - 1];
+    expect(lastMsg?.textContent).toContain("no response");
+    expect(lastMsg?.textContent).not.toContain("out-of-bounds");
+  });
+
+  it("keeps only real content tokens in the final message when thinking streamed first", async () => {
+    // Nemotron produces thinking THEN a normal answer. With showThinking off the
+    // thinking must NOT leak into the assistant bubble, and the answer must.
+    await sendMessageAndWaitForStream("Test");
+
+    await act(async () => {
+      streamTokenHandler!({ payload: { token: "Hmm, let me reason about this carefully and explore each branch of the problem before answering.", thinking: true } } as any);
+      streamTokenHandler!({ payload: { token: "The bug is a null deref in `main.rs`.", thinking: false } } as any);
+    });
+
+    const assistantMsgs = document.querySelectorAll(".chat-msg.assistant .chat-markdown");
+    expect(assistantMsgs.length).toBeGreaterThan(0);
+    const lastMsg = assistantMsgs[assistantMsgs.length - 1];
+    expect(lastMsg?.textContent).toContain("The bug is a null deref");
+    expect(lastMsg?.textContent).not.toContain("Hmm, let me think");
+
+    await act(async () => {
+      resolveInvoke!({ content: "The bug is a null deref.", tool_calls: [] });
+    });
+  });
+
+  it("shows a clear fallback instead of a silent blank when the model returns nothing at all", async () => {
+    // The worst-case regression: model streams nothing (not even thinking) and
+    // returns an empty result. The chat must not leave a trailing empty bubble.
+    await sendMessageAndWaitForStream("ping");
+
+    await act(async () => {
+      resolveInvoke!({ content: "", tool_calls: [] });
+    });
+
+    // No streamed content, no thinking — frontend must surface the fallback
+    // text rather than a blank assistant message.
+    const assistantMsgs = document.querySelectorAll(".chat-msg.assistant .chat-markdown");
+    expect(assistantMsgs.length).toBeGreaterThan(0);
+    const lastMsg = assistantMsgs[assistantMsgs.length - 1];
+    expect(lastMsg?.textContent).toContain("no response");
+  });
+});

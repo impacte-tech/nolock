@@ -1839,29 +1839,53 @@ html, body, #root {
   flex-shrink: 0;
 }
 
-.subagent-spinner {
+/* Status dot — a small CSS circle (no emoji). Pending is a hollow ring;
+   running pulses; done is solid green. */
+.subagent-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--border);
+}
+
+.subagent-status-dot[data-status="pending"] {
+  background: transparent;
+  border: 2px solid var(--text-muted);
+  width: 8px;
+  height: 8px;
+}
+
+.subagent-status-dot[data-status="running"] {
+  background: var(--accent);
+  animation: nolock-spin 0.8s linear infinite;
+  border: 2px solid var(--bg-surface);
   width: 10px;
   height: 10px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: nolock-spin 0.8s linear infinite;
-  flex-shrink: 0;
 }
 
 @keyframes nolock-spin {
   to { transform: rotate(360deg); }
 }
 
-.subagent-status-done {
-  color: #98c379;
-  font-size: 12px;
+.subagent-status-dot[data-status="done"] {
+  background: #98c379;
+}
+
+.subagent-status-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 
 .subagent-name {
   font-weight: 600;
   color: #64b4ff;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
 }
 
 .subagent-model {
@@ -1871,6 +1895,7 @@ html, body, #root {
   border-radius: 3px;
   padding: 1px 5px;
   flex-shrink: 0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
 }
 
 .subagent-task {
@@ -1880,6 +1905,7 @@ html, body, #root {
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+  font-size: 11px;
 }
 
 .subagent-block-body {
@@ -1897,52 +1923,93 @@ html, body, #root {
 .subagent-toolcall {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 10px;
-  color: var(--text-muted);
+  gap: 7px;
+  font-size: 11px;
+  color: var(--text-secondary);
   background: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 3px 8px;
+  padding: 4px 8px;
 }
 
-.subagent-toolcall-done {
-  color: #98c379;
+/* Clean status dot (no emoji) — colour only, like the main agent's windows */
+.subagent-toolcall-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
 }
 
-.subagent-toolcall-error {
-  color: #e06c75;
+.subagent-toolcall-dot[data-status="start"] {
+  background: var(--accent);
+  animation: nolock-spin 0.8s linear infinite;
+  border: 2px solid var(--bg-surface);
+  width: 8px;
+  height: 8px;
+}
+
+.subagent-toolcall-dot[data-status="done"] {
+  background: #98c379;
+}
+
+.subagent-toolcall-dot[data-status="error"] {
+  background: #e06c75;
 }
 
 .subagent-toolcall-status {
+  margin-left: auto;
   flex-shrink: 0;
-  width: 12px;
-  text-align: center;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
 }
 
 .subagent-toolcall-name {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .subagent-toolcall-path {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 10px;
 }
 
-.subagent-thinking {
+.subagent-thinking-box {
   margin: 0 0 6px;
-  padding: 6px 8px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 10px;
-  color: var(--text-muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 160px;
-  overflow: auto;
+}
+
+.subagent-thinking-running {
+  color: var(--accent);
+  font-style: italic;
+}
+
+/* Make the sub-agent's thinking box inherit the main agent's styling but at a
+   slightly smaller scale. */
+.subagent-thinking-box .thinking-indicator-header {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.subagent-thinking-box .thinking-indicator-text {
+  font-size: 11px;
+  max-height: 110px;
+}
+
+/* Body content uses the main agent fonts, slightly smaller. */
+.subagent-block-body .chat-markdown {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.subagent-block-body .chat-markdown pre,
+.subagent-block-body .chat-markdown code {
+  font-size: 11px;
 }
 
 /* ---- Context-nearly-full warning ---- */
@@ -2986,6 +3053,25 @@ select.field-input {
 .backend-url {
   font-size: 10px;
   color: var(--text-muted);
+}
+
+.backend-role {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+.backend-role.planning {
+  color: var(--accent);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.backend-role.executor {
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .modal-footer {
