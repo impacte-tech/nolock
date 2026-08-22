@@ -1975,6 +1975,37 @@ struct ChatResult {
     content: String,
     #[serde(default)]
     tool_calls: Vec<ToolCallLog>,
+    /// Total tokens of the context the model actually processed for this
+    /// request — the full outgoing messages PLUS every tool iteration and any
+    /// injected sub-agent results. The frontend uses this (when > 0) as the
+    /// authoritative session token count / context meter numerator so the
+    /// UI reflects what the main agent really sent (not just the frontend's
+    /// estimate of the first payload).
+    #[serde(default)]
+    context_tokens: u64,
+}
+
+/// Rough token estimate for text (chars / 4, the same heuristic the rest of
+/// the backend uses). Consistent so the context meter matches the request
+/// caps the backend computes.
+fn estimate_chat_tokens(text: &str) -> u64 {
+    (text.chars().count() as u64 / 4) + 1
+}
+
+/// Sum the estimated token count of a full message list — used to report the
+/// real context the model processed (including injected `[Sub-agent @X result]`
+/// system messages added by the pre-spawn step).
+fn estimate_messages_tokens(messages: &[ChatMessage]) -> u64 {
+    messages.iter().map(|m| estimate_chat_tokens(&m.content)).sum()
+}
+
+/// Estimate tokens from a serde_json message array (used by the tool loops for
+/// the `context_tokens` report — the full conversation the model processed,
+/// including assistant tool-call messages and tool results).
+fn estimate_json_messages_tokens(msgs: &[serde_json::Value]) -> u64 {
+    msgs.iter()
+        .filter_map(|m| m["content"].as_str().map(estimate_chat_tokens))
+        .sum()
 }
 
 /// A single old/new text pair from an `edit` tool call.
@@ -4750,6 +4781,7 @@ async fn ollama_chat_with_tools(
             if full_content.is_empty() && all_tool_calls.is_empty() {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
+            let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content);
             return Ok(ChatResult {
                 content: if full_content.is_empty() {
                     "(no response)".to_string()
@@ -4757,6 +4789,7 @@ async fn ollama_chat_with_tools(
                     full_content
                 },
                 tool_calls: all_tool_calls,
+                context_tokens,
             });
         }
     }
@@ -4768,6 +4801,7 @@ async fn ollama_chat_with_tools(
         full_content.len(),
         all_tool_calls.len()
     );
+    let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content);
     Ok(ChatResult {
         content: if full_content.is_empty() {
             "(max tool iterations reached, no response)".to_string()
@@ -4775,6 +4809,7 @@ async fn ollama_chat_with_tools(
             full_content
         },
         tool_calls: all_tool_calls,
+        context_tokens,
     })
 }
 
@@ -5275,6 +5310,7 @@ async fn run_openai_tool_loop(
             if full_content.is_empty() && all_tool_calls.is_empty() {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
+            let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content);
             return Ok(ChatResult {
                 content: if full_content.is_empty() {
                     "(no response)".to_string()
@@ -5282,6 +5318,7 @@ async fn run_openai_tool_loop(
                     full_content
                 },
                 tool_calls: all_tool_calls,
+                context_tokens,
             });
         }
     }
@@ -5293,6 +5330,7 @@ async fn run_openai_tool_loop(
         full_content.len(),
         all_tool_calls.len()
     );
+    let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content);
     Ok(ChatResult {
         content: if full_content.is_empty() {
             "(max tool iterations reached, no response)".to_string()
@@ -5300,6 +5338,7 @@ async fn run_openai_tool_loop(
             full_content
         },
         tool_calls: all_tool_calls,
+        context_tokens,
     })
 }
 
@@ -5966,6 +6005,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 Ok(ChatResult {
                     content: final_content,
                     tool_calls: vec![],
+                    context_tokens: estimate_messages_tokens(&messages),
                 })
             }
         }
@@ -6051,9 +6091,11 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     }
                 }
             }
+            let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
             Ok(ChatResult {
                 content: full_content,
                 tool_calls: vec![],
+                context_tokens: ctx_tokens_estimate,
             })
         }
         "openrouter" => {
@@ -6168,9 +6210,11 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     }
                 }
             }
+            let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
             Ok(ChatResult {
                 content: full_content,
                 tool_calls: vec![],
+                context_tokens: ctx_tokens_estimate,
             })
         }
         "opencode" => {
@@ -6258,9 +6302,11 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                         }
                     }
                 }
+                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
                 Ok(ChatResult {
                     content: full_content,
                     tool_calls: vec![],
+                    context_tokens: ctx_tokens_estimate,
                 })
             } else {
                 // Local OpenCode Zen — Ollama-compatible NDJSON streaming
@@ -6339,9 +6385,11 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                         }
                     }
                 }
+                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
                 Ok(ChatResult {
                     content: full_content,
                     tool_calls: vec![],
+                    context_tokens: ctx_tokens_estimate,
                 })
             }
         }
@@ -8562,5 +8610,39 @@ mod tests {
         assert!(mem.get("/a", "researcher").is_some());
         mem.clear();
         assert!(mem.get("/a", "researcher").is_none());
+    }
+
+    // ---- session token accounting (context meter) -------------------------
+
+    #[test]
+    fn estimate_chat_tokens_counts_chars_divided_by_4() {
+        assert_eq!(estimate_chat_tokens("hello world"), 3); // 11 chars / 4 = 2, + 1
+        assert_eq!(estimate_chat_tokens(""), 1); // empty -> 1 (floor)
+        assert_eq!(estimate_chat_tokens("a"), 1);
+    }
+
+    #[test]
+    fn estimate_messages_tokens_sums_each_message() {
+        let msgs = vec![
+            ChatMessage { role: "user".to_string(), content: "How do I write fib?".to_string() },
+            ChatMessage { role: "assistant".to_string(), content: "Use recursion.".to_string() },
+        ];
+        let total = estimate_messages_tokens(&msgs);
+        assert_eq!(total, msgs.iter().map(|m| (m.content.chars().count() as u64 / 4) + 1).sum::<u64>());
+        assert!(total > 0);
+    }
+
+    #[test]
+    fn estimate_json_messages_tokens_counts_content_only() {
+        // A tool-loop message array with assistant tool calls + tool results.
+        let msgs = serde_json::json!([
+            {"role":"user","content":"run the code"},
+            {"role":"assistant","content":"","tool_calls":[]},
+            {"role":"tool","content":"0"} // result
+        ]);
+        let arr = msgs.as_array().unwrap();
+        let total = estimate_json_messages_tokens(arr);
+        // Non-empty content lines counted; empty assistant tool-call line counted as 1.
+        assert!(total >= 2);
     }
 }

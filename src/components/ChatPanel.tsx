@@ -1573,6 +1573,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
       if (stopRequestedRef.current) return;
 
+      // Use the backend's reported context tokens (full request context incl.
+      // tool iterations) as the authoritative session count when available.
+      if (result) {
+        const reportedCtx = (result as { context_tokens?: number }).context_tokens || 0;
+        if (reportedCtx > 0) {
+          setAccumulatedContextTokens(reportedCtx);
+        }
+      }
+
       // Finalize — append the complete response to the existing assistant message
       const responseText = result.content || "";
       setMessages((prev) => {
@@ -1587,7 +1596,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         return msgs;
       });
 
-      if (responseText) {
+      // Append only our freshly-streamed estimate when the backend did NOT report
+      // exact context tokens (avoids double-counting the same response).
+      if (responseText && !(result as { context_tokens?: number }).context_tokens) {
         const respTokens = countTokens(responseText);
         if (respTokens > 0) {
           setAccumulatedContextTokens((prev) => prev + respTokens);
@@ -2207,9 +2218,18 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           return;
         }
 
-        // Accumulate assistant response tokens
+        // Accumulate assistant response tokens. When the backend reports the exact
+        // context tokens it processed for this request (including ALL tool-loop
+        // iterations and any injected sub-agent results), use that as the
+        // authoritative session token count — it always reflects the real
+        // context the model consumed, not just the frontend's estimate of the
+        // outgoing payload.
         const responseText = result.content || "";
-        if (responseText) {
+        const reportedCtx = (result as { context_tokens?: number }).context_tokens || 0;
+        if (reportedCtx > 0) {
+          // The backend's report is the total context for the whole request.
+          setAccumulatedContextTokens(reportedCtx);
+        } else {
           const respTokens = countTokens(responseText);
           if (respTokens > 0) {
             setAccumulatedContextTokens((prev) => prev + respTokens);

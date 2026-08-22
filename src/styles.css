@@ -1996,6 +1996,22 @@ html, body, #root {
   font-size: 11px;
 }
 
+.subagent-thinking-box .thinking-indicator-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.subagent-thinking-box .thinking-indicator-chevron {
+  font-size: 7px;
+}
+
+.subagent-thinking-box .thinking-indicator-spinner {
+  width: 8px;
+  height: 8px;
+  border-width: 1.5px;
+}
+
 .subagent-thinking-box .thinking-indicator-text {
   font-size: 11px;
   max-height: 110px;

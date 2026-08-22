@@ -141,9 +141,12 @@ export interface RlhfData {
 /**
  * Sanitise a provider+model pair for use as a filesystem directory name.
  * Replaces anything that isn't alphanumeric, underscore, or hyphen with '_'.
+ * The pair is trimmed first so a stray trailing space in a model name (e.g.
+ * an Ollama model pasted with a trailing space) can't leak a trailing '_'
+ * into the directory name.
  */
-function sanitiseModelKey(provider: string, model: string): string {
-  const raw = `${provider}_${model}`;
+export function sanitiseModelKey(provider: string, model: string): string {
+  const raw = `${provider.trim()}_${model.trim()}`;
   return raw.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
@@ -211,7 +214,9 @@ export function getModelConfigurations(): ModelConfig {
  */
 export function getModelContext(): { provider: string; model: string } {
   const backend = getChatBackend();
-  const chatModel = localStorage.getItem("nolock.chatModel") || "";
+  // Trim so a stray trailing space in the stored model name never flows into
+  // saved feedback (model_name) or the KTO/DPO folder key.
+  const chatModel = (localStorage.getItem("nolock.chatModel") || "").trim();
   return { provider: backend, model: chatModel };
 }
 
