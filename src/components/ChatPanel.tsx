@@ -98,7 +98,9 @@ interface SubAgentLiveState {
   agent: string;
   task: string;
   model: string;
-  status: "running" | "done";
+  /** pending → running → done. Pending means the agent was dispatched (e.g.
+   *  pre-spawned from an @mention) but hasn't started its tool loop yet. */
+  status: "pending" | "running" | "done";
   content: string;
   thinking: string;
   toolCalls: SubAgentLiveToolCall[];
@@ -483,36 +485,73 @@ function FileChangesBlock({ changes }: { changes: FileChange[] }) {
 /** A single sub-agent "window" — collapsible, live-streamed, inspectable. */
 function SubAgentBlock({ sa }: { sa: SubAgentLiveState }) {
   const [expanded, setExpanded] = useState(false);
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const thinkingRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll the thinking content as new tokens arrive (mirrors the main
+  // ThinkingIndicator behaviour).
+  useEffect(() => {
+    if (thinkingExpanded && thinkingRef.current) {
+      thinkingRef.current.scrollTop = thinkingRef.current.scrollHeight;
+    }
+  }, [sa.thinking, thinkingExpanded]);
+
   return (
     <div className={`subagent-block${sa.status === "running" ? " running" : ""}`}>
       <div className="subagent-block-header" onClick={() => setExpanded((e) => !e)}>
         <span className="subagent-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
-        {sa.status === "running" ? (
-          <span className="subagent-spinner" />
-        ) : (
-          <span className="subagent-status-done">&#10003;</span>
-        )}
+        <span className="subagent-status-dot" data-status={sa.status} />
         <span className="subagent-name">@{sa.agent}</span>
         <span className="subagent-model">{sa.model}</span>
         <span className="subagent-task" title={sa.task}>{sa.task}</span>
+        <span className="subagent-status-label">
+          {sa.status === "pending" ? "pending" : sa.status === "running" ? "running" : "done"}
+        </span>
       </div>
       {expanded && (
         <div className="subagent-block-body">
+          {/* Live tool progress — styled like the main agent's tool-call
+              windows but at a smaller scale. */}
           {sa.toolCalls.length > 0 && (
             <div className="subagent-toolcalls">
               {sa.toolCalls.map((tc, i) => (
                 <div key={i} className={`subagent-toolcall subagent-toolcall-${tc.status}`}>
-                  <span className="subagent-toolcall-status">
-                    {tc.status === "done" ? "\u2713" : tc.status === "error" ? "\u2717" : "\u2022"}
-                  </span>
+                  <span className="subagent-toolcall-dot" data-status={tc.status} />
                   <span className="subagent-toolcall-name">{tc.name}</span>
                   {tc.path && <span className="subagent-toolcall-path">{tc.path}</span>}
+                  <span className="subagent-toolcall-status">
+                    {tc.status === "start" ? "running" : tc.status === "error" ? "error" : "done"}
+                  </span>
                 </div>
               ))}
             </div>
           )}
+          {/* Thinking — collapsible, expandable box like the main agent's
+              ThinkingIndicator (not a raw <pre> dump). */}
           {sa.thinking && (
-            <pre className="subagent-thinking">{sa.thinking}</pre>
+            <div className="subagent-thinking-box">
+              <div
+                className="subagent-thinking-header"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setThinkingExpanded((t) => !t);
+                }}
+              >
+                <span className="thinking-indicator-chevron">
+                  {thinkingExpanded ? "\u25BC" : "\u25B6"}
+                </span>
+                <span className="thinking-indicator-spinner" />
+                <span className="thinking-indicator-label">Thinking...</span>
+                <span className="thinking-indicator-chars">
+                  {countTokens(sa.thinking).toLocaleString()} tokens
+                </span>
+              </div>
+              {thinkingExpanded && (
+                <div className="thinking-indicator-body" ref={thinkingRef}>
+                  <pre className="thinking-indicator-text">{sa.thinking}</pre>
+                </div>
+              )}
+            </div>
           )}
           <MarkdownContent text={sa.content || (sa.status === "running" ? "Working…" : "(no output)")} />
         </div>
@@ -868,16 +907,34 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     track(listen<{ id: string; agent: string; task: string; model: string }>("subagent-start", (e) => {
       setSubAgents((prev) => {
-        // De-dup by agent + task so a repeated spawn doesn't open a second window.
-        if (prev.some((sa) => sa.agent === e.payload.agent && sa.task === e.payload.task)) {
-          return prev;
+        // A repeated spawn of the sAME @agent (e.g. a follow-up turn in the
+        // conversation) CONTINUES the same window rather than opening a new one:
+        // the backend re-injects the agent's prior conversation context, so we
+        // keep the window, bump it back to pending, refresh its task/model, and
+        // preserve any prior content as historical context.
+        const existing = prev.find((sa) => sa.agent === e.payload.agent);
+        if (existing) {
+          return prev.map((sa) =>
+            sa.agent === e.payload.agent
+              ? {
+                  ...sa,
+                  id: e.payload.id,
+                  task: e.payload.task,
+                  model: e.payload.model,
+                  status: "pending" as const,
+                  // Keep prior content/thinking/toolCalls as history; but clear
+                  // toolCalls for the fresh run and reset running state.
+                  toolCalls: sa.toolCalls,
+                }
+              : sa
+          );
         }
         return [...prev, {
           id: e.payload.id,
           agent: e.payload.agent,
           task: e.payload.task,
           model: e.payload.model,
-          status: "running",
+          status: "pending",
           content: "",
           thinking: "",
           toolCalls: [],
@@ -888,16 +945,20 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     track(listen<{ id: string; token: string; thinking: boolean }>("subagent-token", (e) => {
       setSubAgents((prev) => prev.map((sa) => {
         if (sa.id !== e.payload.id) return sa;
-        if (e.payload.thinking) return { ...sa, thinking: sa.thinking + e.payload.token };
-        return { ...sa, content: sa.content + e.payload.token };
+        // First token → the sub-agent has started its tool loop.
+        const status = sa.status === "pending" ? "running" : sa.status;
+        if (e.payload.thinking) return { ...sa, status, thinking: sa.thinking + e.payload.token };
+        return { ...sa, status, content: sa.content + e.payload.token };
       }));
     }));
 
     track(listen<{ id: string; type: string; name: string; path?: string }>("subagent-tool-progress", (e) => {
       setSubAgents((prev) => prev.map((sa) => {
         if (sa.id !== e.payload.id) return sa;
+        // First tool progress → the sub-agent has started its tool loop.
+        const status = sa.status === "pending" ? "running" : sa.status;
         if (e.payload.type === "start") {
-          return { ...sa, toolCalls: [...sa.toolCalls, { name: e.payload.name, status: "start", path: e.payload.path }] };
+          return { ...sa, status, toolCalls: [...sa.toolCalls, { name: e.payload.name, status: "start", path: e.payload.path }] };
         }
         const next = [...sa.toolCalls];
         for (let i = next.length - 1; i >= 0; i--) {
@@ -906,12 +967,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             break;
           }
         }
-        return { ...sa, toolCalls: next };
+        return { ...sa, status, toolCalls: next };
       }));
     }));
 
     track(listen<{ id: string; result: string }>("subagent-done", (e) => {
-      setSubAgents((prev) => prev.map((sa) => sa.id === e.payload.id ? { ...sa, status: "done" } : sa));
+      setSubAgents((prev) => prev.map((sa) => sa.id === e.payload.id
+        ? { ...sa, status: "done", content: e.payload.result }
+        : sa));
     }));
 
     return () => {
@@ -1286,6 +1349,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setThinkingText("");
     setRoutedModel(null);
     setSubAgents([]);
+    // A fresh session resets each sub-agent's conversation memory on the
+    // backend so the next @agent trigger starts with clean context.
+    try { await invoke("subagent_reset"); } catch {}
     try { setSessions(await listSessions(rootPath)); } catch {}
   }, [rootPath, sessionId, messages]);
 
@@ -1764,12 +1830,55 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       return;
     }
 
+    // ---- Resolve ALL @agent mentions from the input text ----
+    // agentRefs is only populated when the user picks an agent from the
+    // autocomplete dropdown. When a user types (or pastes) `@researcher
+    // @code-reviewer` as plain text — the common case — those mentions never
+    // reach agentRefs, so the backend wouldn't pre-spawn them and the model's
+    // single unreliable spawn_subagent call would be the only trigger. Here we
+    // parse every `@name` token from the message and union them with any
+    // dropdown-selected agentRefs so the backend pre-spawns ALL of them in
+    // parallel.
+    let effectiveAgentRefs = agentRefs;
+    try {
+      const mentionNames = Array.from(
+        new Set((trimmed.match(/@(\w[\w.\/-]*)/g) || []).map((m) => m.slice(1)))
+      );
+      if (mentionNames.length > 0) {
+        const agentEntries: { name: string; path: string }[] = await invoke("list_agents", { rootPath });
+        const missing = mentionNames.filter(
+          (n) => !effectiveAgentRefs.some((r) => r.name === n)
+        );
+        for (const entry of agentEntries) {
+          if (!missing.includes(entry.name)) continue;
+          try {
+            const data: any = await invoke("read_agent", { path: entry.path });
+            effectiveAgentRefs = [
+              ...effectiveAgentRefs,
+              { name: entry.name, path: entry.path, description: data.description || "" },
+            ];
+          } catch {
+            effectiveAgentRefs = [...effectiveAgentRefs, { name: entry.name, path: entry.path, description: "" }];
+          }
+        }
+      }
+      // De-duplicate by name so a single agent is never pre-spawned twice.
+      const seen = new Set<string>();
+      effectiveAgentRefs = effectiveAgentRefs.filter((r) => {
+        if (seen.has(r.name)) return false;
+        seen.add(r.name);
+        return true;
+      });
+    } catch (e) {
+      console.warn("[nolock] failed to resolve @mentions to agents:", e);
+    }
+
     // ---- Build display content (what the user sees in chat) ----
     // The @mentions and /mentions are already embedded in the input text (kept on autocomplete select).
     // We just show the message as-is, with context badges below.
     const contextRefs: { type: "file" | "directory" | "agent" | "skill" | "tool"; name: string }[] = [
       ...fileRefs.map((r) => ({ type: r.isDir ? ("directory" as const) : ("file" as const), name: r.name })),
-      ...agentRefs.map((r) => ({ type: "agent" as const, name: r.name })),
+      ...effectiveAgentRefs.map((r) => ({ type: "agent" as const, name: r.name })),
       ...skillRefs.map((r) => ({ type: "skill" as const, name: r.name })),
       ...toolRefs.map((r) => ({ type: "tool" as const, name: r.name })),
     ];
@@ -1828,9 +1937,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       }
     }
 
-    // Build system message from agent prompts
+    // Build system message from agent prompts. The orchestrator (planning model)
+    // stays on the main chat provider; the referenced agents are SPAWNED as
+    // sub-agents via spawn_subagent (each runs on its own configured provider/
+    // model — per-agent model sourcing on @ trigger). We collect the prompts as
+    // context and emit an explicit spawn directive below.
     const agentSystemMessages: { role: "system"; content: string }[] = [];
-    for (const agent of agentRefs) {
+    let agentInvocationDirective = "";
+    for (const agent of effectiveAgentRefs) {
       try {
         const data: any = await invoke("read_agent", { path: agent.path });
         if (data.prompt) {
@@ -1839,6 +1953,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       } catch (e) {
         console.error(`Failed to read agent prompt for ${agent.name}:`, e);
       }
+    }
+    if (effectiveAgentRefs.length > 0) {
+      const names = effectiveAgentRefs.map((r) => `@${r.name}`).join(", ");
+      agentInvocationDirective =
+        `The user explicitly invoked the following agent(s): ${names}. ` +
+        "These agents have been dispatched by the system and their results are provided " +
+        "in the system context above (each runs on its own configured provider/model). " +
+        "Do NOT call spawn_subagent for them again. Incorporate their results into your " +
+        "final answer that directly addresses the user's original request.";
     }
 
     // Collect tool directives — tell the AI to use specific tools
@@ -1892,11 +2015,16 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     let unlisten: (() => void) | null = null;
     try {
+      // The orchestrator runs on the PLANNING provider (main chat backend/model).
+      // Referenced @agents are spawned as sub-agents (see agentInvocationDirective)
+      // and each runs on its own configured provider/model inside run_subagent.
+      // This keeps the delegation/sub-agent pipeline active — routing the whole
+      // request to the agent's own model would swallow the spawn_subagent trigger.
       const backend = getChatBackend();
       const url = resolveBackendUrl(backend);
-      const chatModel = localStorage.getItem("nolock.chatModel") || "";
+      const model = localStorage.getItem("nolock.chatModel") || "";
 
-      if (!chatModel) {
+      if (!model) {
         setMessages((prev) => [
           ...prev,
           { role: "assistant", content: "No chat model configured. Open AI Integrations settings to set one." },
@@ -1909,7 +2037,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       // Read per-backend API key from keychain (fallback: localStorage)
       const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
 
-      // Read enabled tools from localStorage
+      // Read enabled tools from localStorage. spawn_subagent is added by the
+      // backend whenever agents exist, so the orchestrator can delegate.
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
 
@@ -1934,10 +2063,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       }
 
       // Build common API messages — completed hook runs become system context,
-      // then any agent system prompts, then the conversation history (with tool
-      // calls from previous assistant messages).
+      // then any agent system prompts, then the explicit @agent spawn directive
+      // (when agents were referenced), then the conversation history.
       const apiMessages = [
         ...agentSystemMessages,
+        ...(agentInvocationDirective
+          ? [{ role: "system" as const, content: agentInvocationDirective }]
+          : []),
         ...allMessages.flatMap((m): { role: "user" | "assistant" | "system"; content: string }[] => {
           if (m.hookResult) {
             return [{
@@ -1976,7 +2108,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const reqBase = {
         backend,
         url,
-        model: chatModel,
+        model,
         messages: apiMessages,
         apiKey: apiKey || null,
         toolsEnabled,
@@ -1989,6 +2121,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
         modelAffinity: getDigitalOceanModelAffinity(),
         providers: buildProvidersMap(),
+        // Reasoning-only retry budget from the Chat Model panel (default 8).
+        reasoningRetries: parseInt(localStorage.getItem("nolock.reasoningRetries") || "8", 10),
+        // Agents explicitly referenced via @mentions — the backend pre-spawns
+        // them in parallel and injects their results as context.
+        referencedAgents: effectiveAgentRefs.map((r) => r.name),
       };
 
       if (dpoTriggered) {

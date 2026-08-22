@@ -1,20 +1,35 @@
 // Shared model-provider (backend) definitions and helpers.
 
+export type BackendRole = "planning" | "executor";
+
 export interface BackendInfo {
   value: string;
   label: string;
   defaultUrl: string;
   /** Whether this backend requires an API key. */
   needsApiKey: boolean;
+  /**
+   * Role of this provider:
+   * - "planning" — hosted/online providers (OpenRouter, OpenCode Zen, DigitalOcean)
+   *   used as the main orchestrator model that plans, delegates, and synthesizes.
+   * - "executor" — local providers (Ollama, llama.cpp) used as small, cheap task
+   *   executors for sub-agents.
+   */
+  role: BackendRole;
 }
 
 export const BACKENDS: BackendInfo[] = [
-  { value: "ollama", label: "Ollama", defaultUrl: "http://localhost:11434", needsApiKey: false },
-  { value: "llamacpp", label: "llama.cpp", defaultUrl: "http://localhost:8080", needsApiKey: false },
-  { value: "openrouter", label: "OpenRouter", defaultUrl: "https://openrouter.ai/api/v1", needsApiKey: true },
-  { value: "opencode", label: "OpenCode Zen", defaultUrl: "https://opencode.ai/zen/v1", needsApiKey: true },
-  { value: "digitalocean", label: "DigitalOcean Inference Router", defaultUrl: "https://inference.do-ai.run/v1", needsApiKey: true },
+  { value: "ollama", label: "Ollama", defaultUrl: "http://localhost:11434", needsApiKey: false, role: "executor" },
+  { value: "llamacpp", label: "llama.cpp", defaultUrl: "http://localhost:8080", needsApiKey: false, role: "executor" },
+  { value: "openrouter", label: "OpenRouter", defaultUrl: "https://openrouter.ai/api/v1", needsApiKey: true, role: "planning" },
+  { value: "opencode", label: "OpenCode Zen", defaultUrl: "https://opencode.ai/zen/v1", needsApiKey: true, role: "planning" },
+  { value: "digitalocean", label: "DigitalOcean Inference Router", defaultUrl: "https://inference.do-ai.run/v1", needsApiKey: true, role: "planning" },
 ];
+
+/** Whether a backend is a hosted/online "planning" provider (vs a local executor). */
+export function isPlanningBackend(backend: string): boolean {
+  return BACKENDS.find((b) => b.value === backend)?.role === "planning";
+}
 
 export function backendDefaultUrl(backend: string): string {
   return BACKENDS.find((b) => b.value === backend)?.defaultUrl || "http://localhost:11434";

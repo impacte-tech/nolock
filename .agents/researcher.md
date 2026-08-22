@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Researches a topic (web + files) and returns a concise sourced summary
-model: qwen3.5:9b-mlx
+model: lfm2.5
 backend: ollama
 temperature: 0.7
 tools: web_search, web_fetch, read_file, grep
