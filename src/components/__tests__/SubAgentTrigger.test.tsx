@@ -46,6 +46,8 @@ function setupAgentMocks(chatModel = "nemotron:9b") {
     if (cmd === "get_model_info") return Promise.resolve({ context_length: 8192 });
     if (cmd === "get_secret") return Promise.resolve(null);
     if (cmd === "store_secret") return Promise.resolve(null);
+    if (cmd === "append_to_file") return Promise.resolve(null);
+    if (cmd === "create_dir_all") return Promise.resolve(null);
     return Promise.resolve({ content: "Test response", tool_calls: [] });
   });
 }
@@ -90,6 +92,8 @@ function setupInvokeWithDeferredAiChat() {
     if (cmd === "get_model_info") return Promise.resolve({ context_length: 8192 });
     if (cmd === "get_secret") return Promise.resolve(null);
     if (cmd === "store_secret") return Promise.resolve(null);
+    if (cmd === "append_to_file") return Promise.resolve(null);
+    if (cmd === "create_dir_all") return Promise.resolve(null);
     // ai_chat hangs until the test resolves it.
     return new Promise((resolve: any) => {
       aiChatResolver = resolve;
@@ -386,6 +390,94 @@ describe("ChatPanel — sub-agent trigger (@agent → spawn_subagent)", () => {
       expect(indicator).toBeInTheDocument();
       const title = indicator?.getAttribute("title") || "";
       expect(title).toContain("4,096");
+    });
+  }, 15000);
+
+  it("supports KTO thumbs-up on a completed sub-agent", async () => {
+    // Sub-agents now have the same KTO (thumbs up/down) mechanism as the main
+    // chat. Clicking thumbs up on a done sub-agent must save KTO feedback with
+    // the sub-agent's task as the prompt and its model, then mark the window.
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} rootPath="/root" />);
+    await waitFor(() => expect(subagentStartHandler).not.toBeNull());
+    await waitFor(() => expect(subagentDoneHandler).not.toBeNull());
+
+    // A completed sub-agent with content.
+    await act(async () => {
+      subagentStartHandler?.({ payload: { id: "sa_kto", agent: "code-reviewer", task: "review src/main.rs", model: "nemotron:9b" } });
+      subagentTokenHandler?.({ payload: { id: "sa_kto", token: "The code has a bug.", thinking: false } });
+      subagentDoneHandler?.({ payload: { id: "sa_kto", result: "The code has a bug." } });
+    });
+
+    // Expand the sub-agent so the thumbs-up button is available.
+    await act(async () => {
+      fireEvent.click(screen.getByText(/@code-reviewer/));
+    });
+
+    // The thumbs-up button appears (same rlhf-btn-up style as the main chat).
+    const thumbsUp = await screen.findByLabelText("Thumbs up");
+    await act(async () => {
+      fireEvent.click(thumbsUp);
+    });
+
+    // The window flips to a "Saved" badge — mirroring the main KTO UX.
+    await waitFor(() => {
+      expect(document.querySelectorAll(".subagent-block .rlhf-badge-saved").length).toBe(1);
+    });
+
+    // A KTO good entry must have been written via append_to_file.
+    await waitFor(() => {
+      const called = (mockInvoke as any).mock.calls.some(
+        ([cmd, args]: [string, any]) =>
+          cmd === "append_to_file" &&
+          args &&
+          typeof args.path === "string" &&
+          args.path.includes("kto/good/")
+      );
+      expect(called).toBe(true);
+    });
+  }, 15000);
+
+  it("supports KTO thumbs-down with a correction on a completed sub-agent", async () => {
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} rootPath="/root" />);
+    await waitFor(() => expect(subagentStartHandler).not.toBeNull());
+    await waitFor(() => expect(subagentDoneHandler).not.toBeNull());
+
+    await act(async () => {
+      subagentStartHandler?.({ payload: { id: "sa_kto2", agent: "researcher", task: "find sources", model: "nemotron:9b" } });
+      subagentTokenHandler?.({ payload: { id: "sa_kto2", token: "No sources found.", thinking: false } });
+      subagentDoneHandler?.({ payload: { id: "sa_kto2", result: "No sources found." } });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/@researcher/));
+    });
+
+    const thumbsDown = await screen.findByLabelText("Thumbs down");
+    await act(async () => {
+      fireEvent.click(thumbsDown);
+    });
+
+    // Correction input appears (same as main chat).
+    await waitFor(() => {
+      expect(document.querySelector(".subagent-block .rlhf-correction-label")).toBeInTheDocument();
+    });
+
+    const input = document.querySelector(".subagent-block textarea") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "Use more recent sources" } });
+    await act(async () => {
+      fireEvent.click(screen.getByText("Submit Feedback"));
+    });
+
+    // A KTO bad entry must be written with the correction.
+    await waitFor(() => {
+      const called = (mockInvoke as any).mock.calls.some(
+        ([cmd, args]: [string, any]) =>
+          cmd === "append_to_file" &&
+          args &&
+          typeof args.path === "string" &&
+          args.path.includes("kto/bad/")
+      );
+      expect(called).toBe(true);
     });
   }, 15000);
 });

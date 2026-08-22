@@ -104,6 +104,12 @@ interface SubAgentLiveState {
   content: string;
   thinking: string;
   toolCalls: SubAgentLiveToolCall[];
+  /** RLHF feedback: "good" (thumbs up), "bad" (thumbs down), or undefined (not rated). */
+  feedback?: FeedbackType;
+  /** True while waiting for the user to type a correction after clicking thumbs down. */
+  feedbackPending?: boolean;
+  /** Optional correction text when feedback is "bad". */
+  feedbackCorrection?: string;
 }
 
 export interface ToolCallLog {
@@ -483,7 +489,19 @@ function FileChangesBlock({ changes }: { changes: FileChange[] }) {
 }
 
 /** A single sub-agent "window" — collapsible, live-streamed, inspectable. */
-function SubAgentBlock({ sa }: { sa: SubAgentLiveState }) {
+function SubAgentBlock({
+  sa,
+  onThumbsUp,
+  onThumbsDown,
+  onCorrection,
+  onCancelCorrection,
+}: {
+  sa: SubAgentLiveState;
+  onThumbsUp: (id: string) => void;
+  onThumbsDown: (id: string) => void;
+  onCorrection: (id: string, correction: string) => void;
+  onCancelCorrection: (id: string) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const thinkingRef = useRef<HTMLDivElement>(null);
@@ -554,9 +572,69 @@ function SubAgentBlock({ sa }: { sa: SubAgentLiveState }) {
             </div>
           )}
           <MarkdownContent text={sa.content || (sa.status === "running" ? "Working…" : "(no output)")} />
-        </div>
-      )}
-    </div>
+
+            {/* RLHF feedback buttons — shown after sub-agent response is complete */}
+            {sa.content && sa.status === "done" && (
+              <div className="rlhf-actions">
+                {sa.feedback === "good" ? (
+                  <span className="rlhf-badge rlhf-badge-saved" title="You marked this as helpful">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                      <polyline points="17 21 17 13 7 13 7 21" />
+                      <polyline points="7 3 7 8 15 8" />
+                    </svg>
+                    Saved
+                  </span>
+                ) : sa.feedback === "bad" ? (
+                  <span className="rlhf-badge rlhf-badge-saved" title="You marked this as needing improvement">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                      <polyline points="17 21 17 13 7 13 7 21" />
+                      <polyline points="7 3 7 8 15 8" />
+                    </svg>
+                    Saved
+                  </span>
+                ) : sa.feedbackPending ? (
+                  <div className="rlhf-correction-area">
+                    <div className="rlhf-correction-header">
+                      <span className="rlhf-correction-label">What could be improved? (optional but helpful)</span>
+                    </div>
+                    <CorrectionInput
+                      onSubmit={(correction) => onCorrection(sa.id, correction)}
+                      onCancel={() => onCancelCorrection(sa.id)}
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      className="rlhf-btn rlhf-btn-up"
+                      onClick={() => onThumbsUp(sa.id)}
+                      title="Mark as helpful"
+                      aria-label="Thumbs up"
+                    >
+<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M7 10v12" />
+                        <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z" />
+                      </svg>
+                    </button>
+                    <button
+                      className="rlhf-btn rlhf-btn-down"
+                      onClick={() => onThumbsDown(sa.id)}
+                      title="Report as incorrect or unhelpful"
+                      aria-label="Thumbs down"
+                    >
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M17 14V2" />
+                        <path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z" />
+                      </svg>
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
   );
 }
 
@@ -1240,9 +1318,20 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setToolRefs((prev) => prev.filter((r) => r.path !== path));
   }, []);
 
+  // Auto-scroll to the latest message only when the user is already at the
+  // bottom of the conversation. If the user scrolls UP (e.g. to inspect a
+  // sub-agent window while the primary agent keeps writing), we must NOT yank
+  // the scroll position back down — the stream appearing above them shouldn't
+  // make the screen jump. Once they scroll back to the bottom, it resumes.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const isAtBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (isAtBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages, subAgents]);
 
   // Single delegated click handler on the persistent container — catches all
   // link clicks from dangerouslySetInnerHTML content that React can't handle.
@@ -1792,6 +1881,104 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       console.error("[rlhf] Failed to save DPO feedback:", e);
     }
   }, [messages, rootPath, findQuestionForAssistant]);
+
+  /** Handle thumbs up for a sub-agent — save as a good example immediately. */
+  const handleSubAgentThumbsUp = useCallback(async (subAgentId: string) => {
+    setSubAgents((prev) => {
+      const sa = prev.find((sa) => sa.id === subAgentId);
+      if (!sa) return prev;
+      return prev.map((sa) =>
+        sa.id === subAgentId
+          ? { ...sa, feedback: "good", feedbackPending: false }
+          : sa
+      );
+    });
+
+    const sa = subAgents.find((sa) => sa.id === subAgentId);
+    if (!sa) return;
+
+    const modelCtx = getModelContext();
+    const configs = getModelConfigurations();
+
+    const data: RlhfData = {
+      feedback_type: "good",
+      model_provider: modelCtx.provider,
+      model_name: sa.model,
+      model_configurations: configs,
+      timestamp: new Date().toISOString(),
+      question: sa.task,
+      answer: sa.content,
+      user_correction: "",
+    };
+
+    try {
+      await saveRlhfFeedback(rootPath, data);
+    } catch (e) {
+      console.error("[rlhf] Failed to save sub-agent good feedback:", e);
+    }
+  }, [rootPath, subAgents]);
+
+  /** Handle thumbs down for a sub-agent — open the correction input. */
+  const handleSubAgentThumbsDown = useCallback((subAgentId: string) => {
+    setSubAgents((prev) =>
+      prev.map((sa) =>
+        sa.id === subAgentId ? { ...sa, feedbackPending: true } : sa
+      )
+    );
+  }, []);
+
+  /** Cancel a pending thumbs-down correction for a sub-agent. */
+  const cancelSubAgentCorrection = useCallback((subAgentId: string) => {
+    setSubAgents((prev) =>
+      prev.map((sa) =>
+        sa.id === subAgentId ? { ...sa, feedbackPending: false } : sa
+      )
+    );
+  }, []);
+
+  /** Submit a correction for a sub-agent thumbs-down rating and save. */
+  const handleSubAgentCorrection = useCallback(
+    async (subAgentId: string, correction: string) => {
+      setSubAgents((prev) => {
+        const sa = prev.find((sa) => sa.id === subAgentId);
+        if (!sa) return prev;
+        return prev.map((sa) =>
+          sa.id === subAgentId
+            ? {
+                ...sa,
+                feedback: "bad",
+                feedbackPending: false,
+                feedbackCorrection: correction.trim() || undefined,
+              }
+            : sa
+        );
+      });
+
+      const sa = subAgents.find((sa) => sa.id === subAgentId);
+      if (!sa) return;
+
+      const modelCtx = getModelContext();
+      const configs = getModelConfigurations();
+
+      const data: RlhfData = {
+        feedback_type: "bad",
+        model_provider: modelCtx.provider,
+        model_name: sa.model,
+        model_configurations: configs,
+        timestamp: new Date().toISOString(),
+        question: sa.task,
+        answer: sa.content,
+        user_correction: correction.trim() || "(no correction provided)",
+      };
+
+      try {
+        await saveRlhfFeedback(rootPath, data);
+      } catch (e) {
+        console.error("[rlhf] Failed to save sub-agent bad feedback:", e);
+      }
+    },
+    [rootPath, subAgents]
+  );
 
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
@@ -2499,7 +2686,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         {subAgents.length > 0 && (
           <div className="subagents">
             {subAgents.map((sa) => (
-              <SubAgentBlock key={sa.id} sa={sa} />
+              <SubAgentBlock
+                key={sa.id}
+                sa={sa}
+                onThumbsUp={handleSubAgentThumbsUp}
+                onThumbsDown={handleSubAgentThumbsDown}
+                onCorrection={handleSubAgentCorrection}
+                onCancelCorrection={cancelSubAgentCorrection}
+              />
             ))}
           </div>
         )}

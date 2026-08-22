@@ -3768,6 +3768,24 @@ select.field-input {
   opacity: 1;
 }
 
+/* Sub-agent windows keep the same KTO (thumbs up/down) control and style as
+   the main chat assistant, just slightly more compact. The body hover also
+   reveals the actions. */
+.subagent-block-body .rlhf-actions {
+  margin-top: 6px;
+  padding-top: 5px;
+  opacity: 1;
+}
+
+.subagent-block-body .rlhf-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.subagent-block-body .rlhf-badge {
+  font-size: 10px;
+}
+
 .rlhf-btn {
   background: none;
   border: none;
