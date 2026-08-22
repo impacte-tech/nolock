@@ -368,6 +368,9 @@ struct AgentConfig {
     temperature: f64,
     /// Empty = use the default standard tool set.
     tools: Vec<String>,
+    /// When true, the sub-agent must fully inspect before answering
+    /// (used e.g. by the code-reviewer so it doesn't return too early).
+    thorough: bool,
 }
 
 /// Load a single agent's config from `.agents/<name>.md` or `.agents/<name>.json`.
@@ -405,6 +408,7 @@ fn load_agent_config(root_path: &str, name: &str) -> Result<AgentConfig, String>
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default(),
+        thorough: parsed["thorough"].as_bool().unwrap_or(false),
     })
 }
 
@@ -1439,43 +1443,9 @@ async fn get_model_info(req: ModelInfoRequest) -> Result<ModelInfoResult, String
             let data: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
 
-            // 1. Try "parameters" string (user‑set num_ctx override)
-            if let Some(params) = data["parameters"].as_str() {
-                for line in params.lines() {
-                    let trimmed = line.trim();
-                    if let Some(num_str) = trimmed.strip_prefix("num_ctx ") {
-                        if let Ok(ctx) = num_str.trim().parse::<u32>() {
-                            eprintln!("[nolock] get_model_info: num_ctx={} (from parameters)", ctx);
-                            return Ok(ModelInfoResult { context_length: ctx });
-                        }
-                    }
-                }
-            }
-
-            // 2. Try model_info.<architecture>.context_length (native)
-            if let Some(model_info) = data["model_info"].as_object() {
-                if let Some(arch) = model_info
-                    .get("general.architecture")
-                    .and_then(|v| v.as_str())
-                {
-                    let key = format!("{}.context_length", arch);
-                    if let Some(ctx) = model_info.get(&key).and_then(|v| v.as_u64()) {
-                        eprintln!(
-                            "[nolock] get_model_info: native context_length={} (from {})",
-                            ctx, key
-                        );
-                        return Ok(ModelInfoResult {
-                            context_length: ctx as u32,
-                        });
-                    }
-                }
-            }
-
-            // 3. Fallback — common default for Ollama models
-            eprintln!(
-                "[nolock] get_model_info: could not determine context length, using default 8192"
-            );
-            Ok(ModelInfoResult { context_length: 8192 })
+            let ctx = parse_ollama_context_length(&data);
+            eprintln!("[nolock] get_model_info: context_length={}", ctx);
+            Ok(ModelInfoResult { context_length: ctx })
         }
         _ => {
             // Non‑Ollama backends default to 128k (covers GPT‑4o, Claude 3.5, etc.)
@@ -1489,6 +1459,48 @@ async fn get_model_info(req: ModelInfoRequest) -> Result<ModelInfoResult, String
 // ---------------------------------------------------------------------------
 // Model listing (proxied through Rust to avoid CORS issues)
 // ---------------------------------------------------------------------------
+
+/// Parse the model's context length from an Ollama `/api/show` response.
+///
+/// Priority:
+///   1. The model's NATIVE `context_length` (its true max token capability).
+///      The Modelfile's `num_ctx` (e.g. 32k) is only the default window Ollama
+///      loads — it is NOT the model's ceiling. The context meter should show
+///      the model's true max so the user knows how much context is available.
+///   2. The user-set `num_ctx` override in the Modelfile parameters (only when
+///      the native length is unavailable).
+///   3. A conservative default (8192).
+///
+/// Pure — unit-testable.
+fn parse_ollama_context_length(data: &serde_json::Value) -> u32 {
+    // 1. Native context length (max capability).
+    if let Some(model_info) = data["model_info"].as_object() {
+        if let Some(arch) = model_info
+            .get("general.architecture")
+            .and_then(|v| v.as_str())
+        {
+            let key = format!("{}.context_length", arch);
+            if let Some(ctx) = model_info.get(&key).and_then(|v| v.as_u64()) {
+                return ctx as u32;
+            }
+        }
+    }
+
+    // 2. User-set num_ctx override in parameters.
+    if let Some(params) = data["parameters"].as_str() {
+        for line in params.lines() {
+            let trimmed = line.trim();
+            if let Some(num_str) = trimmed.strip_prefix("num_ctx ") {
+                if let Ok(ctx) = num_str.trim().parse::<u32>() {
+                    return ctx;
+                }
+            }
+        }
+    }
+
+    // 3. Fallback.
+    8192
+}
 
 /// Heuristic: is this OpenCode Zen model free?
 ///
@@ -2382,17 +2394,33 @@ async fn run_subagent(
 
 // Wrap the agent prompt with sub-agent operating instructions so it stays
     // focused and returns a final answer instead of looping on tools.
-    let system_prompt = format!(
-        "{}\n\n[Sub-agent operating instructions]\n\
-         Complete the task above and return a single final answer. Use tools only \
+    // Wrap the agent prompt with sub-agent operating instructions so it stays
+    // focused and returns a final answer instead of looping on tools. The
+    // "thorough" variant (used e.g. by code-reviewer) instructs the model to
+    // actually inspect the relevant files with tools before concluding, instead
+    // of returning a shallow answer too early.
+    let ops = if agent.thorough {
+        "Complete the task above and return a single final answer. You MUST actually \
+         inspect the material with your tools before concluding — listing a directory \
+         is NOT enough. Read the key files (config/manifest, main entry points, and the \
+         highest-risk files for the task) and grep for issues. Only write the final \
+         answer after you have genuinely read the relevant content. Do not conclude \
+         that you have \"enough info\" from a directory listing alone. Use your tools \
+         repeatedly until the task is properly done; do not call the same tool \
+         redundantly without a reason."
+    } else {
+        "Complete the task above and return a single final answer. Use tools only \
          when necessary; do not call the same tool repeatedly and do not re-read the \
          same file. Once you have enough information, stop calling tools and write \
-         your answer directly.\n\n\
+         your answer directly."
+    };
+    let system_prompt = format!(
+        "{}\n\n[Sub-agent operating instructions]\n{}\n\n\
          Do NOT ask yourself questions and then answer them. Do NOT role-play multiple \
          personas or write out an internal back-and-forth dialogue. Do NOT produce a \
          long chain-of-thought before answering. State your answer once, directly and \
          concisely.",
-        agent.prompt
+        agent.prompt, ops
     );
 
     // Build the sub-agent's message list. When this agent has been spawned
@@ -2439,7 +2467,15 @@ async fn run_subagent(
     } else {
         msgs.push(ChatMessage { role: "user".to_string(), content: task.to_string() });
     }
-    let sub_iterations = runner.max_iterations.min(SUBAGENT_MAX_ITERATIONS);
+    // Local sub-agents (ollama/llamacpp) don't need a tighter iteration cap —
+    // the user can configure max_iterations globally, and caps cause local
+    // reviewers to hit "max tool iterations" before finishing. Only cap when
+    // the backend is a paid/compute-expensive remote provider.
+    let sub_iterations = if backend == "ollama" || backend == "llamacpp" {
+        runner.max_iterations
+    } else {
+        runner.max_iterations.min(SUBAGENT_MAX_ITERATIONS)
+    };
 
     runner
         .app_handle
@@ -2556,18 +2592,36 @@ const MAX_CONCURRENT_SUBAGENTS: usize = 2;
 /// gets concatenated into the final context the main model sees.
 ///
 /// `unwrap_structured_answer` detects this and returns ONLY the final answer:
-///   - if the whole text parses as JSON with a `final_answer` string → that;
+///   - if the whole text parses as JSON with a non-empty `final_answer` → that;
+///   - if `final_answer` is empty but `analysis` is present (the model planned
+///     more work but didn't finish), return the analysis so the user at least
+///     sees the reasoning instead of raw JSON;
 ///   - otherwise it scans for top-level `{...}` JSON objects and joins every
 ///     `final_answer` it finds (a tool loop can emit several concatenated
 ///     blobs, e.g. one per iteration);
-///   - if she finds no JSON answer, returns the text unchanged.
+///   - if no JSON answer is found, returns the text unchanged.
 fn unwrap_structured_answer(content: &str) -> String {
     // Fast path: the entire output is one structured JSON answer.
     if content.trim_start().starts_with('{') {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
+            // If the blob also carries planned next_steps / tool_calls, the
+            // model still wants to work — the loop will consume those, so we
+            // return the analysis (not a premature final_answer).
+            let has_planned = ["next_steps", "tool_calls"].iter().any(|k| {
+                v.get(*k)
+                    .and_then(|a| a.as_array())
+                    .map_or(false, |a| !a.is_empty())
+            });
             if let Some(fa) = v.get("final_answer").and_then(|f| f.as_str()) {
-                if !fa.trim().is_empty() {
+                if !fa.trim().is_empty() && !has_planned {
                     return fa.trim().to_string();
+                }
+            }
+            // The model planned more work but produced no final answer yet.
+            // Surface the analysis (reasoning) rather than the raw JSON.
+            if let Some(analysis) = v.get("analysis").and_then(|f| f.as_str()) {
+                if !analysis.trim().is_empty() {
+                    return analysis.trim().to_string();
                 }
             }
         }
@@ -2636,6 +2690,188 @@ fn unwrap_structured_answer(content: &str) -> String {
     } else {
         final_answers.join("\n\n")
     }
+}
+
+/// Extract tool calls the model *planned* in a structured-JSON blob
+/// (`next_steps` / `tool_calls` arrays) but did NOT emit as real tool_calls.
+/// Some local models (e.g. lfm2.5) respond to a task with a planning JSON
+/// instead of actually invoking tools — this lets the tool loop feed those
+/// planned steps back as real tool calls so the sub-agent actually does the
+/// work instead of returning early.
+///
+/// Robust to the sloppy shapes these local models emit:
+///   - `{"tool_name": "grep", "arguments": {...}}`
+///   - `{"name": "web_search", "arguments": {...}}`
+///   - sometimes the whole array (or individual entries) is malformed (extra
+///     braces, trailing commas). In that case we fall back to scanning for
+///     well-formed `{"tool_name"|"name": "...", "arguments": {...}}` objects.
+fn extract_planned_tool_calls(content: &str) -> Vec<serde_json::Value> {
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(content);
+    if let Ok(v) = parsed {
+        let mut calls: Vec<serde_json::Value> = Vec::new();
+        if let Some(keys) = v.as_object() {
+            for key in ["next_steps", "tool_calls"] {
+                if let Some(arr) = keys.get(key).and_then(|a| a.as_array()) {
+                    for item in arr {
+                        let name = item
+                            .get("tool_name")
+                            .or_else(|| item.get("name"))
+                            .and_then(|n| n.as_str());
+                        if let Some(name) = name {
+                            // Skip entries whose "name" is actually a whole CLI
+                            // command string (e.g. `grep -r "import" ... | head`).
+                            if name.contains(' ') || name.contains('|') || name.contains("--include") {
+                                continue;
+                            }
+                            let args = item.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+                            calls.push(serde_json::json!({
+                                "function": { "name": name, "arguments": args }
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        if !calls.is_empty() {
+            return calls;
+        }
+    }
+
+    // Fallback: whole blob was malformed — find each `"tool_name"` / `"name"`
+    // occurrence and parse the enclosing `{ ... }` object as an individual
+    // tool-entry. This survives sloppy structural errors (extra braces,
+    // trailing garbage) as long as each entry itself is well-formed enough.
+    let mut calls: Vec<serde_json::Value> = Vec::new();
+    let chars: Vec<char> = content.chars().collect();
+    // Find occurrences of `tool_name` or `"name"` (the name-bearing keys).
+    let name_keys: Vec<&str> = vec!["\"tool_name\"", "\"name\""];
+    for key in name_keys {
+        let key_chars: Vec<char> = key.chars().collect();
+        let mut search = 0usize;
+        while let Some(pos) = find_subsequence(&chars, &key_chars, search) {
+            // Walk backwards to the object's opening brace.
+            let mut at_open = None;
+            let mut k = pos;
+            while k > 0 {
+                k -= 1;
+                // Find the nearest `{` before pos; verify it closes after pos.
+                if chars[k] == '{' {
+                    if let Some(close) = matching_brace(&chars, k) {
+                        if close >= pos.saturating_add(key_chars.len()) {
+                            at_open = Some(k);
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(open_idx) = at_open {
+                if let Some(close_idx) = matching_brace(&chars, open_idx) {
+                    let slice: String = chars[open_idx..=close_idx].iter().collect();
+                    if let Ok(item) = serde_json::from_str::<serde_json::Value>(&slice) {
+                        if let Some(obj) = item.as_object() {
+                            let name = obj
+                                .get("tool_name")
+                                .or_else(|| obj.get("name"))
+                                .and_then(|n| n.as_str());
+                            if let Some(name) = name {
+                                if !name.contains(' ') && !name.contains('|') && !name.contains("--include") {
+                                    let args = obj.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+                                    let already = calls.iter().any(|c| {
+                                        c["function"]["name"] == name
+                                            && c["function"]["arguments"] == args
+                                    });
+                                    if !already {
+                                        calls.push(serde_json::json!({
+                                            "function": { "name": name, "arguments": args }
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    search = close_idx + 1;
+                    continue;
+                }
+            }
+            search = pos + 1;
+        }
+    }
+    calls
+}
+
+/// Index of the first occurrence of `needle` in `haystack` starting at `start`,
+/// or `None`.
+fn find_subsequence(haystack: &[char], needle: &[char], start: usize) -> Option<usize> {
+    if needle.is_empty() || start >= haystack.len() {
+        return None;
+    }
+    for i in start..=haystack.len().saturating_sub(needle.len()) {
+        if haystack[i..i + needle.len()] == *needle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Detect whether `content` is a "still planning" structured-JSON blob — i.e.
+/// the model explicitly says it is NOT done (`"conclusion": false`) or carries
+/// an empty final_answer. In that case the tool loop must keep going (bounded
+/// by retries) instead of returning the planning JSON as a final answer.
+fn is_planning_json(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(content) else {
+        // Multi-blob / malformed: treat as "still planning" only if it contains
+        // a conclusion:false marker.
+        return content.contains("\"conclusion\":false")
+            || content.contains("\"conclusion\": false");
+    };
+    if let Some(c) = v.get("conclusion").and_then(|c| c.as_bool()) {
+        if !c {
+            return true;
+        }
+    }
+    if let Some(fa) = v.get("final_answer").and_then(|f| f.as_str()) {
+        if fa.trim().is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Find the matching closing brace for the `{` at `open`, skipping string
+/// literals. Returns `Some(index)` of the `}` or `None`.
+fn matching_brace(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for k in open..chars.len() {
+        let cc = chars[k];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if cc == '\\' {
+                escaped = true;
+            } else if cc == '"' {
+                in_string = false;
+            }
+        } else {
+            match cc {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(k);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// Build the `(agent, task, is_dup)` items used to pre-spawn explicitly
@@ -4728,12 +4964,76 @@ async fn ollama_chat_with_tools(
                 full_content.push('\n');
             }
         } else {
-            // No tool calls — final response, unless the model only reasoned
+            // No real tool_calls streamed. But some local models (lfm2.5)
+            // respond with a structured JSON *planning* blob instead of invoking
+            // tools:
+            //   {"analysis": "...", "next_steps": [{"tool_name": "grep", ...}], "final_answer": ""}
+            // Treat that as "wants more tool rounds": execute the planned steps
+            // as real tool calls and continue the loop instead of surfacing the
+            // JSON (or returning too early).
+            let planned = extract_planned_tool_calls(&stream.iter_content);
+            if !planned.is_empty() {
+                eprintln!(
+                    "[nolock] ollama tool loop: executing {} planned step(s) from structured JSON",
+                    planned.len()
+                );
+                // Remove the JSON planning text from the accumulated content so
+                // it never shows up in the final answer.
+                full_content.truncate(full_content.len().saturating_sub(stream.iter_content.len()));
+                for (pi, tc) in planned.into_iter().enumerate() {
+                    let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+                    let args = tc["function"]["arguments"].clone();
+                    let tool_call_id = format!("call_planned_{}_{}", iteration, pi);
+                    let tool_path = args["path"].as_str().map(String::from);
+                    emit_tool_progress(ctx.app_handle, subagent_id, "start", &name, tool_path.clone());
+                    let (result, file_changes) =
+                        execute_tool_tracked(&name, &args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
+                            .await
+                            .unwrap_or_else(|e| {
+                                emit_tool_progress(ctx.app_handle, subagent_id, "error", &name, tool_path.clone());
+                                (format!("Tool error: {}", e), Vec::new())
+                            });
+                    emit_tool_progress(ctx.app_handle, subagent_id, "done", &name, tool_path);
+                    let snippet = if result.len() > 200 {
+                        format!("{}...", &result[..200])
+                    } else {
+                        result.clone()
+                    };
+                    all_tool_calls.push(ToolCallLog {
+                        name: name.clone(),
+                        arguments: serde_json::to_string(&args).unwrap_or_default(),
+                        result_snippet: snippet,
+                        result_full: result.clone(),
+                        file_changes,
+                        subagent: None,
+                    });
+                    ollama_msgs.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": stream.iter_content,
+                        "tool_calls": [{
+                            "id": tool_call_id,
+                            "function": { "name": name, "arguments": args }
+                        }]
+                    }));
+                    ollama_msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": result
+                    }));
+                }
+                continue;
+            }
+
+            // Otherwise it's a final response, unless the model only reasoned
             // and never produced a visible answer or tool call. In that case
             // retry (bounded) with an escalating reminder so the user gets a
             // real answer rather than "(no response)" or a dump of the
-            // thinking trace.
-            if stream.iter_content.is_empty() && !stream.iter_thinking.is_empty() {
+            // thinking trace. A "still planning" JSON (conclusion:false / empty
+            // final_answer) is also NOT a final answer — keep looping.
+            let planning_state = stream.iter_content.is_empty()
+                && !stream.iter_thinking.is_empty()
+                || is_planning_json(&stream.iter_content);
+            if planning_state {
                 if thinking_only_retries < thinking_only_max_retries {
                     thinking_only_retries += 1;
                     eprintln!(
@@ -4782,11 +5082,18 @@ async fn ollama_chat_with_tools(
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
             let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content);
+            // If we gave up on a "still planning" JSON, surface the readable
+            // analysis rather than the raw structured-JSON dump.
+            let final_content = if is_planning_json(&full_content) {
+                unwrap_structured_answer(&full_content)
+            } else {
+                full_content.clone()
+            };
             return Ok(ChatResult {
-                content: if full_content.is_empty() {
+                content: if final_content.is_empty() {
                     "(no response)".to_string()
                 } else {
-                    full_content
+                    final_content
                 },
                 tool_calls: all_tool_calls,
                 context_tokens,
@@ -8277,6 +8584,7 @@ mod tests {
             backend: "ollama".into(),
             temperature: 0.3,
             tools: vec![],
+            thorough: false,
         };
         let mut providers = HashMap::new();
         // ollama provider entry has a URL but no key configured.
@@ -8392,6 +8700,113 @@ mod tests {
         // returned unchanged when there's no `final_answer`.
         let text = "fn fib(n: usize) -> usize { if n < 2 { n } else { fib(n-1) + fib(n-2) } }";
         assert_eq!(unwrap_structured_answer(text), text);
+    }
+
+    #[test]
+    fn unwrap_structured_answer_falls_back_to_analysis_when_final_empty() {
+        // The code-reviewer (lfm2.5) sometimes emits a planning JSON with an
+        // EMPTY final_answer + an analysis + next_steps. We must NOT surface the
+        // raw JSON — surface the analysis instead.
+        let blob = r#"{
+            "analysis": "I explored the project structure. To review properly I should grep for secrets and read the key files.",
+            "next_steps": [
+                {"tool_name": "grep", "arguments": {"pattern": "process.env"}}
+            ],
+            "final_answer": ""
+        }"#;
+        let out = unwrap_structured_answer(blob);
+        assert!(out.contains("I explored the project structure"), "got: {}", out);
+        assert!(!out.contains("next_steps"), "raw JSON leaked: {}", out);
+        assert!(!out.contains("{"), "raw JSON leaked: {}", out);
+    }
+
+    #[test]
+    fn extract_planned_tool_calls_reads_next_steps_shape() {
+        let blob = r#"{
+            "analysis": "need to inspect",
+            "next_steps": [
+                {"tool_name": "grep", "arguments": {"pattern": "secret", "path": "/p"}},
+                {"tool_name": "read_file", "arguments": {"path": "/p/src/lib.rs"}}
+            ],
+            "final_answer": ""
+        }"#;
+        let calls = extract_planned_tool_calls(blob);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["function"]["name"], "grep");
+        assert_eq!(calls[0]["function"]["arguments"]["pattern"], "secret");
+        assert_eq!(calls[1]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn extract_planned_tool_calls_reads_tool_calls_shape_and_returns_empty_for_plain() {
+        // The alternate shape uses "name" instead of "tool_name".
+        let blob = r#"{"tool_calls": [{"name": "web_search", "arguments": {"query": "rust"}}]}"#;
+        let calls = extract_planned_tool_calls(blob);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "web_search");
+        // Plain text has no planned calls.
+        assert!(extract_planned_tool_calls("just a plain answer").is_empty());
+        // Garbage JSON → empty.
+        assert!(extract_planned_tool_calls("not json at all").is_empty());
+    }
+
+    #[test]
+    fn extract_planned_tool_calls_survives_malformed_blob() {
+        // Realistic lfm2.5 code-reviewer output: the next_steps array contains a
+        // well-formed grep + read_file, plus a malformed entry (extra braces) and
+        // a whole-CLI string. The extractor must still return the valid steps so
+        // the loop executes them instead of surfacing raw JSON.
+        let blob = r#"{
+            "analysis": "Need to inspect the structure",
+            "next_steps": [
+                {"tool_name": "list_directory", "arguments": {"path": "/p/src"}},
+                {"tool_name": "read_file", "arguments": {"path": "/p/package.json"}}},
+                {"tool_name": "grep -r \"import\" /p --include=\"*.ts\" | head -20",
+                 "context": 0, "pattern": "(test|spec|tests)"}
+            ],
+            "final_answer": "No further calls needed; we have enough info."
+        }"#;
+        let calls = extract_planned_tool_calls(blob);
+        assert_eq!(calls.len(), 2, "should extract only the 2 well-formed steps");
+        assert_eq!(calls[0]["function"]["name"], "list_directory");
+        assert_eq!(calls[1]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn unwrap_structured_answer_ignores_final_when_planned_steps_exist() {
+        // When the blob carries next_steps/tool_calls, the model still wants to
+        // work — the final_answer ("we have enough info") must NOT be surfaced.
+        let blob = r#"{
+            "analysis": "I explored the project structure.",
+            "next_steps": [{"tool_name": "grep", "arguments": {"pattern": "secret"}}],
+            "final_answer": "No further calls needed; we have enough info."
+        }"#;
+        let out = unwrap_structured_answer(blob);
+        assert!(!out.contains("No further calls"), "premature final surfaced: {}", out);
+        assert!(out.contains("I explored"), "analysis should surface: {}", out);
+    }
+
+    #[test]
+    fn is_planning_json_detects_conclusion_false_and_empty_final() {
+        // conclusion:false → still planning (must keep looping).
+        let blob = r#"{"analysis": "A", "tool_calls": [], "conclusion": false}"#;
+        assert!(is_planning_json(blob), "conclusion:false must be planning");
+        // Empty final_answer → still planning.
+        let blob2 = r#"{"analysis": "B", "final_answer": ""}"#;
+        assert!(is_planning_json(blob2), "empty final_answer must be planning");
+        // Non-empty final_answer + no conclusion → done.
+        let done = r#"{"analysis": "C", "final_answer": "Here is the review."}"#;
+        assert!(!is_planning_json(done), "non-empty final_answer must NOT be planning");
+        // Plain text → not planning.
+        assert!(!is_planning_json("This is a normal answer."));
+    }
+
+    #[test]
+    fn is_planning_json_detects_conclusion_false_in_malformed_multi() {
+        // Even with accumulated/malformed content, the conclusion:false marker
+        // must flag it as still-planning (so we don't surface raw JSON).
+        let content = r#"{"analysis": "first"}{"analysis": "second", "conclusion": false}"#;
+        assert!(is_planning_json(content));
     }
 
     // ---- parallel spawn guidance ------------------------------------------
@@ -8644,5 +9059,58 @@ mod tests {
         let total = estimate_json_messages_tokens(arr);
         // Non-empty content lines counted; empty assistant tool-call line counted as 1.
         assert!(total >= 2);
+    }
+
+    // ---- local sub-agents are not capped by SUBAGENT_MAX_ITERATIONS --------
+
+    #[test]
+    fn local_subagent_iterations_are_not_capped() {
+        // Local (ollama/llamacpp) sub-agents must use the user's configured
+        // iteration budget directly — the tight cap made code-reviewer hit
+        // "max tool iterations" before finishing its inspection.
+        let runner_max = 14usize;
+        for backend in ["ollama", "llamacpp"] {
+            let capped = if backend == "ollama" || backend == "llamacpp" {
+                runner_max
+            } else {
+                runner_max.min(SUBAGENT_MAX_ITERATIONS)
+            };
+            assert_eq!(capped, runner_max, "backend {} must not be capped", backend);
+        }
+        // Cloud sub-agents still get the tighter budget.
+        let cloud = 14usize.min(SUBAGENT_MAX_ITERATIONS);
+        assert_eq!(cloud, SUBAGENT_MAX_ITERATIONS);
+    }
+
+    // ---- context length parsing (native > num_ctx) ------------------------
+
+    #[test]
+    fn parse_ollama_context_length_prefers_native_over_num_ctx() {
+        // nemotron-nano-9b-v2: native context_length = 1,048,576 (1M), but the
+        // Modelfile sets num_ctx=32768. The meter must show the model's MAX
+        // capability (1M), not the default load window (32k).
+        let data = serde_json::json!({
+            "parameters": "temperature 0.7\nnum_ctx 32768\nnum_gpu 99",
+            "model_info": {
+                "general.architecture": "nemotron_h",
+                "nemotron_h.context_length": 1048576
+            }
+        });
+        assert_eq!(parse_ollama_context_length(&data), 1_048_576);
+    }
+
+    #[test]
+    fn parse_ollama_context_length_falls_back_to_num_ctx_when_no_native() {
+        let data = serde_json::json!({
+            "parameters": "num_ctx 16384",
+            "model_info": { "general.architecture": "llama" }
+        });
+        assert_eq!(parse_ollama_context_length(&data), 16_384);
+    }
+
+    #[test]
+    fn parse_ollama_context_length_defaults_when_unknown() {
+        let data = serde_json::json!({ "parameters": "temperature 0.5" });
+        assert_eq!(parse_ollama_context_length(&data), 8192);
     }
 }
