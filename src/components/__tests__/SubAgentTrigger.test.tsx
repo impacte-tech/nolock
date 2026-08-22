@@ -359,4 +359,33 @@ describe("ChatPanel — sub-agent trigger (@agent → spawn_subagent)", () => {
     expect(block?.textContent).toContain("@researcher");
     expect(block?.textContent).toContain("task two (follow-up)");
   });
+
+  it("uses the backend-reported context_tokens for the session context meter", async () => {
+    // Regression: the context meter used to only count the frontend's estimate
+    // of the outgoing payload, missing tool-loop iterations and injected
+    // sub-agent results — making the session token count look LOWER than the
+    // context the main agent + sub-agents actually consumed. The backend now
+    // returns `context_tokens` (the real full-context count) and the UI must
+    // reflect it.
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} rootPath="/root" />);
+    const input = screen.getByPlaceholderText(/Ask the AI/) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(screen.getByText("Send"));
+
+    await waitFor(() => expect(aiChatResolver).not.toBeNull());
+
+    // Backend reports a large context usage (e.g. 4096 tokens across the whole
+    // tool loop + injected sub-agent results).
+    await act(async () => {
+      aiChatResolver?.({ content: "Hi there!", tool_calls: [], context_tokens: 4096 });
+    });
+
+    // The persistent context bar should reflect the reported 4096 tokens.
+    await waitFor(() => {
+      const indicator = document.querySelector(".context-persistent-bar .context-indicator");
+      expect(indicator).toBeInTheDocument();
+      const title = indicator?.getAttribute("title") || "";
+      expect(title).toContain("4,096");
+    });
+  }, 15000);
 });

@@ -55,6 +55,16 @@ describe("getModelContext", () => {
     expect(ctx.provider).toBe("llamacpp");
     expect(ctx.model).toBe("");
   });
+
+  it("trims a trailing space from the stored model name", () => {
+    // Regression: an Ollama model pasted with a trailing space (e.g.
+    // "…:q4-km-16gbGPU ") used to leak the space into saved model_name and
+    // produce a trailing "_" in the KTO/DPO folder key.
+    setLocal("nolock.chatModel", "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU ");
+    const ctx = getModelContext();
+    expect(ctx.model).toBe("oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU");
+    expect(ctx.model.endsWith(" ")).toBe(false);
+  });
 });
 
 describe("getModelConfigurations", () => {
@@ -261,6 +271,23 @@ describe("saveKtoFeedback", () => {
 
     // The provider "open-ai" has a hyphen which is kept, model "gpt-4o:latest" has colon replaced
     expect(path).toBe("/p/.rlhf/kto/good/open-ai_gpt-4o_latest/data.jsonl");
+  });
+
+  it("sanitises model key without trailing underscore for a trailing-space model name", async () => {
+    // Regression: a model name with a trailing space (nemotron …:q4-km-16gbGPU )
+    // used to produce "…q4-km-16gbGPU_" with a dangling underscore.
+    const path = await saveKtoFeedback("/p", {
+      prompt: "Q",
+      completion: "A",
+      label: true,
+      model_provider: "ollama",
+      model_name: "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU ",
+      model_configurations: { temperature: 0.7, max_tokens: 2048, system_prompt: "" },
+      timestamp: "2026-06-26T12:00:00.000Z",
+    });
+
+    expect(path).toBe("/p/.rlhf/kto/good/ollama_oamazonasgabriel_nemotron-nano-9b-v2_q4-km-16gbGPU/data.jsonl");
+    expect(path.endsWith("_/data.jsonl")).toBe(false);
   });
 
   it("returns empty string and skips save when RLHF is disabled", async () => {
