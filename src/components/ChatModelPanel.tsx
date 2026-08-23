@@ -61,6 +61,10 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.contextLength", String(contextLength));
     localStorage.setItem("nolock.showThinking", String(showThinking));
     localStorage.setItem("nolock.reasoningRetries", String(reasoningRetries));
+    // Notify the bottom bar / any status readers that the chat provider/model
+    // changed (a custom event; the `storage` event doesn't fire in the same
+    // window in Tauri).
+    window.dispatchEvent(new CustomEvent("nolock:settings-changed"));
     onClose();
   };
 

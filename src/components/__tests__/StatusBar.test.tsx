@@ -74,4 +74,33 @@ describe("StatusBar", () => {
     const statusItem = await screen.findByText(/ollama/);
     expect(statusItem).toBeInTheDocument();
   });
+
+  it("reflects the main chat provider (nolock.chatBackend), not the global backend", async () => {
+    // Global backend is digitalocean, but the chat panel overrode to openrouter.
+    localStorage.setItem("nolock.backend", "digitalocean");
+    localStorage.setItem("nolock.chatBackend", "openrouter");
+    localStorage.setItem("nolock.chatModel", "nvidia/foo:free");
+
+    render(<StatusBar showChat={false} onToggleChat={vi.fn()} />);
+
+    // The bottom bar must show the chat provider (openrouter), not digitalocean.
+    expect(await screen.findByText(/openrouter/)).toBeInTheDocument();
+    expect(screen.queryByText(/digitalocean/)).not.toBeInTheDocument();
+  });
+
+  it("updates when the chat provider changes (nolock:settings-changed event)", async () => {
+    localStorage.setItem("nolock.backend", "ollama");
+    localStorage.setItem("nolock.chatModel", "qwen3:8b");
+    render(<StatusBar showChat={false} onToggleChat={vi.fn()} />);
+    expect(await screen.findByText(/ollama/)).toBeInTheDocument();
+
+    // User changes the chat provider to openrouter.
+    localStorage.setItem("nolock.chatBackend", "openrouter");
+    localStorage.setItem("nolock.chatModel", "nvidia/nemotron:free");
+    window.dispatchEvent(new CustomEvent("nolock:settings-changed"));
+
+    // The bar must reflect the new provider without waiting for the 30s poll.
+    expect(await screen.findByText(/openrouter/)).toBeInTheDocument();
+    expect(screen.queryByText(/ollama/)).not.toBeInTheDocument();
+  });
 });
