@@ -1450,6 +1450,36 @@ html, body, #root {
   white-space: nowrap;
 }
 
+/* Live "running" tool-call window shown while the main agent streams. */
+.tool-call-window.tool-call-running .tool-call-window-header {
+  background: rgba(100, 180, 255, 0.06);
+}
+
+.tool-call-window-status {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted);
+}
+
+.tool-call-window.tool-call-running .tool-call-window-status {
+  color: var(--accent);
+}
+
+.tool-call-window.tool-call-running .tool-call-window-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 5px;
+  animation: nolock-spin 0.8s linear infinite;
+  border: 1.5px solid var(--accent);
+}
+
 .tool-call-window-body {
   border-top: 1px solid var(--border);
   padding: 8px 10px;
