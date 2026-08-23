@@ -6406,123 +6406,160 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             })
         }
         "openrouter" => {
-            let api_key = req.api_key.clone().unwrap_or_default();
-            let mut or_msgs: Vec<serde_json::Value> = messages
-                .iter()
-                .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-                .collect();
-
             if has_tools {
-                let tool_names: Vec<&str> = tools
-                    .iter()
-                    .filter_map(|t| t["function"]["name"].as_str())
-                    .collect();
-                let tool_list = tool_names.join(", ");
-                or_msgs.insert(0, serde_json::json!({
-                    "role": "system",
-                    "content": format!(
-                        "You have access to the following tools: {}. \
-                         Use them when the user's request requires looking up external information. \
-                         You may call multiple tools if needed.",
-                        tool_list
-                    )
-                }));
-            }
-
-            let mut body = serde_json::json!({
-                "model": req.model,
-                "messages": or_msgs,
-                "temperature": temperature,
-                "stream": true
-            });
-            if let Some(mt) = cloud_max_tokens {
-                body["max_tokens"] = serde_json::json!(mt);
-            }
-            if has_tools {
-                body["tools"] = serde_json::json!(tools);
-            }
-
-            eprintln!("[nolock] openrouter POST chat completions (streaming)");
-            let mut resp = client
-                .post("https://openrouter.ai/api/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", api_key))
-                .header("HTTP-Referer", "https://nolock.dev")
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(60))
-                .send()
+                // OpenRouter supports OpenAI-compatible tool calling. Route
+                // through the shared tool loop so tools actually execute (and
+                // reasoning models like nemotron-3-ultra have their thinking +
+                // answer handled) instead of falling back to a plain completion.
+                let api_key = req.api_key.clone().unwrap_or_default();
+                let full_url = "https://openrouter.ai/api/v1/chat/completions".to_string();
+                run_openai_tool_loop(
+                    &client,
+                    &app_handle,
+                    &full_url,
+                    &api_key,
+                    &req.model,
+                    &req.backend,
+                    &messages,
+                    &tools,
+                    &req.tool_configs,
+                    req.root_path.as_deref(),
+                    temperature,
+                    cloud_max_tokens,
+                    req.max_iterations,
+                    Some(vec![("HTTP-Referer", "https://nolock.dev")]),
+                    true,
+                    None, // subagent_id (main agent)
+                    Some(&runner),
+                    &pre_spawned,
+                )
                 .await
-                .map_err(|e| e.to_string())?;
+            } else {
+                let api_key = req.api_key.clone().unwrap_or_default();
+                let or_msgs: Vec<serde_json::Value> = messages
+                    .iter()
+                    .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+                    .collect();
 
-            let status = resp.status();
-            if !status.is_success() {
-                let text = resp.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[nolock] openrouter chat status={} body={}", status, &text[..text.len().min(200)]);
-                let error_detail = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|v| v["error"].as_str().map(String::from))
-                    .or_else(|| {
-                        serde_json::from_str::<serde_json::Value>(&text)
-                            .ok()
-                            .and_then(|v| v["message"].as_str().map(String::from))
-                    })
-                    .unwrap_or_else(|| text.clone());
-                return Err(format!("OpenRouter API error ({}): {}", status, error_detail));
-            }
+                let mut body = serde_json::json!({
+                    "model": req.model,
+                    "messages": or_msgs,
+                    "temperature": temperature,
+                    "stream": true
+                });
+                if let Some(mt) = cloud_max_tokens {
+                    body["max_tokens"] = serde_json::json!(mt);
+                }
 
-            // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
-            let mut full_content = String::new();
-            let mut buf: Vec<u8> = Vec::new();
-            loop {
-                match resp.chunk().await.map_err(|e| e.to_string())? {
-                    None => break,
-                    Some(chunk) => {
-                        buf.extend_from_slice(&chunk);
-                        while let Some(line) = take_next_line(&mut buf) {
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                let data = data.trim();
-                                if data == "[DONE]" { continue; }
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                        if !content.is_empty() {
-                                            full_content.push_str(content);
-                                            app_handle.emit("stream-token", StreamPayload {
-                                                token: content.to_string(),
-                                                thinking: false,
-                                            }).ok();
-                                        }
+                eprintln!("[nolock] openrouter POST chat completions (streaming)");
+                let mut resp = client
+                    .post("https://openrouter.ai/api/v1/chat/completions")
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("HTTP-Referer", "https://nolock.dev")
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.map_err(|e| e.to_string())?;
+                    eprintln!("[nolock] openrouter chat status={} body={}", status, &text[..text.len().min(200)]);
+                    let error_detail = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| v["error"].as_str().map(String::from))
+                        .or_else(|| {
+                            serde_json::from_str::<serde_json::Value>(&text)
+                                .ok()
+                                .and_then(|v| v["message"].as_str().map(String::from))
+                        })
+                        .unwrap_or_else(|| text.clone());
+                    return Err(format!("OpenRouter API error ({}): {}", status, error_detail));
+                }
+
+                // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
+                let mut full_content = String::new();
+                let mut full_thinking = String::new();
+                let mut buf: Vec<u8> = Vec::new();
+                // Reasoning models stream `delta.reasoning_content` for thinking and
+                // `delta.content` for the visible answer. When the model emits NO
+                // content (only reasoning), surface the reasoning so the user isn't
+                // left with "(no response)".
+                let handle_delta = |json: &serde_json::Value,
+                                    full_content: &mut String,
+                                    full_thinking: &mut String| {
+                    if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
+                        if !thinking.is_empty() {
+                            full_thinking.push_str(thinking);
+                            app_handle.emit("stream-token", StreamPayload {
+                                token: thinking.to_string(),
+                                thinking: true,
+                            }).ok();
+                        }
+                    }
+                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                        if !content.is_empty() {
+                            full_content.push_str(content);
+                            app_handle.emit("stream-token", StreamPayload {
+                                token: content.to_string(),
+                                thinking: false,
+                            }).ok();
+                        }
+                    }
+                };
+                loop {
+                    match resp.chunk().await.map_err(|e| e.to_string())? {
+                        None => break,
+                        Some(chunk) => {
+                            buf.extend_from_slice(&chunk);
+                            while let Some(line) = take_next_line(&mut buf) {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    let data = data.trim();
+                                    if data == "[DONE]" { continue; }
+                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                        handle_delta(&json, &mut full_content, &mut full_thinking);
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
-            // Drain trailing buffer (last chunk may not end with '\n\n')
-            if !buf.is_empty() {
-                let line = String::from_utf8_lossy(&buf).trim().to_string();
-                if let Some(data) = line.strip_prefix("data: ") {
-                    let data = data.trim();
-                    if data != "[DONE]" {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                if !content.is_empty() {
-                                    full_content.push_str(content);
-                                    app_handle.emit("stream-token", StreamPayload {
-                                        token: content.to_string(),
-                                        thinking: false,
-                                    }).ok();
-                                }
+                // Drain trailing buffer (last chunk may not end with '\n\n')
+                if !buf.is_empty() {
+                    let line = String::from_utf8_lossy(&buf).trim().to_string();
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        let data = data.trim();
+                        if data != "[DONE]" {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                handle_delta(&json, &mut full_content, &mut full_thinking);
                             }
                         }
                     }
                 }
+                // If the model only produced reasoning and no visible content,
+                // surface the reasoning as the answer (like the Ollama fallback).
+                let final_content = if full_content.is_empty() && !full_thinking.is_empty() {
+                    let as_content = if full_thinking.contains('`') {
+                        format!("\n\n[model produced only internal reasoning]\n{}", full_thinking)
+                    } else {
+                        full_thinking.clone()
+                    };
+                    app_handle.emit("stream-token", StreamPayload {
+                        token: as_content.clone(),
+                        thinking: false,
+                    }).ok();
+                    as_content
+                } else {
+                    full_content
+                };
+                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&final_content);
+                Ok(ChatResult {
+                    content: final_content,
+                    tool_calls: vec![],
+                    context_tokens: ctx_tokens_estimate,
+                })
             }
-            let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
-            Ok(ChatResult {
-                content: full_content,
-                tool_calls: vec![],
-                context_tokens: ctx_tokens_estimate,
-            })
         }
         "opencode" => {
             let api_key = req.api_key.clone().unwrap_or_default();

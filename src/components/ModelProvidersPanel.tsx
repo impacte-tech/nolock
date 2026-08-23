@@ -114,6 +114,8 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     setSecret(`apiKey.${backend}`, apiKey);
     localStorage.setItem("nolock.routerName", routerName);
     localStorage.setItem("nolock.digitaloceanModelAffinity", String(modelAffinity));
+    // Notify the bottom bar / status readers that the provider changed.
+    window.dispatchEvent(new CustomEvent("nolock:settings-changed"));
     onClose();
   };
 

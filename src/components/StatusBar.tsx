@@ -19,7 +19,7 @@ export default function StatusBar({ showChat, onToggleChat }: Props) {
 
   useEffect(() => {
     const check = async () => {
-      const b = localStorage.getItem("nolock.backend") || "ollama";
+      const b = getChatBackend();
       const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
       const chatBackend = getChatBackend();
       const fitmBackend = getFitmBackend();
@@ -56,7 +56,30 @@ export default function StatusBar({ showChat, onToggleChat }: Props) {
     };
     check();
     const interval = setInterval(check, 30000);
-    return () => clearInterval(interval);
+    // Re-check immediately when the chat provider/model changes. The Chat Model
+    // panel dispatches a custom event on save (the `storage` event doesn't fire
+    // in the same window in Tauri), and we also listen for storage events for
+    // cross-window changes. This keeps the bottom bar in sync with the main
+    // chat model provider selection instead of showing a stale provider.
+    const onSettingsChanged = () => check();
+    const onStorage = (e: StorageEvent) => {
+      if (
+        e.key === "nolock.chatBackend" ||
+        e.key === "nolock.backend" ||
+        e.key === "nolock.chatModel" ||
+        e.key === "nolock.url" ||
+        e.key === "nolock.completionModel"
+      ) {
+        check();
+      }
+    };
+    window.addEventListener("nolock:settings-changed", onSettingsChanged);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("nolock:settings-changed", onSettingsChanged);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
   return (
