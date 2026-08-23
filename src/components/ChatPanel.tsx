@@ -947,6 +947,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [thinkingText, setThinkingText] = useState("");
   const showThinking = localStorage.getItem("nolock.showThinking") === "true";
 
+  /** Live tool-call progress for the MAIN agent while it streams (OpenRouter /
+   *  Ollama tool loops emit `tool-progress` events). Rendered as running
+   *  tool-call windows so the user sees what the model is doing in real time.
+   *  Cleared when the response completes. */
+  const [liveToolCalls, setLiveToolCalls] = useState<{ name: string; status: "start" | "done" | "error"; path?: string }[]>([]);
+
   /** The model the DigitalOcean Inference Router selected (from the
    *  x-model-router-selected-model header), surfaced so reasoning models can
    *  be identified when they "overthink". */
@@ -1047,6 +1053,26 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         }
         return { ...sa, status, toolCalls: next };
       }));
+    }));
+
+    // Live tool-call progress for the MAIN agent (OpenRouter / Ollama tool
+    // loops). Shows running tool-call windows while the model works so the user
+    // gets visual feedback even when the model runs many tool calls before
+    // writing its final answer.
+    track(listen<{ type: string; name: string; path?: string }>("tool-progress", (e) => {
+      setLiveToolCalls((prev) => {
+        if (e.payload.type === "start") {
+          return [...prev, { name: e.payload.name, status: "start", path: e.payload.path }];
+        }
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].name === e.payload.name && next[i].status === "start") {
+            next[i] = { ...next[i], status: e.payload.type as "done" | "error" };
+            break;
+          }
+        }
+        return next;
+      });
     }));
 
     track(listen<{ id: string; result: string }>("subagent-done", (e) => {
@@ -2464,6 +2490,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       sendingRef.current = false;
       setLoading(false);
       setThinkingText("");
+      setLiveToolCalls([]);
       setChatBusy(false);
     }
   }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy]);
@@ -2542,6 +2569,25 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 <div className="role">{m.role}</div>
                 {m.toolCalls && m.toolCalls.length > 0 && (
                   <ToolCallBlock calls={m.toolCalls} />
+                )}
+                {/* Live tool-call progress for the main agent while it streams —
+                    running tool-call windows give the user real-time feedback
+                    even when the model runs many tools before answering. */}
+                {i === messages.length - 1 && loading && liveToolCalls.length > 0 && (
+                  <div className="tool-calls">
+                    {liveToolCalls.map((tc, ti) => (
+                      <div key={ti} className={`tool-call-window ${tc.status === "start" ? "tool-call-running" : ""}`}>
+                        <div className="tool-call-window-header">
+                          <span className="tool-call-window-chevron">{"\u25B6"}</span>
+                          <span className="tool-call-window-name">{tc.name}</span>
+                          {tc.path && <span className="tool-call-window-summary" title={tc.path}>{tc.path}</span>}
+                          <span className="tool-call-window-status">
+                            {tc.status === "start" ? "running\u2026" : tc.status === "error" ? "error" : "done"}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 )}
                 {m.role === "assistant" ? (
               <div className="assistant-content">

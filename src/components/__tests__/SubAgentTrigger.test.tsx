@@ -64,6 +64,7 @@ let aiChatResolver: ((v: any) => void) | null = null;
 let subagentStartHandler: ((e: any) => void) | null = null;
 let subagentTokenHandler: ((e: any) => void) | null = null;
 let subagentDoneHandler: ((e: any) => void) | null = null;
+let toolProgressHandler: ((e: any) => void) | null = null;
 
 function setupInvokeWithDeferredAiChat() {
   (mockInvoke as any).mockImplementation((cmd: string, args: any) => {
@@ -113,6 +114,7 @@ describe("ChatPanel — sub-agent trigger (@agent → spawn_subagent)", () => {
       if (event === "subagent-start") subagentStartHandler = cb;
       if (event === "subagent-token") subagentTokenHandler = cb;
       if (event === "subagent-done") subagentDoneHandler = cb;
+      if (event === "tool-progress") toolProgressHandler = cb;
       return vi.fn();
     });
   });
@@ -120,6 +122,7 @@ describe("ChatPanel — sub-agent trigger (@agent → spawn_subagent)", () => {
   afterEach(() => {
     subagentTokenHandler = null;
     subagentDoneHandler = null;
+    toolProgressHandler = null;
     vi.clearAllTimers();
   });
 
@@ -478,6 +481,43 @@ describe("ChatPanel — sub-agent trigger (@agent → spawn_subagent)", () => {
           args.path.includes("kto/bad/")
       );
       expect(called).toBe(true);
+    });
+  }, 15000);
+
+  it("shows live running tool-call feedback for the main agent while it streams", async () => {
+    // Regression: the main chat (e.g. OpenRouter reasoning model) runs many tool
+    // calls before writing its answer, but the UI showed nothing until the end.
+    // `tool-progress` events must render as running tool-call windows.
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} rootPath="/root" />);
+    await waitFor(() => expect(toolProgressHandler).not.toBeNull());
+
+    const input = screen.getByPlaceholderText(/Ask the AI/) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "search the web for x" } });
+    fireEvent.click(screen.getByText("Send"));
+
+    await waitFor(() => expect(aiChatResolver).not.toBeNull());
+
+    // A tool starts — a running tool-call window must appear immediately.
+    await act(async () => {
+      toolProgressHandler?.({ payload: { type: "start", name: "web_search", path: null } });
+    });
+    expect(await screen.findByText("web_search")).toBeInTheDocument();
+    expect(screen.getByText(/running/)).toBeInTheDocument();
+
+    // The tool finishes — the running indicator flips to done.
+    await act(async () => {
+      toolProgressHandler?.({ payload: { type: "done", name: "web_search", path: null } });
+    });
+    expect(screen.getByText("done")).toBeInTheDocument();
+    expect(screen.queryByText(/running/)).not.toBeInTheDocument();
+
+    // Resolve the pending ai_chat so the test completes cleanly.
+    await act(async () => {
+      aiChatResolver?.({ content: "Here is the answer.", tool_calls: [], context_tokens: 1024 });
+    });
+    // Live tool-call windows are cleared once the response completes.
+    await waitFor(() => {
+      expect(screen.queryByText("web_search")).not.toBeInTheDocument();
     });
   }, 15000);
 });
