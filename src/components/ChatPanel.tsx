@@ -1077,7 +1077,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     track(listen<{ id: string; result: string }>("subagent-done", (e) => {
       setSubAgents((prev) => prev.map((sa) => sa.id === e.payload.id
-        ? { ...sa, status: "done", content: e.payload.result }
+        ? { ...sa, status: "done", content: e.payload.result, thinking: "" }
         : sa));
     }));
 

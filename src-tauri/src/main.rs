@@ -1995,6 +1995,11 @@ struct ChatResult {
     /// estimate of the first payload).
     #[serde(default)]
     context_tokens: u64,
+    /// Estimated tokens of hidden reasoning/thinking the model produced for
+    /// this request (main agent + any sub-agents it spawned). Folded into
+    /// `context_tokens` so the session meter/limit reflects thinking too.
+    #[serde(default)]
+    thinking_tokens: u64,
 }
 
 /// Rough token estimate for text (chars / 4, the same heuristic the rest of
@@ -2002,6 +2007,23 @@ struct ChatResult {
 /// caps the backend computes.
 fn estimate_chat_tokens(text: &str) -> u64 {
     (text.chars().count() as u64 / 4) + 1
+}
+
+/// Add the estimated token count of a hidden-reasoning string to a running
+/// total. Extracted into a helper so the invocation site (and unit test) is
+/// uniform across the Ollama/OpenAI tool loops and the plain-chat retry path.
+fn accumulate_thinking(total: &mut u64, thinking: &str) {
+    if !thinking.is_empty() {
+        *total += estimate_chat_tokens(thinking);
+    }
+}
+
+/// Bound a local output budget (`num_predict`) against the model's context
+/// window. `max_output` is the room left after the current input estimate and
+/// a safety margin. A 4096 floor keeps tool-dominated agents one plausible
+/// iteration cycle even when the window is nearly full.
+fn bound_local_max_tokens(max_tokens: u32, max_output: u32) -> u32 {
+    max_tokens.min(max_output.max(4096))
 }
 
 /// Sum the estimated token count of a full message list — used to report the
@@ -2069,6 +2091,9 @@ struct SubAgentTrace {
     result: String,
     #[serde(default)]
     tool_calls: Vec<ToolCallLog>,
+    /// Estimated tokens of hidden reasoning/thinking the sub-agent produced.
+    #[serde(default)]
+    thinking_tokens: u64,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -2554,6 +2579,7 @@ async fn run_subagent(
                 model,
                 result: clean.clone(),
                 tool_calls: chat.tool_calls.clone(),
+                thinking_tokens: chat.thinking_tokens,
             };
             runner
                 .app_handle
@@ -4789,6 +4815,10 @@ async fn ollama_chat_with_tools(
     let mut ollama_msgs = build_initial_messages(messages, tools);
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
+    // Running total of hidden reasoning/thinking tokens across all iterations
+    // (main agent + any sub-agents it spawned). Folded into context_tokens so
+    // the session meter/limit reflects thinking, not just visible content.
+    let mut thinking_tokens: u64 = 0;
     // De-duplicate spawn_subagent calls (same agent + task) within this run.
     let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Bounded retries when a thinking model ends a turn with ONLY reasoning
@@ -4843,6 +4873,12 @@ async fn ollama_chat_with_tools(
 
         // --- Stream the response ---
         let stream = stream_ollama_response(resp, ctx.app_handle, &mut full_content, subagent_id).await?;
+        // Accumulate this iteration's hidden reasoning so it counts toward the
+        // session token total (the model processes it even though it's not
+        // visible content).
+        if !stream.iter_thinking.is_empty() {
+            accumulate_thinking(&mut thinking_tokens, &stream.iter_thinking);
+        }
 
         // --- Handle tool calls or return final response ---
         if let Some(calls) = stream.tool_calls {
@@ -4935,6 +4971,12 @@ async fn ollama_chat_with_tools(
 
                 for ((tool_call_id, _, _, args, _), (result, subagent_trace)) in spawn_items.into_iter().zip(outcomes) {
                     emit_tool_progress(ctx.app_handle, subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
+
+                    // Charge the sub-agent's hidden reasoning to the parent's
+                    // session token total so a sub-agent-heavy turn is counted.
+                    if let Some(ref trace) = subagent_trace {
+                        thinking_tokens += trace.thinking_tokens;
+                    }
 
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
@@ -5081,7 +5123,7 @@ async fn ollama_chat_with_tools(
             if full_content.is_empty() && all_tool_calls.is_empty() {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
-            let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content);
+            let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
             // If we gave up on a "still planning" JSON, surface the readable
             // analysis rather than the raw structured-JSON dump.
             let final_content = if is_planning_json(&full_content) {
@@ -5097,6 +5139,7 @@ async fn ollama_chat_with_tools(
                 },
                 tool_calls: all_tool_calls,
                 context_tokens,
+                thinking_tokens,
             });
         }
     }
@@ -5108,7 +5151,7 @@ async fn ollama_chat_with_tools(
         full_content.len(),
         all_tool_calls.len()
     );
-    let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content);
+    let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
     Ok(ChatResult {
         content: if full_content.is_empty() {
             "(max tool iterations reached, no response)".to_string()
@@ -5117,6 +5160,7 @@ async fn ollama_chat_with_tools(
         },
         tool_calls: all_tool_calls,
         context_tokens,
+        thinking_tokens,
     })
 }
 
@@ -5158,6 +5202,8 @@ body
 struct OpenAIStreamResult {
     /// Content emitted by the model in this iteration.
     iter_content: String,
+    /// Hidden reasoning/thinking emitted by the model this iteration.
+    iter_thinking: String,
     /// Tool calls detected, if any.
     tool_calls: Option<Vec<serde_json::Value>>,
 }
@@ -5171,11 +5217,13 @@ async fn stream_openai_response(
     subagent_id: Option<&str>,
 ) -> Result<OpenAIStreamResult, String> {
     let mut iter_content = String::new();
+    let mut iter_thinking = String::new();
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
     let mut buf: Vec<u8> = Vec::new();
 
     let process_sse_data = |data: &str,
                             iter_content: &mut String,
+                            iter_thinking: &mut String,
                             tool_calls: &mut Option<Vec<serde_json::Value>>,
                             full_content: &mut String|
      -> Result<(), String> {
@@ -5184,6 +5232,7 @@ async fn stream_openai_response(
             // `thinking` flag so the frontend can display it transiently.
             if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
                 if !thinking.is_empty() {
+                    iter_thinking.push_str(thinking);
                     emit_stream_token(app_handle, subagent_id, thinking, true);
                 }
             }
@@ -5238,7 +5287,7 @@ async fn stream_openai_response(
                     if let Some(data) = line.strip_prefix("data: ") {
                         let data = data.trim();
                         if data == "[DONE]" { continue; }
-                        process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
+                        process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
                     }
                 }
             }
@@ -5264,12 +5313,12 @@ async fn stream_openai_response(
         if let Some(data) = line.strip_prefix("data: ") {
             let data = data.trim();
             if data != "[DONE]" {
-                process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
+                process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
             }
         }
     }
 
-    Ok(OpenAIStreamResult { iter_content, tool_calls })
+    Ok(OpenAIStreamResult { iter_content, iter_thinking, tool_calls })
 }
 
 /// Normalize tool-call arguments to a JSON object.
@@ -5363,6 +5412,9 @@ async fn run_openai_tool_loop(
 
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
+    // Running total of hidden reasoning/thinking tokens across all iterations
+    // (main agent + any sub-agents it spawned). Folded into context_tokens.
+    let mut thinking_tokens: u64 = 0;
     // De-duplicate spawn_subagent calls (same agent + task) within this run.
     let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -5469,6 +5521,12 @@ async fn run_openai_tool_loop(
 
         // Stream the response
         let stream = stream_openai_response(resp, app_handle, &mut full_content, subagent_id).await?;
+        // Accumulate this iteration's hidden reasoning so it counts toward the
+        // session token total (the model processes it even though it's not
+        // visible content).
+        if !stream.iter_thinking.is_empty() {
+            accumulate_thinking(&mut thinking_tokens, &stream.iter_thinking);
+        }
 
         // Handle tool calls or return final response
         if let Some(calls) = stream.tool_calls {
@@ -5581,6 +5639,12 @@ async fn run_openai_tool_loop(
                 for ((tool_call_id, _, _, args, _), (result, subagent_trace)) in spawn_items.into_iter().zip(outcomes) {
                     emit_tool_progress(app_handle, subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
 
+                    // Charge the sub-agent's hidden reasoning to the parent's
+                    // session token total so a sub-agent-heavy turn is counted.
+                    if let Some(ref trace) = subagent_trace {
+                        thinking_tokens += trace.thinking_tokens;
+                    }
+
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
                     } else {
@@ -5617,7 +5681,7 @@ async fn run_openai_tool_loop(
             if full_content.is_empty() && all_tool_calls.is_empty() {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
-            let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content);
+            let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
             return Ok(ChatResult {
                 content: if full_content.is_empty() {
                     "(no response)".to_string()
@@ -5626,6 +5690,7 @@ async fn run_openai_tool_loop(
                 },
                 tool_calls: all_tool_calls,
                 context_tokens,
+                thinking_tokens,
             });
         }
     }
@@ -5637,7 +5702,7 @@ async fn run_openai_tool_loop(
         full_content.len(),
         all_tool_calls.len()
     );
-    let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content);
+    let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
     Ok(ChatResult {
         content: if full_content.is_empty() {
             "(max tool iterations reached, no response)".to_string()
@@ -5646,6 +5711,7 @@ async fn run_openai_tool_loop(
         },
         tool_calls: all_tool_calls,
         context_tokens,
+        thinking_tokens,
     })
 }
 
@@ -6049,9 +6115,21 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             .unwrap_or(CLOUD_DEFAULT_MAX_TOKENS)
             .min(max_output.max(1)),
     );
+    // Bound the LOCAL output budget against the real context window too.
+    // Previously LOCAL_TOOL_MAX_TOKENS (256k) was sent as num_predict even
+    // when the model's working window could not fit it — after sub-agent
+    // results inflate the input, the (much smaller) effective budget gets
+    // burned entirely on thinking tokens and the generation is truncated
+    // before visible content → the "reasoning-only" retry loop. Keep a 4096
+    // floor so tool-dominated agents still have one plausible cycle.
+    let max_tokens = if is_cloud_backend(&req.backend) {
+        max_tokens
+    } else {
+        bound_local_max_tokens(max_tokens, max_output)
+    };
     eprintln!(
-        "[nolock] ai_chat resolved max_tokens={} (local, user={:?}, has_tools={}) cloud_max_tokens={:?}",
-        max_tokens, req.max_tokens, has_tools, cloud_max_tokens
+        "[nolock] ai_chat resolved max_tokens={} (local, user={:?}, has_tools={}) cloud_max_tokens={:?} context_len={} input_estimate={} max_output={}",
+        max_tokens, req.max_tokens, has_tools, cloud_max_tokens, context_len, input_estimate, max_output
     );
 
     // Prepend global system prompt if provided and not already present
@@ -6208,6 +6286,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 // Start with the failure message; it is replaced as soon as the
                 // model produces a real answer.
                 let mut final_content = "(no response)".to_string();
+                // Running total of hidden reasoning across all retry attempts.
+                let mut total_thinking = String::new();
                 loop {
                     let mut full_content = String::new();
                     let mut full_thinking = String::new();
@@ -6257,6 +6337,12 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                 buf.clear();
                             }
                         }
+                    }
+
+                    // Accumulate the hidden reasoning so it counts toward the
+                    // session token total across all retry attempts.
+                    if !full_thinking.is_empty() {
+                        total_thinking.push_str(&full_thinking);
                     }
 
                     if !full_content.is_empty() {
@@ -6309,10 +6395,13 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                             e.to_string()
                         })?;
                 }
+                let mut thinking_tokens = 0u64;
+                accumulate_thinking(&mut thinking_tokens, &total_thinking);
                 Ok(ChatResult {
                     content: final_content,
                     tool_calls: vec![],
-                    context_tokens: estimate_messages_tokens(&messages),
+                    context_tokens: estimate_messages_tokens(&messages) + thinking_tokens,
+                    thinking_tokens,
                 })
             }
         }
@@ -6403,6 +6492,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 content: full_content,
                 tool_calls: vec![],
                 context_tokens: ctx_tokens_estimate,
+                thinking_tokens: 0,
             })
         }
         "openrouter" => {
@@ -6553,11 +6643,13 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 } else {
                     full_content
                 };
-                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&final_content);
+                let thinking_tokens = estimate_chat_tokens(&full_thinking);
+                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&final_content) + thinking_tokens;
                 Ok(ChatResult {
                     content: final_content,
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
+                    thinking_tokens,
                 })
             }
         }
@@ -6600,6 +6692,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
                 // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
                 let mut full_content = String::new();
+                let mut full_thinking = String::new();
                 let mut buf: Vec<u8> = Vec::new();
                 loop {
                     match resp.chunk().await.map_err(|e| e.to_string())? {
@@ -6611,6 +6704,15 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                     let data = data.trim();
                                     if data == "[DONE]" { continue; }
                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
+                                            if !thinking.is_empty() {
+                                                full_thinking.push_str(thinking);
+                                                 app_handle.emit("stream-token", StreamPayload {
+                                                    token: thinking.to_string(),
+                                                    thinking: true,
+                                                }).ok();
+                                            }
+                                        }
                                         if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                             if !content.is_empty() {
                                                 full_content.push_str(content);
@@ -6633,6 +6735,15 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                         let data = data.trim();
                         if data != "[DONE]" {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
+                                    if !thinking.is_empty() {
+                                        full_thinking.push_str(thinking);
+                                         app_handle.emit("stream-token", StreamPayload {
+                                            token: thinking.to_string(),
+                                            thinking: true,
+                                        }).ok();
+                                    }
+                                }
                                 if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                     if !content.is_empty() {
                                         full_content.push_str(content);
@@ -6646,11 +6757,13 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                         }
                     }
                 }
-                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
+                let thinking_tokens = estimate_chat_tokens(&full_thinking);
+                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content) + thinking_tokens;
                 Ok(ChatResult {
                     content: full_content,
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
+                    thinking_tokens,
                 })
             } else {
                 // Local OpenCode Zen — Ollama-compatible NDJSON streaming
@@ -6734,6 +6847,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     content: full_content,
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
+                    thinking_tokens: 0,
                 })
             }
         }
@@ -9149,5 +9263,62 @@ mod tests {
     fn parse_ollama_context_length_defaults_when_unknown() {
         let data = serde_json::json!({ "parameters": "temperature 0.5" });
         assert_eq!(parse_ollama_context_length(&data), 8192);
+    }
+
+    // ---- thinking tokens count toward the session limit -------------------
+
+    #[test]
+    fn accumulate_thinking_counts_reasoning_chars() {
+        let mut total = 0u64;
+        accumulate_thinking(&mut total, "Let me reason step by step about the bug.");
+        assert_eq!(total, estimate_chat_tokens("Let me reason step by step about the bug."));
+        // Empty thinking adds nothing.
+        accumulate_thinking(&mut total, "");
+        assert!(total > 0);
+        // A second accumulation adds, not replaces.
+        let before = total;
+        accumulate_thinking(&mut total, "more thinking");
+        assert_eq!(total, before + estimate_chat_tokens("more thinking"));
+    }
+
+    #[test]
+    fn thinking_tokens_are_folded_into_context_tokens() {
+        // Mirrors the tool-loop return: msg tokens + content tokens + thinking.
+        let msgs = serde_json::json!([
+            {"role":"user","content":"review this code"},
+            {"role":"tool","content":"result"}
+        ]);
+        let msg_tokens = estimate_json_messages_tokens(msgs.as_array().unwrap());
+        let content = "Here is the review.";
+        let mut thinking = 0u64;
+        accumulate_thinking(&mut thinking, "long hidden reasoning trace that the model consumed");
+        let context_tokens = msg_tokens + estimate_chat_tokens(content) + thinking;
+        assert!(context_tokens > msg_tokens + estimate_chat_tokens(content), "thinking must inflate context_tokens");
+        assert_eq!(context_tokens, msg_tokens + estimate_chat_tokens(content) + thinking);
+    }
+
+    #[test]
+    fn bound_local_max_tokens_caps_output_against_window() {
+        // 256k tool budget on a small context window → bounded down, floor 4096.
+        assert_eq!(bound_local_max_tokens(256_000, 0), 4096);
+        // When there is room, the cap respects the window.
+        assert_eq!(bound_local_max_tokens(256_000, 8_000), 8_000);
+        // User's explicit smaller budget is never raised above itself.
+        assert_eq!(bound_local_max_tokens(2_048, 8_000), 2_048);
+        // Plenty of context → the tool budget survives (bounded only by window).
+        assert_eq!(bound_local_max_tokens(256_000, 1_000_000), 256_000);
+    }
+
+    #[test]
+    fn chat_result_serializes_thinking_tokens() {
+        let r = ChatResult {
+            content: "answer".to_string(),
+            tool_calls: vec![],
+            context_tokens: 123,
+            thinking_tokens: 45,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["context_tokens"], 123);
+        assert_eq!(json["thinking_tokens"], 45);
     }
 }
