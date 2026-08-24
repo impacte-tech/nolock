@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Researches a topic (web + files) and returns a concise sourced summary
-model: lfm2.5
+model: oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU
 backend: ollama
 temperature: 0.7
 tools: web_search, web_fetch, read_file, grep

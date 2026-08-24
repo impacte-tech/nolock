@@ -1,7 +1,8 @@
 ---
 name: code-reviewer
 description: Reviews code for bugs, security issues and style; suggests concrete fixes
-model: lfm2.5
+model: oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU
+
 backend: ollama
 temperature: 0.3
 tools: read_file, list_directory, grep
