@@ -222,11 +222,13 @@ function ToolCallItem({ call }: { call: ToolCallLog }) {
   const [expanded, setExpanded] = useState(false);
   const summary = summarizeToolArgs(call);
   const isSubagent = call.name === "spawn_subagent";
+  const isMicroAgent = call.name === "spawn_micro_agent";
   return (
     <div className="tool-call-window">
       <div className="tool-call-window-header" onClick={() => setExpanded(!expanded)}>
         <span className="tool-call-window-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
         <span className="tool-call-window-name">{call.name}</span>
+        {isMicroAgent && <span className="tool-call-window-badge">micro-agent</span>}
         {summary && <span className="tool-call-window-summary" title={summary}>{summary}</span>}
       </div>
       {expanded && (
@@ -1077,7 +1079,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
     track(listen<{ id: string; result: string }>("subagent-done", (e) => {
       setSubAgents((prev) => prev.map((sa) => sa.id === e.payload.id
-        ? { ...sa, status: "done", content: e.payload.result }
+        ? { ...sa, status: "done", content: e.payload.result, thinking: "" }
         : sa));
     }));
 

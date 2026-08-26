@@ -7,6 +7,16 @@ backend: ollama
 temperature: 0.3
 tools: read_file, list_directory, grep
 thorough: true
+can_spawn_micro_agents: true
+allowed_micro_agents: [rust-fixer, ts-type-fixer, lint-fixer, python-fixer, go-fixer]
+validation:
+  rust_check: true
+  js_ts_lint: true
+  python_check: false
+  go_check: false
+  custom_commands: []
+  require_all_pass: true
+  max_retries: 3
 ---
 
 # code-reviewer Agent

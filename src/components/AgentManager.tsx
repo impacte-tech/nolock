@@ -17,6 +17,16 @@ export interface AgentConfig {
   backend: string;
   /** Comma-separated tool names the sub-agent may use; empty = default set. */
   tools: string;
+  /** Micro-agent delegation (see plan: hierarchical-micro-agent-cascade). */
+  canSpawnMicroAgents: boolean;
+  allowedMicroAgents: string;
+  /** Deterministic validation flags */
+  validationRustCheck: boolean;
+  validationJsTsLint: boolean;
+  validationPythonCheck: boolean;
+  validationGoCheck: boolean;
+  validationRequireAllPass: boolean;
+  validationMaxRetries: number;
 }
 
 export interface AgentEntry {
@@ -38,7 +48,7 @@ interface Props {
   /** Called when user wants to edit a skill in the main editor. */
   onOpenFile?: (path: string, name: string) => void;
   /** Which tab to show when opened (default: "agents"). */
-  initialTab?: "agents" | "skills";
+  initialTab?: "agents" | "skills" | "micro-agents";
 }
 
 // ---------------------------------------------------------------------------
@@ -53,6 +63,14 @@ const DEFAULT_CONFIG: AgentConfig = {
   temperature: 0.7,
   backend: "",
   tools: "",
+  canSpawnMicroAgents: false,
+  allowedMicroAgents: "",
+  validationRustCheck: false,
+  validationJsTsLint: false,
+  validationPythonCheck: false,
+  validationGoCheck: false,
+  validationRequireAllPass: true,
+  validationMaxRetries: 3,
 };
 
 // ---------------------------------------------------------------------------
@@ -61,7 +79,7 @@ const DEFAULT_CONFIG: AgentConfig = {
 
 export default function AgentManager({ visible, onClose, rootPath, onAgentsChanged, onOpenFile, initialTab }: Props) {
   // Tab state — reset to initialTab whenever the modal becomes visible
-  const [activeTab, setActiveTab] = useState<"agents" | "skills">(initialTab || "agents");
+  const [activeTab, setActiveTab] = useState<"agents" | "skills" | "micro-agents">(initialTab || "agents");
 
   useEffect(() => {
     if (visible && initialTab) {
@@ -86,6 +104,32 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
   const [loadingSkills, setLoadingSkills] = useState(false);
   const [creatingSkill, setCreatingSkill] = useState(false);
   const [newSkillName, setNewSkillName] = useState("");
+
+  // ---- Micro-agent state ----
+  const [microAgents, setMicroAgents] = useState<AgentEntry[]>([]);
+  const [loadingMicroAgents, setLoadingMicroAgents] = useState(false);
+  const [creatingMicroAgent, setCreatingMicroAgent] = useState(false);
+  const [newMicroAgentName, setNewMicroAgentName] = useState("");
+
+  // ---- Load micro-agents ----
+  const loadMicroAgents = useCallback(async () => {
+    if (!rootPath) return;
+    setLoadingMicroAgents(true);
+    try {
+      const entries: AgentEntry[] = await invoke("list_micro_agents", { rootPath });
+      setMicroAgents(entries);
+    } catch (e) {
+      console.error("Failed to load micro-agents:", e);
+      setMicroAgents([]);
+    }
+    setLoadingMicroAgents(false);
+  }, [rootPath]);
+
+  useEffect(() => {
+    if (visible && rootPath) {
+      loadMicroAgents();
+    }
+  }, [visible, rootPath, loadMicroAgents]);
 
   // ---- Load agents on mount / visibility change ----
   const loadAgents = useCallback(async () => {
@@ -148,6 +192,18 @@ export default function AgentManager({ visible, onClose, rootPath, onAgentsChang
         temperature: typeof data.temperature === "number" ? data.temperature : 0.7,
         backend: data.backend || "",
         tools: Array.isArray(data.tools) ? data.tools.join(", ") : (data.tools || ""),
+        canSpawnMicroAgents: !!data.can_spawn_micro_agents,
+        allowedMicroAgents: Array.isArray(data.allowed_micro_agents)
+          ? data.allowed_micro_agents.join(", ")
+          : (data.allowed_micro_agents || ""),
+        validationRustCheck: !!data.validation?.rust_check,
+        validationJsTsLint: !!data.validation?.js_ts_lint,
+        validationPythonCheck: !!data.validation?.python_check,
+        validationGoCheck: !!data.validation?.go_check,
+        validationRequireAllPass: data.validation?.require_all_pass !== false,
+        validationMaxRetries: typeof data.validation?.max_retries === "number"
+          ? data.validation.max_retries
+          : 3,
       };
       setEditing(config);
       setIsNew(false);
@@ -186,6 +242,15 @@ model: ${editing.model || ""}
 backend: ${editing.backend || ""}
 temperature: ${editing.temperature}
 tools: ${editing.tools || ""}
+can_spawn_micro_agents: ${editing.canSpawnMicroAgents}
+allowed_micro_agents: ${editing.allowedMicroAgents || "[]"}
+validation:
+  rust_check: ${editing.validationRustCheck}
+  js_ts_lint: ${editing.validationJsTsLint}
+  python_check: ${editing.validationPythonCheck}
+  go_check: ${editing.validationGoCheck}
+  require_all_pass: ${editing.validationRequireAllPass}
+  max_retries: ${editing.validationMaxRetries}
 ---
 
 ${editing.prompt}`;
@@ -285,6 +350,70 @@ ${editing.prompt}`;
     }
   }, [editing]);
 
+  // ---- Micro-agent actions ----
+
+  const startCreateMicroAgent = useCallback(() => {
+    setCreatingMicroAgent(true);
+    setNewMicroAgentName("");
+    setError(null);
+  }, []);
+
+  const cancelCreateMicroAgent = useCallback(() => {
+    setCreatingMicroAgent(false);
+    setNewMicroAgentName("");
+    setError(null);
+  }, []);
+
+  const createMicroAgent = useCallback(async () => {
+    const name = newMicroAgentName.trim();
+    if (!name) {
+      setError("Micro-agent name is required.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const fileName = `${name}.md`;
+      const filePath = `${rootPath}/.micro-agents/${fileName}`;
+      const content = `---
+name: ${name}
+description: ${name}
+model: qwen2.5-coder:1.5b
+backend: ollama
+temperature: 0.1
+tools: [read_file, edit, write_file, bash_sandbox]
+validation:
+  max_retries: 3
+---
+
+You are a focused micro-agent for "${name}". Complete the task with MINIMAL
+changes and verify your result with the configured validation commands.
+`;
+      await invoke("write_file", { path: filePath, content });
+      setCreatingMicroAgent(false);
+      setNewMicroAgentName("");
+      await loadMicroAgents();
+    } catch (e) {
+      setError(`Failed to create micro-agent: ${e}`);
+    }
+    setSaving(false);
+  }, [newMicroAgentName, rootPath, loadMicroAgents]);
+
+  const editMicroAgent = useCallback(async (entry: AgentEntry) => {
+    onOpenFile?.(entry.path, entry.name);
+    onClose();
+  }, [onOpenFile, onClose]);
+
+  const deleteMicroAgent = useCallback(async (entry: AgentEntry) => {
+    if (!confirm(`Delete micro-agent "${entry.name}"?`)) return;
+    try {
+      await invoke("delete_file", { path: entry.path });
+      await loadMicroAgents();
+    } catch (e) {
+      setError(`Failed to delete micro-agent: ${e}`);
+    }
+  }, [loadMicroAgents]);
+
   if (!visible) return null;
 
   // ===== Tab bar =====
@@ -295,6 +424,12 @@ ${editing.prompt}`;
         onClick={() => setActiveTab("agents")}
       >
         Agents
+      </button>
+      <button
+        className={`agent-tab ${activeTab === "micro-agents" ? "active" : ""}`}
+        onClick={() => setActiveTab("micro-agents")}
+      >
+        Micro-Agents
       </button>
       <button
         className={`agent-tab ${activeTab === "skills" ? "active" : ""}`}
@@ -432,6 +567,74 @@ ${editing.prompt}`;
               <span>Precise (0.0)</span>
               <span>Creative (2.0)</span>
             </div>
+
+            {/* ---- Micro-agent delegation (hierarchical cascade) ---- */}
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: `1px solid var(--border)` }}>
+              <label className="field-label">
+                <input
+                  type="checkbox"
+                  checked={editing.canSpawnMicroAgents}
+                  onChange={(e) => updateAgentField("canSpawnMicroAgents", e.target.checked)}
+                  style={{ marginRight: 6, accentColor: "var(--accent)" }}
+                />
+                Can spawn micro-agents
+              </label>
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 8 }}>
+                When enabled, this sub-agent can delegate mechanical work (error fixes, lint, tests)
+                to small micro-agents via the <code>spawn_micro_agent</code> tool.
+              </span>
+
+              <label className="field-label">Allowed Micro-Agents (comma-separated, optional)</label>
+              <input
+                className="field-input"
+                value={editing.allowedMicroAgents}
+                onChange={(e) => updateAgentField("allowedMicroAgents", e.target.value)}
+                placeholder="e.g. rust-fixer, ts-type-fixer (empty = all)"
+              />
+
+              <label className="field-label" style={{ marginTop: 10 }}>Deterministic Validation</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", marginTop: 4 }}>
+                {[
+                  { key: "validationRustCheck", label: "cargo check" },
+                  { key: "validationJsTsLint", label: "npm lint + tsc" },
+                  { key: "validationPythonCheck", label: "ruff + py_compile" },
+                  { key: "validationGoCheck", label: "go build + vet" },
+                ].map((v) => (
+                  <label key={v.key} style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <input
+                      type="checkbox"
+                      checked={(editing as any)[v.key]}
+                      onChange={(e) => updateAgentField(v.key as keyof AgentConfig, e.target.checked)}
+                      style={{ accentColor: "var(--accent)" }}
+                    />
+                    {v.label}
+                  </label>
+                ))}
+              </div>
+
+              <div style={{ display: "flex", gap: 16, marginTop: 8, alignItems: "center" }}>
+                <label style={{ fontSize: 11 }} className="field-label">
+                  Max retries:
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    value={editing.validationMaxRetries}
+                    onChange={(e) => updateAgentField("validationMaxRetries", parseInt(e.target.value) || 3)}
+                    style={{ width: 52, marginLeft: 6 }}
+                  />
+                </label>
+                <label style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }} className="field-label">
+                  <input
+                    type="checkbox"
+                    checked={editing.validationRequireAllPass}
+                    onChange={(e) => updateAgentField("validationRequireAllPass", e.target.checked)}
+                    style={{ accentColor: "var(--accent)" }}
+                  />
+                  Require all checks to pass
+                </label>
+              </div>
+            </div>
           </div>
           <div className="modal-footer">
             <button className="btn-secondary" onClick={cancelEdit}>Cancel</button>
@@ -472,6 +675,42 @@ ${editing.prompt}`;
             <button className="btn-secondary" onClick={cancelCreateSkill}>Cancel</button>
             <button className="btn-primary" onClick={createSkill} disabled={saving || !newSkillName.trim()}>
               {saving ? "Creating..." : "Create Skill"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== Micro-agent creation form =====
+  if (creatingMicroAgent) {
+    return (
+      <div className="modal-overlay" onClick={onClose}>
+        <div className="modal agent-manager-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-header">
+            <span>New Micro-Agent</span>
+            <button onClick={cancelCreateMicroAgent}>&times;</button>
+          </div>
+          <div className="modal-body">
+            {error && <div className="agent-error">{error}</div>}
+            <label className="field-label">Micro-Agent Name</label>
+            <input
+              className="field-input"
+              value={newMicroAgentName}
+              onChange={(e) => setNewMicroAgentName(e.target.value)}
+              placeholder="e.g. rust-fixer"
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter") createMicroAgent(); }}
+            />
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+              A markdown file will be created at <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 2 }}>.micro-agents/{newMicroAgentName || "..."}.md</code>
+              with sensible defaults (qwen2.5-coder, low temperature, validation retries).
+            </div>
+          </div>
+          <div className="modal-footer">
+            <button className="btn-secondary" onClick={cancelCreateMicroAgent}>Cancel</button>
+            <button className="btn-primary" onClick={createMicroAgent} disabled={saving || !newMicroAgentName.trim()}>
+              {saving ? "Creating..." : "Create Micro-Agent"}
             </button>
           </div>
         </div>
@@ -544,6 +783,52 @@ ${editing.prompt}`;
                 </div>
               )}
             </>
+          ) : activeTab === "micro-agents" ? (
+            // ===== Micro-Agents list =====
+            <>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
+                Micro-agents are small, focused agents stored in the <code style={{ background: "var(--bg-surface)", padding: "1px 5px", borderRadius: 3 }}>.micro-agents/</code> folder.
+                Sub-agents with <strong>can_spawn_micro_agents</strong> enabled can delegate
+                mechanical work (fixing errors, writing tests, lint) to them. Their results are
+                validated with deterministic checks (cargo check, tsc, ruff, etc.).
+              </div>
+              {loadingMicroAgents ? (
+                <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+                  Loading micro-agents...
+                </div>
+              ) : microAgents.length === 0 ? (
+                <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+                  No micro-agents yet in this project. Create your first one!
+                </div>
+              ) : (
+                <div className="agent-list">
+                  {microAgents.map((agent) => (
+                    <div key={agent.path} className="agent-list-item">
+                      <div className="agent-list-item-info">
+                        <span className="agent-list-item-name">{agent.name}</span>
+                        <span className="agent-list-item-path">{agent.path}</span>
+                      </div>
+                      <div className="agent-list-item-actions">
+                        <button
+                          className="agent-action-btn"
+                          onClick={() => editMicroAgent(agent)}
+                          title="Edit micro-agent in editor"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="agent-action-btn agent-action-btn-danger"
+                          onClick={() => deleteMicroAgent(agent)}
+                          title="Delete micro-agent"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           ) : (
             // ===== Skills list =====
             <>
@@ -602,6 +887,16 @@ ${editing.prompt}`;
               style={noFolder ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
             >
               New Agent
+            </button>
+          ) : activeTab === "micro-agents" ? (
+            <button
+              className="btn-primary"
+              onClick={startCreateMicroAgent}
+              disabled={noFolder}
+              title={noFolder ? "Open a folder first to create micro-agents" : "Create a new micro-agent"}
+              style={noFolder ? { opacity: 0.5, cursor: "not-allowed" } : undefined}
+            >
+              New Micro-Agent
             </button>
           ) : (
             <button

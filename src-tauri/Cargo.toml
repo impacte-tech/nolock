@@ -2,6 +2,9 @@
 name = "nolock"
 version = "0.1.0"
 edition = "2021"
+# Tauri dev runs `cargo run nolock ...`; with both the app and the CLI binary
+# present, cargo needs to know which one to run by default.
+default-run = "nolock"
 
 [build-dependencies]
 tauri-build = { version = "=2.6.2", features = [] }
@@ -20,6 +23,7 @@ regex = "=1.11.1"
 portable-pty = "=0.8.1"
 keyring = "=2.3.3"
 libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

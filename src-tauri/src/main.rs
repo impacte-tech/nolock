@@ -11,6 +11,7 @@ mod hooks;
 mod linter;
 mod macos_keyboard;
 mod terminal_memory;
+pub mod validation;
 
 // ---------------------------------------------------------------------------
 // File system commands
@@ -191,6 +192,51 @@ struct AgentEntry {
     path: String,       // full path to the file
 }
 
+/// List all micro-agent files in the `.micro-agents/` directory under root_path.
+/// Creates `.micro-agents/` if it does not exist. Returns agent entries sorted
+/// by name.
+#[tauri::command]
+fn list_micro_agents(root_path: String) -> Result<Vec<AgentEntry>, String> {
+    let agents_dir = std::path::Path::new(&root_path).join(".micro-agents");
+    if !agents_dir.exists() {
+        std::fs::create_dir_all(&agents_dir)
+            .map_err(|e| format!("Failed to create .micro-agents directory: {}", e))?;
+        return Ok(Vec::new());
+    }
+
+    let read_dir = std::fs::read_dir(&agents_dir)
+        .map_err(|e| format!("Failed to read .micro-agents directory: {}", e))?;
+
+    let mut entries = Vec::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let metadata = entry.metadata().map_err(|e| e.to_string())?;
+        if metadata.is_file() {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let stem = if let Some(s) = file_name.strip_suffix(".json") {
+                s.to_string()
+            } else if let Some(s) = file_name.strip_suffix(".md") {
+                s.to_string()
+            } else {
+                continue;
+            };
+            entries.push(AgentEntry {
+                name: stem,
+                path: entry.path().to_string_lossy().to_string(),
+            });
+        }
+    }
+
+    entries.sort_by_key(|a| a.name.to_lowercase());
+    Ok(entries)
+}
+
+/// Read and parse a micro-agent file by its full path (same format as agents).
+#[tauri::command]
+fn read_micro_agent(path: String) -> Result<serde_json::Value, String> {
+    read_agent(path)
+}
+
 /// List all agent files in the `.agents/` directory under root_path.
 /// Creates `.agents/` if it does not exist. Returns agent entries sorted by name.
 /// Supports both `.json` (legacy) and `.md` files. When both exist for the same name,
@@ -283,6 +329,16 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
     let mut backend = String::new();
     let mut temperature = 0.7_f64;
     let mut tools: Vec<String> = Vec::new();
+    // NEW: Micro-agent delegation fields
+    let mut can_spawn_micro_agents = false;
+    let mut allowed_micro_agents: Vec<String> = Vec::new();
+    let mut validation_rust_check = false;
+    let mut validation_js_ts_lint = false;
+    let mut validation_python_check = false;
+    let mut validation_go_check = false;
+    let mut validation_custom_commands: Vec<String> = Vec::new();
+    let mut validation_require_all_pass = true;
+    let mut validation_max_retries = 3;
     let prompt;
 
     // Extract frontmatter between --- markers
@@ -292,11 +348,37 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
         let after_first = &trimmed[3..]; // skip opening ---
         if let Some(end) = after_first.find("\n---") {
             let frontmatter_str = &after_first[..end];
-            for line in frontmatter_str.lines() {
-                let line = line.trim();
+            // Track whether we're inside the nested `validation:` mapping so its
+            // indented keys (`rust_check`, `max_retries`, …) are folded into the
+            // flat validation_* variables.
+            let mut in_validation_section = false;
+            for raw_line in frontmatter_str.lines() {
+                let leading = raw_line.len() - raw_line.trim_start().len();
+                let line = raw_line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if !line.starts_with('#') && leading == 0 {
+                    // Top-level key: if it's `validation:` with an empty value,
+                    // subsequent indented lines belong to the nested mapping.
+                    in_validation_section = line.trim_end() == "validation:";
+                }
                 if let Some((key, value)) = line.split_once(':') {
                     let key = key.trim().to_lowercase();
                     let value = value.trim().to_string();
+                    if in_validation_section {
+                        match key.as_str() {
+                            "rust_check" => validation_rust_check = value.parse().unwrap_or(false),
+                            "js_ts_lint" => validation_js_ts_lint = value.parse().unwrap_or(false),
+                            "python_check" => validation_python_check = value.parse().unwrap_or(false),
+                            "go_check" => validation_go_check = value.parse().unwrap_or(false),
+                            "custom_commands" => validation_custom_commands = parse_tools_list(&value),
+                            "require_all_pass" => validation_require_all_pass = value.parse().unwrap_or(true),
+                            "max_retries" => validation_max_retries = value.parse().unwrap_or(3),
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match key.as_str() {
                         "name" => name = value,
                         "description" => description = value,
@@ -306,6 +388,33 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
                             temperature = value.parse().unwrap_or(0.7);
                         }
                         "tools" => tools = parse_tools_list(&value),
+                        "can_spawn_micro_agents" => {
+                            can_spawn_micro_agents = value.parse().unwrap_or(false);
+                        }
+                        "allowed_micro_agents" => {
+                            allowed_micro_agents = parse_tools_list(&value);
+                        }
+                        "validation_rust_check" => {
+                            validation_rust_check = value.parse().unwrap_or(false);
+                        }
+                        "validation_js_ts_lint" => {
+                            validation_js_ts_lint = value.parse().unwrap_or(false);
+                        }
+                        "validation_python_check" => {
+                            validation_python_check = value.parse().unwrap_or(false);
+                        }
+                        "validation_go_check" => {
+                            validation_go_check = value.parse().unwrap_or(false);
+                        }
+                        "validation_custom_commands" => {
+                            validation_custom_commands = parse_tools_list(&value);
+                        }
+                        "validation_require_all_pass" => {
+                            validation_require_all_pass = value.parse().unwrap_or(true);
+                        }
+                        "validation_max_retries" => {
+                            validation_max_retries = value.parse().unwrap_or(3);
+                        }
                         _ => {}
                     }
                 }
@@ -330,6 +439,17 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
         "backend": backend,
         "temperature": temperature,
         "tools": tools,
+        "can_spawn_micro_agents": can_spawn_micro_agents,
+        "allowed_micro_agents": allowed_micro_agents,
+        "validation": {
+            "rust_check": validation_rust_check,
+            "js_ts_lint": validation_js_ts_lint,
+            "python_check": validation_python_check,
+            "go_check": validation_go_check,
+            "custom_commands": validation_custom_commands,
+            "require_all_pass": validation_require_all_pass,
+            "max_retries": validation_max_retries,
+        }
     }))
 }
 
@@ -346,6 +466,17 @@ fn parse_tools_list(value: &str) -> Vec<String> {
         if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
             return arr.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
         }
+        // Bracketed but unquoted form: "[rust-fixer, ts-type-fixer]".
+        // Strip the brackets, then split on commas.
+        let inner = trimmed
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim();
+        return inner
+            .split(',')
+            .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
     }
     // Comma-separated form
     trimmed
@@ -357,7 +488,7 @@ fn parse_tools_list(value: &str) -> Vec<String> {
 
 /// A parsed sub-agent definition (from `.agents/`).
 #[derive(Clone, Default)]
-struct AgentConfig {
+pub struct AgentConfig {
     name: String,
     description: String,
     prompt: String,
@@ -371,10 +502,14 @@ struct AgentConfig {
     /// When true, the sub-agent must fully inspect before answering
     /// (used e.g. by the code-reviewer so it doesn't return too early).
     thorough: bool,
+    /// NEW: Micro-agent delegation
+    can_spawn_micro_agents: bool,
+    allowed_micro_agents: Vec<String>,
+    validation: validation::ValidationConfig,
 }
 
 /// Load a single agent's config from `.agents/<name>.md` or `.agents/<name>.json`.
-fn load_agent_config(root_path: &str, name: &str) -> Result<AgentConfig, String> {
+pub fn load_agent_config(root_path: &str, name: &str) -> Result<AgentConfig, String> {
     let base = std::path::Path::new(root_path).join(".agents");
     let md = base.join(format!("{}.md", name));
     let json = base.join(format!("{}.json", name));
@@ -409,7 +544,118 @@ fn load_agent_config(root_path: &str, name: &str) -> Result<AgentConfig, String>
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default(),
         thorough: parsed["thorough"].as_bool().unwrap_or(false),
+        // NEW: Micro-agent delegation
+        can_spawn_micro_agents: parsed["can_spawn_micro_agents"].as_bool().unwrap_or(false),
+        allowed_micro_agents: parsed["allowed_micro_agents"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        validation: validation::ValidationConfig {
+            rust_check: parsed["validation"]["rust_check"].as_bool().unwrap_or(false),
+            js_ts_lint: parsed["validation"]["js_ts_lint"].as_bool().unwrap_or(false),
+            python_check: parsed["validation"]["python_check"].as_bool().unwrap_or(false),
+            go_check: parsed["validation"]["go_check"].as_bool().unwrap_or(false),
+            custom_commands: parsed["validation"]["custom_commands"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            require_all_pass: parsed["validation"]["require_all_pass"].as_bool().unwrap_or(true),
+            max_retries: parsed["validation"]["max_retries"].as_u64().unwrap_or(3) as usize,
+        },
     })
+}
+
+/// Micro-agent configuration (from `.micro-agents/`).
+#[derive(Clone, Default)]
+pub struct MicroAgentConfig {
+    name: String,
+    description: String,
+    prompt: String,
+    model: String,
+    backend: String,
+    temperature: f64,
+    tools: Vec<String>,
+    validation: validation::ValidationConfig,
+}
+
+/// Load a single micro-agent's config from `.micro-agents/<name>.md` or `.micro-agents/<name>.json`.
+pub fn load_micro_agent_config(root_path: &str, name: &str) -> Result<MicroAgentConfig, String> {
+    let base = std::path::Path::new(root_path).join(".micro-agents");
+    let md = base.join(format!("{}.md", name));
+    let json = base.join(format!("{}.json", name));
+    let path = if md.exists() {
+        md
+    } else if json.exists() {
+        json
+    } else {
+        return Err(format!("Micro-agent '{}' not found in .micro-agents/", name));
+    };
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read micro-agent file {}: {}", path.display(), e))?;
+
+    let parsed = if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        serde_json::from_str::<serde_json::Value>(&content)
+            .map_err(|e| format!("Failed to parse micro-agent file {}: {}", path.display(), e))?
+    } else {
+        // Reuse read_agent's markdown parsing.
+        read_agent(path.to_string_lossy().to_string())?
+    };
+
+    Ok(MicroAgentConfig {
+        name: parsed["name"].as_str().unwrap_or(name).to_string(),
+        description: parsed["description"].as_str().unwrap_or("").to_string(),
+        prompt: parsed["prompt"].as_str().unwrap_or("").to_string(),
+        model: parsed["model"].as_str().unwrap_or("").to_string(),
+        backend: parsed["backend"].as_str().unwrap_or("").to_string(),
+        temperature: parsed["temperature"].as_f64().unwrap_or(0.1),
+        tools: parsed["tools"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        validation: validation::ValidationConfig {
+            rust_check: parsed["validation"]["rust_check"].as_bool().unwrap_or(false),
+            js_ts_lint: parsed["validation"]["js_ts_lint"].as_bool().unwrap_or(false),
+            python_check: parsed["validation"]["python_check"].as_bool().unwrap_or(false),
+            go_check: parsed["validation"]["go_check"].as_bool().unwrap_or(false),
+            custom_commands: parsed["validation"]["custom_commands"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            require_all_pass: parsed["validation"]["require_all_pass"].as_bool().unwrap_or(true),
+            max_retries: parsed["validation"]["max_retries"].as_u64().unwrap_or(3) as usize,
+        },
+    })
+}
+
+/// List all micro-agent configs in `.micro-agents/`.
+pub fn list_micro_agent_configs(root_path: &str) -> Vec<MicroAgentConfig> {
+    let agents_dir = std::path::Path::new(root_path).join(".micro-agents");
+    let read_dir = match std::fs::read_dir(&agents_dir) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut configs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for entry in read_dir.flatten() {
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let stem = if let Some(s) = file_name.strip_suffix(".json") {
+            s.to_string()
+        } else if let Some(s) = file_name.strip_suffix(".md") {
+            s.to_string()
+        } else {
+            continue;
+        };
+        if !seen.insert(stem.clone()) {
+            continue;
+        }
+        if let Ok(cfg) = load_micro_agent_config(root_path, &stem) {
+            configs.push(cfg);
+        }
+    }
+    configs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    configs
 }
 
 /// List all agent configs in `.agents/` (name + description + prompt + model +
@@ -1867,9 +2113,9 @@ struct CompletionRequest {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1914,7 +2160,7 @@ struct SessionRecord {
 /// sub-agent's provider when it differs from the main agent's.
 #[derive(Clone, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct ProviderConfig {
+pub struct ProviderConfig {
     #[serde(default)]
     url: String,
     #[serde(default)]
@@ -1923,59 +2169,59 @@ struct ProviderConfig {
 
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct ChatRequest {
-    backend: String,
-    url: String,
-    model: String,
-    messages: Vec<ChatMessage>,
+pub struct ChatRequest {
+    pub backend: String,
+    pub url: String,
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
     #[serde(default)]
-    api_key: Option<String>,
+    pub api_key: Option<String>,
     /// Config for all configured providers, keyed by backend name. Used to
     /// resolve credentials + endpoint when a sub-agent runs on a different
     /// provider than the main agent (multi-model provider routing).
     #[serde(default)]
-    providers: HashMap<String, ProviderConfig>,
+    pub providers: HashMap<String, ProviderConfig>,
     #[serde(default)]
-    tools_enabled: Vec<String>,
+    pub tools_enabled: Vec<String>,
     /// Per-tool configuration (e.g. web_search provider + api_key).
     /// Stored in localStorage on the frontend as `nolock.toolConfig`.
     #[serde(default)]
-    tool_configs: HashMap<String, serde_json::Value>,
+    pub tool_configs: HashMap<String, serde_json::Value>,
     #[serde(default)]
-    temperature: Option<f64>,
+    pub temperature: Option<f64>,
     #[serde(default)]
-    max_tokens: Option<u32>,
+    pub max_tokens: Option<u32>,
     /// The model's context window (in tokens), used to cap `max_completion_tokens`
     /// so `input + output` never exceeds the context. Passed from the frontend
     /// (the "Context Window" setting / auto-detected value).
     #[serde(default)]
-    context_length: Option<u32>,
+    pub context_length: Option<u32>,
     #[serde(default)]
-    system_prompt: Option<String>,
+    pub system_prompt: Option<String>,
     /// The root folder path currently open in the editor.
     /// Used by file-system tools (e.g. write_file) to scope paths.
     #[serde(default)]
-    root_path: Option<String>,
+    pub root_path: Option<String>,
     /// Maximum number of tool call iterations before the agent stops.
     #[serde(default = "default_max_iterations")]
-    max_iterations: usize,
+    pub max_iterations: usize,
     /// Whether to pin the DigitalOcean Inference Router to a single model for
     /// the whole agent/tool loop (via the `X-Model-Affinity` header). Defaults
     /// to enabled when absent.
     #[serde(default)]
-    model_affinity: Option<bool>,
+    pub model_affinity: Option<bool>,
     /// Agents explicitly referenced by the user via `@agent` mentions. The
     /// backend pre-spawns these in parallel and injects their results as
     /// context, so parallel triggering doesn't depend on the orchestrator
     /// model reliably emitting multiple `spawn_subagent` calls in one turn.
     #[serde(default)]
-    referenced_agents: Vec<String>,
+    pub referenced_agents: Vec<String>,
     /// Maximum number of consecutive "reasoning-only" retries before giving up
     /// when a thinking model (nemotron, qwen3, deepseek-r1, …) ends a turn with
     /// only thinking and no visible content / tool call. Configurable from the
     /// Chat Model panel. Defaults to THINKING_ONLY_MAX_RETRIES when unset.
     #[serde(default)]
-    reasoning_retries: Option<usize>,
+    pub reasoning_retries: Option<usize>,
 }
 
 fn default_max_iterations() -> usize {
@@ -1983,10 +2229,10 @@ fn default_max_iterations() -> usize {
 }
 
 #[derive(serde::Serialize)]
-struct ChatResult {
-    content: String,
+pub struct ChatResult {
+    pub content: String,
     #[serde(default)]
-    tool_calls: Vec<ToolCallLog>,
+    pub tool_calls: Vec<ToolCallLog>,
     /// Total tokens of the context the model actually processed for this
     /// request — the full outgoing messages PLUS every tool iteration and any
     /// injected sub-agent results. The frontend uses this (when > 0) as the
@@ -1994,14 +2240,36 @@ struct ChatResult {
     /// UI reflects what the main agent really sent (not just the frontend's
     /// estimate of the first payload).
     #[serde(default)]
-    context_tokens: u64,
+    pub context_tokens: u64,
+    /// Estimated tokens of hidden reasoning/thinking the model produced for
+    /// this request (main agent + any sub-agents it spawned). Folded into
+    /// `context_tokens` so the session meter/limit reflects thinking too.
+    #[serde(default)]
+    pub thinking_tokens: u64,
 }
 
 /// Rough token estimate for text (chars / 4, the same heuristic the rest of
 /// the backend uses). Consistent so the context meter matches the request
 /// caps the backend computes.
-fn estimate_chat_tokens(text: &str) -> u64 {
+pub fn estimate_chat_tokens(text: &str) -> u64 {
     (text.chars().count() as u64 / 4) + 1
+}
+
+/// Add the estimated token count of a hidden-reasoning string to a running
+/// total. Extracted into a helper so the invocation site (and unit test) is
+/// uniform across the Ollama/OpenAI tool loops and the plain-chat retry path.
+fn accumulate_thinking(total: &mut u64, thinking: &str) {
+    if !thinking.is_empty() {
+        *total += estimate_chat_tokens(thinking);
+    }
+}
+
+/// Bound a local output budget (`num_predict`) against the model's context
+/// window. `max_output` is the room left after the current input estimate and
+/// a safety margin. A 4096 floor keeps tool-dominated agents one plausible
+/// iteration cycle even when the window is nearly full.
+fn bound_local_max_tokens(max_tokens: u32, max_output: u32) -> u32 {
+    max_tokens.min(max_output.max(4096))
 }
 
 /// Sum the estimated token count of a full message list — used to report the
@@ -2045,30 +2313,33 @@ struct FileChange {
 }
 
 #[derive(serde::Serialize, Clone)]
-struct ToolCallLog {
-    name: String,
-    arguments: String,
-    result_snippet: String,
-    result_full: String,
+pub struct ToolCallLog {
+    pub name: String,
+    pub arguments: String,
+    pub result_snippet: String,
+    pub result_full: String,
     #[serde(default)]
     file_changes: Vec<FileChange>,
     /// Present when this tool call spawned a sub-agent; carries the full trace
     /// so the frontend can render an inspectable "window" in the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    subagent: Option<SubAgentTrace>,
+    pub subagent: Option<SubAgentTrace>,
 }
 
 /// Full trace of a sub-agent run, returned to the frontend so it can render an
 /// expandable window showing the sub-agent's work (tool calls + final answer).
 #[derive(serde::Serialize, Clone)]
-struct SubAgentTrace {
-    id: String,
-    agent: String,
-    task: String,
-    model: String,
-    result: String,
+pub struct SubAgentTrace {
+    pub id: String,
+    pub agent: String,
+    pub task: String,
+    pub model: String,
+    pub result: String,
     #[serde(default)]
-    tool_calls: Vec<ToolCallLog>,
+    pub tool_calls: Vec<ToolCallLog>,
+    /// Estimated tokens of hidden reasoning/thinking the sub-agent produced.
+    #[serde(default)]
+    pub thinking_tokens: u64,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -2126,6 +2397,84 @@ struct SubAgentToolProgressPayload {
 struct SubAgentDonePayload {
     id: String,
     result: String,
+}
+
+/// Abstraction over where the agent loop reports its live progress (streamed
+/// tokens, tool progress, routed-model info). The Tauri app emits these as
+/// events to the frontend; the CLI writes them to stdout/stderr. This lets the
+/// full main/sub/micro-agent tool loops run identically from the GUI and from a
+/// headless CLI / E2E test harness.
+pub trait EventSink {
+    fn emit_stream_token(&self, subagent_id: Option<&str>, token: &str, thinking: bool);
+    fn emit_tool_progress(&self, subagent_id: Option<&str>, kind: &str, name: &str, path: Option<String>);
+    fn emit_model_routed(&self, model: &str);
+    fn emit_subagent_start(&self, id: &str, agent: &str, task: &str, model: &str);
+    fn emit_subagent_done(&self, id: &str, result: &str);
+}
+
+/// The Tauri `AppHandle` forwards events to the frontend (unchanged behaviour).
+impl EventSink for tauri::AppHandle {
+    fn emit_stream_token(&self, subagent_id: Option<&str>, token: &str, thinking: bool) {
+        emit_stream_token(self, subagent_id, token, thinking);
+    }
+    fn emit_tool_progress(&self, subagent_id: Option<&str>, kind: &str, name: &str, path: Option<String>) {
+        emit_tool_progress(self, subagent_id, kind, name, path);
+    }
+    fn emit_model_routed(&self, model: &str) {
+        self.emit("model-routed", model.to_string()).ok();
+    }
+    fn emit_subagent_start(&self, id: &str, agent: &str, task: &str, model: &str) {
+        self.emit("subagent-start", SubAgentStartPayload {
+            id: id.to_string(),
+            agent: agent.to_string(),
+            task: task.to_string(),
+            model: model.to_string(),
+        })
+        .ok();
+    }
+    fn emit_subagent_done(&self, id: &str, result: &str) {
+        self.emit("subagent-done", SubAgentDonePayload {
+            id: id.to_string(),
+            result: result.to_string(),
+        })
+        .ok();
+    }
+}
+
+/// A headless sink for the CLI / E2E harness: streams visible tokens to stdout,
+/// thinking to stderr, and logs tool progress to stderr.
+pub struct CliSink;
+
+impl EventSink for CliSink {
+    fn emit_stream_token(&self, _subagent_id: Option<&str>, token: &str, thinking: bool) {
+        // Streaming tokens go to stderr so stdout carries exactly one clean
+        // final answer (printed by the CLI after `run_chat` returns). Thinking
+        // is labelled so it's distinguishable from visible progress.
+        if thinking {
+            eprint!("[thinking]{}", token);
+        } else {
+            eprint!("{}", token);
+        }
+    }
+    fn emit_tool_progress(&self, _subagent_id: Option<&str>, kind: &str, name: &str, path: Option<String>) {
+        let p = path.unwrap_or_default();
+        match kind {
+            "start" => eprintln!("\n[tool] {} {}", name, p),
+            "done" => eprintln!("[tool] {} done {}", name, p),
+            "error" => eprintln!("[tool] {} ERROR {}", name, p),
+            _ => eprintln!("[tool] {} {} {}", kind, name, p),
+        }
+    }
+    fn emit_model_routed(&self, model: &str) {
+        eprintln!("[routed model] {}", model);
+    }
+    fn emit_subagent_start(&self, _id: &str, agent: &str, task: &str, model: &str) {
+        eprintln!("\n[subagent] {} started ({}): {}\n", agent, model, task);
+        eprintln!("--- subagent output ---");
+    }
+    fn emit_subagent_done(&self, _id: &str, _result: &str) {
+        eprintln!("--- subagent done ---");
+    }
 }
 
 /// Emit a stream token, routing to `subagent-token` when a sub-agent is
@@ -2202,8 +2551,8 @@ fn emit_tool_progress(
 /// loop. Passed into the tool loops so `spawn_subagent` can launch a sub-agent
 /// on a (possibly different) provider with its own model + tools.
 #[derive(Clone, Copy)]
-struct SubAgentRunner<'a> {
-    app_handle: &'a tauri::AppHandle,
+pub struct SubAgentRunner<'a> {
+    sink: &'a (dyn EventSink + Send + Sync),
     client: &'a reqwest::Client,
     main_backend: &'a str,
     main_url: &'a str,
@@ -2217,6 +2566,9 @@ struct SubAgentRunner<'a> {
     /// Configured "reasoning-only" retry budget propagated from the main chat
     /// request (sub-agents share the same retry behaviour).
     reasoning_retries: usize,
+    /// The model's context window (in tokens), propagated so sub/micro-agents
+    /// can detect near-limit usage and trigger context summarization.
+    context_length: u64,
 use_model_affinity: bool,
     /// Current sub-agent nesting depth (to bound recursion).
     depth: usize,
@@ -2234,12 +2586,12 @@ use_model_affinity: bool,
 /// The store is capped (per key) so a very long session doesn't grow unbounded.
 const SUBAGENT_MEMORY_MAX_TURNS: usize = 8;
 
-struct SubAgentMemory {
+pub struct SubAgentMemory {
     convos: Mutex<std::collections::HashMap<String, Vec<ChatMessage>>>,
 }
 
 impl SubAgentMemory {
-    fn new() -> Self {
+    pub fn new() -> Self {
         SubAgentMemory { convos: Mutex::new(std::collections::HashMap::new()) }
     }
 
@@ -2249,7 +2601,7 @@ impl SubAgentMemory {
     }
 
     /// Retrieve the stored conversation for an agent, or `None` on first spawn.
-    fn get(&self, root_path: &str, agent_name: &str) -> Option<Vec<ChatMessage>> {
+    pub fn get(&self, root_path: &str, agent_name: &str) -> Option<Vec<ChatMessage>> {
         let convos = self.convos.lock().unwrap();
         convos.get(&Self::key(root_path, agent_name)).cloned()
     }
@@ -2295,7 +2647,7 @@ const DEFAULT_SUBAGENT_TOOLS: [&str; 8] = [
     "bash_sandbox",
 ];
 
-const MAX_SUBAGENT_DEPTH: usize = 4;
+pub const MAX_SUBAGENT_DEPTH: usize = 4;
 
 /// Sub-agents get a tighter tool-loop budget than the main agent so they don't
 /// spin calling the same tools repeatedly; enough to gather info and answer.
@@ -2316,7 +2668,7 @@ const THINKING_ONLY_MAX_RETRIES: usize = 8;
 /// map (when the route differs from the main agent's) else the main's.
 /// Extracted as a pure function so the per-agent provider routing can be
 /// unit-tested ("each agent can come from a different model provider").
-fn resolve_agent_provider(
+pub fn resolve_agent_provider(
     agent: &AgentConfig,
     main_backend: &str,
     main_model: &str,
@@ -2346,7 +2698,7 @@ fn resolve_agent_provider(
 
 /// Run a sub-agent and return its final result + full trace (for the frontend
 /// "window"). Emits `subagent-*` events so the window streams live.
-async fn run_subagent(
+pub async fn run_subagent(
     runner: &SubAgentRunner<'_>,
     agent_name: &str,
     task: &str,
@@ -2381,8 +2733,9 @@ async fn run_subagent(
         agent.tools.clone()
     };
     // Sub-agents must NOT get the spawn_subagent tool — otherwise they can
-    // cascade-delegate to other agents. Isolated tool set only.
-    let tools = build_tool_schemas_inner(&tool_names, runner.root_path, false);
+    // cascade-delegate to other agents. Isolated tool set only. They MAY get
+    // the spawn_micro_agent tool when can_spawn_micro_agents is set.
+    let tools = build_tool_schemas_inner(&tool_names, runner.root_path, false, Some(&agent));
 
     let id = format!(
         "sa_{}",
@@ -2414,13 +2767,33 @@ async fn run_subagent(
          same file. Once you have enough information, stop calling tools and write \
          your answer directly."
     };
+    // NEW: Micro-agent delegation directive. When the sub-agent may spawn
+    // micro-agents, tell it to delegate mechanical work to them and (unless
+    // deterministic validation is available) fall back to doing the task
+    // directly instead of spawning micro-agents that cannot be verified.
+    let micro_directive = if agent.can_spawn_micro_agents {
+        if validation::project_has_validation_for_task(task, &agent.validation) {
+            "\n\n[Micro-agent delegation]\n\
+             You may spawn micro-agents (via the `spawn_micro_agent` tool) for focused, \
+             mechanical work: fixing compiler/lint errors, writing tests, etc. Delegate such \
+             work to the matching micro-agent instead of doing it yourself. After a micro-agent \
+             returns, incorporate its result (including its validation status) into your answer."
+        } else {
+            "\n\n[Micro-agent delegation]\n\
+             NOTE: No deterministic validation is available for this task type. Complete the \
+             task directly using your own tools. Do not spawn micro-agents."
+        }
+    } else {
+        ""
+    };
+
     let system_prompt = format!(
         "{}\n\n[Sub-agent operating instructions]\n{}\n\n\
          Do NOT ask yourself questions and then answer them. Do NOT role-play multiple \
          personas or write out an internal back-and-forth dialogue. Do NOT produce a \
          long chain-of-thought before answering. State your answer once, directly and \
-         concisely.",
-        agent.prompt, ops
+         concisely.{}",
+        agent.prompt, ops, micro_directive
     );
 
     // Build the sub-agent's message list. When this agent has been spawned
@@ -2478,26 +2851,21 @@ async fn run_subagent(
     };
 
     runner
-        .app_handle
-        .emit("subagent-start", SubAgentStartPayload {
-            id: id.clone(),
-            agent: agent.name.clone(),
-            task: task.to_string(),
-            model: model.clone(),
-        })
-        .ok();
+        .sink
+        .emit_subagent_start(&id, &agent.name, task, &model);
 
     let sub_runner = SubAgentRunner { depth: runner.depth + 1, ..*runner };
 
     let result = if backend == "ollama" {
         let ctx = OllamaChatContext {
-            app_handle: runner.app_handle,
+            sink: runner.sink,
             client: runner.client,
             url: &url,
             model: &model,
             tool_configs: runner.tool_configs,
             root_path: runner.root_path,
             reasoning_retries: runner.reasoning_retries,
+            context_length: runner.context_length,
         };
         ollama_chat_with_tools(
             &ctx,
@@ -2516,7 +2884,7 @@ async fn run_subagent(
     } else {
         run_openai_tool_loop(
             runner.client,
-            runner.app_handle,
+            runner.sink,
             &url,
             &api_key,
             &model,
@@ -2533,6 +2901,7 @@ async fn run_subagent(
             Some(&id),
             Some(&sub_runner),
             &std::collections::HashSet::new(),
+            runner.context_length,
         )
         .await
     };
@@ -2554,25 +2923,18 @@ async fn run_subagent(
                 model,
                 result: clean.clone(),
                 tool_calls: chat.tool_calls.clone(),
+                thinking_tokens: chat.thinking_tokens,
             };
             runner
-                .app_handle
-                .emit("subagent-done", SubAgentDonePayload {
-                    id: id.clone(),
-                    result: clean.clone(),
-                })
-                .ok();
+                .sink
+                .emit_subagent_done(&id, &clean);
             Ok((clean, trace))
         }
         Err(e) => {
             let err_msg = format!("Sub-agent error: {}", e);
             runner
-                .app_handle
-                .emit("subagent-done", SubAgentDonePayload {
-                    id: id.clone(),
-                    result: err_msg.clone(),
-                })
-                .ok();
+                .sink
+                .emit_subagent_done(&id, &err_msg);
             Err(format!("Sub-agent '{}' failed: {}", agent.name, e))
         }
     }
@@ -2581,6 +2943,272 @@ async fn run_subagent(
 /// Maximum number of sub-agents to run concurrently. Bounded so two large local
 /// models don't exhaust VRAM.
 const MAX_CONCURRENT_SUBAGENTS: usize = 2;
+
+/// Maximum micro-agent nesting depth (Sub → Micro → Micro).
+pub const MAX_MICRO_AGENT_DEPTH: usize = 2;
+
+/// Run a sub-agent with a deterministic validation auto-retry loop.
+///
+/// The sub-agent runs once via `run_subagent`, then its changed files are
+/// validated with the configured deterministic checks (cargo check, tsc, ruff,
+/// etc.). If validation fails and retries remain, the validation errors are fed
+/// back into the task and the sub-agent runs again. This gives sub-agents the
+/// same "clear deterministic validation to conclude" guarantee as micro-agents,
+/// and failures always trigger a retry (up to the configured budget).
+///
+/// When the agent has no validation configured, it behaves exactly like
+/// `run_subagent` (single run, no validation).
+async fn run_subagent_with_validation(
+    runner: &SubAgentRunner<'_>,
+    agent_name: &str,
+    task: &str,
+) -> Result<(String, SubAgentTrace), String> {
+    let root = runner
+        .root_path
+        .ok_or("No project folder is open — sub-agents require one")?;
+    let agent = load_agent_config(root, agent_name)?;
+
+    // No validation configured → plain single run.
+    let has_validation = agent.validation.rust_check
+        || agent.validation.js_ts_lint
+        || agent.validation.python_check
+        || agent.validation.go_check
+        || !agent.validation.custom_commands.is_empty();
+    if !has_validation {
+        return run_subagent(runner, agent_name, task).await;
+    }
+
+    let max_retries = if agent.validation.max_retries == 0 {
+        DEFAULT_MICRO_AGENT_MAX_RETRIES
+    } else {
+        agent.validation.max_retries
+    };
+
+    let mut current_task = task.to_string();
+
+    for attempt in 1..=max_retries {
+        let (result, trace) = run_subagent(runner, agent_name, &current_task).await?;
+
+        // Run deterministic validations on the changed files.
+        let changed_files = validation::extract_changed_files(&result);
+        let validations = validation::run_validations(root, &agent.validation, &changed_files).await;
+        let all_passed = validations.iter().all(|v| v.passed);
+
+        if all_passed || attempt == max_retries {
+            return Ok((result, trace));
+        }
+
+        // Failures always trigger a retry: feed the validation errors back.
+        current_task = format!(
+            "Previous attempt failed validation:\n{}\n\nFix the errors and retry:\n{}",
+            validation::format_validation_errors(&validations),
+            task
+        );
+    }
+
+    Err("Max retries exceeded".to_string())
+}
+
+/// Micro-agents get a tighter iteration budget than sub-agents.
+const MICRO_AGENT_MAX_ITERATIONS: usize = 4;
+
+/// Default retry budget for micro-agent validation loops.
+const DEFAULT_MICRO_AGENT_MAX_RETRIES: usize = 3;
+
+/// Run a micro-agent with a deterministic validation auto-retry loop.
+///
+/// The micro-agent is given a focused task, runs once, then the changed files
+/// are validated with the configured deterministic checks (cargo check, tsc,
+/// ruff, etc.). If validation fails and retries remain, the validation errors
+/// are fed back into the task and the micro-agent runs again. Returns the final
+/// result plus the validation results from the last attempt.
+pub async fn run_micro_agent(
+    runner: &SubAgentRunner<'_>,
+    agent_name: &str,
+    task: &str,
+) -> Result<(String, Vec<validation::ValidationResult>), String> {
+    if runner.depth >= MAX_MICRO_AGENT_DEPTH {
+        return Err(format!(
+            "Micro-agent nesting depth limit ({}) exceeded",
+            MAX_MICRO_AGENT_DEPTH
+        ));
+    }
+    let root = runner
+        .root_path
+        .ok_or("No project folder is open — micro-agents require one")?;
+    let agent = load_micro_agent_config(root, agent_name)?;
+
+    // Resolve the micro-agent's provider (its own backend/model, else the main's).
+    let (backend, model, url, api_key) = resolve_agent_provider(
+        &AgentConfig {
+            backend: agent.backend.clone(),
+            model: agent.model.clone(),
+            ..Default::default()
+        },
+        runner.main_backend,
+        runner.main_model,
+        runner.main_url,
+        runner.main_api_key,
+        runner.providers,
+    );
+
+    // Resolve the micro-agent's tool set (defaults to a minimal mechanical set).
+    let tool_names: Vec<String> = if agent.tools.is_empty() {
+        vec![
+            "read_file".to_string(),
+            "edit".to_string(),
+            "write_file".to_string(),
+            "bash_sandbox".to_string(),
+        ]
+    } else {
+        agent.tools.clone()
+    };
+    // Micro-agents never get spawn_subagent or spawn_micro_agent tools.
+    let tools = build_tool_schemas_inner(&tool_names, runner.root_path, false, None);
+
+    let id = format!(
+        "ma_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    let system_prompt = format!(
+        "{}\n\n[Micro-agent operating instructions]\n\
+         You are a focused, single-purpose agent. Apply MINIMAL changes to complete the task. \
+         Do NOT ask yourself questions or role-play. Do NOT produce a long chain-of-thought. \
+         Return only the edited file content or a concise summary of the change you made.",
+        agent.prompt
+    );
+
+    // Base messages for the first attempt. On retries we append the validation
+    // feedback as an extra user message so the micro-agent can correct itself.
+    let base_msgs: Vec<ChatMessage> = vec![
+        ChatMessage { role: "system".to_string(), content: system_prompt },
+        ChatMessage { role: "user".to_string(), content: task.to_string() },
+    ];
+
+    let sub_runner = SubAgentRunner { depth: runner.depth + 1, ..*runner };
+
+    let mut last_validations: Vec<validation::ValidationResult> = Vec::new();
+    let max_retries = if agent.validation.max_retries == 0 {
+        DEFAULT_MICRO_AGENT_MAX_RETRIES
+    } else {
+        agent.validation.max_retries
+    };
+
+    for attempt in 1..=max_retries {
+        // Build the messages for this attempt: base task plus, on retries, the
+        // validation errors from the previous attempt.
+        let mut msgs = base_msgs.clone();
+        if attempt > 1 {
+            msgs.push(ChatMessage {
+                role: "user".to_string(),
+                content: format!(
+                    "Previous attempt failed validation:\n{}\n\nFix the errors and retry.",
+                    validation::format_validation_errors(&last_validations)
+                ),
+            });
+        }
+
+        // 1. Run the micro-agent once. The call must be boxed to break the
+        //    async recursion (micro-agent loops can spawn further micro-agents).
+        let result = if backend == "ollama" {
+            let ctx = OllamaChatContext {
+                sink: runner.sink,
+                client: runner.client,
+                url: &url,
+                model: &model,
+                tool_configs: runner.tool_configs,
+                root_path: runner.root_path,
+                reasoning_retries: runner.reasoning_retries,
+                context_length: runner.context_length,
+            };
+            Box::pin(ollama_chat_with_tools(
+                &ctx,
+                &msgs,
+                &tools,
+                MICRO_AGENT_MAX_ITERATIONS,
+                agent.temperature,
+                runner.max_tokens.unwrap_or(4096),
+                Some(&id),
+                Some(&sub_runner),
+                &std::collections::HashSet::new(),
+            ))
+            .await
+        } else if backend == "llamacpp" {
+            Err("Micro-agents on the llamacpp backend are not supported; use ollama or a cloud provider.".to_string())
+        } else {
+            Box::pin(run_openai_tool_loop(
+                runner.client,
+                runner.sink,
+                &url,
+                &api_key,
+                &model,
+                &backend,
+                &msgs,
+                &tools,
+                runner.tool_configs,
+                runner.root_path,
+                agent.temperature,
+                runner.max_tokens,
+                MICRO_AGENT_MAX_ITERATIONS,
+                None,
+                runner.use_model_affinity,
+                Some(&id),
+                Some(&sub_runner),
+                &std::collections::HashSet::new(),
+                runner.context_length,
+            ))
+            .await
+        };
+
+        let clean = match result {
+            Ok(chat) => unwrap_structured_answer(&chat.content),
+            Err(e) => return Err(format!("Micro-agent '{}' failed: {}", agent.name, e)),
+        };
+
+        // 2. Run deterministic validations on the changed files.
+        let changed_files = validation::extract_changed_files(&clean);
+        let validations = validation::run_validations(root, &agent.validation, &changed_files).await;
+
+        // 3. Check if all passed (or we're out of retries).
+        let all_passed = validations.iter().all(|v| v.passed);
+        last_validations = validations;
+        if all_passed || attempt == max_retries {
+            return Ok((clean, last_validations));
+        }
+    }
+
+    Err("Max retries exceeded".to_string())
+}
+
+/// Extract a short "task hint" (the original user task) from the message list,
+/// used when re-triggering the model after context summarization. Pure.
+fn task_hint(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.chars().take(300).collect::<String>())
+        .unwrap_or_default()
+}
+
+/// Summarize the conversation context via a micro-agent, so the model can be
+/// re-triggered with a compact summary + to-do list instead of the full
+/// (near-limit) context. Uses the `context-summarizer` micro-agent when
+/// available; returns `None` if it can't be spawned (caller falls back).
+async fn summarize_context_via_micro_agent(
+    runner: &SubAgentRunner<'_>,
+    last_message: &str,
+    todo_list: &str,
+) -> Option<String> {
+    let prompt = build_context_summarization_prompt(last_message, todo_list);
+    match run_micro_agent(runner, "context-summarizer", &prompt).await {
+        Ok((summary, _)) if !summary.trim().is_empty() => Some(summary),
+        _ => None,
+    }
+}
 
 /// Some tool-calling models (e.g. certain Ollama Qwen/Nemotron builds and some
 /// "structured output" prompts) respond to a sub-agent task with a JSON blob
@@ -2600,7 +3228,7 @@ const MAX_CONCURRENT_SUBAGENTS: usize = 2;
 ///     `final_answer` it finds (a tool loop can emit several concatenated
 ///     blobs, e.g. one per iteration);
 ///   - if no JSON answer is found, returns the text unchanged.
-fn unwrap_structured_answer(content: &str) -> String {
+pub fn unwrap_structured_answer(content: &str) -> String {
     // Fast path: the entire output is one structured JSON answer.
     if content.trim_start().starts_with('{') {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
@@ -2805,6 +3433,11 @@ fn find_subsequence(haystack: &[char], needle: &[char], start: usize) -> Option<
     if needle.is_empty() || start >= haystack.len() {
         return None;
     }
+    // If the needle is longer than the remaining haystack (or the whole
+    // haystack), it can't match — searching would panic on the slice below.
+    if needle.len() > haystack.len() - start {
+        return None;
+    }
     for i in start..=haystack.len().saturating_sub(needle.len()) {
         if haystack[i..i + needle.len()] == *needle {
             return Some(i);
@@ -2813,11 +3446,138 @@ fn find_subsequence(haystack: &[char], needle: &[char], start: usize) -> Option<
     None
 }
 
+/// Decide whether a main-agent response is a *complete final answer* — i.e. the
+/// task is done and the tool loop should conclude rather than keep retrying.
+///
+/// A response is complete when it has substantive visible content AND is not a
+/// "still planning" JSON blob. This is the deterministic "task done" signal the
+/// main agent uses to conclude automatically (instead of stalling or waiting
+/// for a manual continue). Pure — unit-testable.
+pub fn is_complete_answer(content: &str, has_tool_calls: bool) -> bool {
+    // A pending tool call means the agent is still working — not done.
+    if has_tool_calls {
+        return false;
+    }
+    // A "still planning" JSON (conclusion:false / empty final_answer) is not done.
+    if is_planning_json(content) {
+        return false;
+    }
+    // Otherwise: substantive visible content = done.
+    let trimmed = content.trim();
+    !trimmed.is_empty()
+}
+
+/// Fraction of the context window that is "near the limit" — when usage reaches
+/// this ratio (80%) we proactively summarize the context to free room before the
+/// model stalls or the request is rejected for exceeding the window.
+const CONTEXT_SUMMARIZE_THRESHOLD: f64 = 0.80;
+
+/// How many recent iterations to inspect when detecting repetition.
+const REPETITION_WINDOW: usize = 3;
+
+/// Detect whether the model is *repeating itself* — i.e. the last `window`
+/// iterations produced identical (or near-identical) content, or the same tool
+/// call. This is the "stuck in a loop" signal that triggers a micro-agent to
+/// repurpose the last message, summarize the context, and re-trigger the model
+/// with a to-do list. Pure — unit-testable.
+///
+/// `recent` holds the content (or a stable fingerprint) of the last iterations,
+/// oldest first. When the trailing `window` entries are all equal (or all empty
+/// while the model keeps calling the same tool), we treat it as repetition.
+pub fn detect_repetition(recent: &[String], window: usize) -> bool {
+    if recent.len() < window || window < 2 {
+        return false;
+    }
+    let tail = &recent[recent.len() - window..];
+    // All entries in the window must be identical (trimmed) to count as a loop.
+    let first = tail[0].trim();
+    if first.is_empty() {
+        return false;
+    }
+    tail.iter().all(|c| c.trim() == first)
+}
+
+/// Context usage as a fraction of the model's context window (0.0–1.0+).
+pub fn context_usage_ratio(context_tokens: u64, context_length: u64) -> f64 {
+    if context_length == 0 {
+        return 0.0;
+    }
+    context_tokens as f64 / context_length as f64
+}
+
+/// Whether the context is close enough to the limit that we should summarize.
+/// True when usage is at or above `CONTEXT_SUMMARIZE_THRESHOLD` (80%).
+pub fn should_summarize_context(context_tokens: u64, context_length: u64) -> bool {
+    context_usage_ratio(context_tokens, context_length) >= CONTEXT_SUMMARIZE_THRESHOLD
+}
+
+/// Build the prompt that drives a micro-agent to repurpose the last message and
+/// summarize the conversation, so the model can be re-triggered with a focused
+/// to-do list instead of the full (near-limit) context.
+pub fn build_context_summarization_prompt(last_message: &str, todo_list: &str) -> String {
+    format!(
+        "The conversation context is near its limit and the model is repeating itself. \
+         Repurpose the last message and summarize the conversation so it can be re-triggered \
+         with a focused to-do list.\n\n\
+         LAST MESSAGE:\n{}\n\n\
+         TODO LIST:\n{}\n\n\
+         Produce a concise summary that preserves the task, the decisions made, and the \
+         remaining work. Return ONLY the summary text.",
+        last_message, todo_list
+    )
+}
+
+/// Build a compact re-trigger message list from a context summary + to-do list,
+/// replacing the full (near-limit) conversation. This is what gets fed back to
+/// the model after a micro-agent summarizes the context, so the model resumes
+/// with a focused plan instead of the bloated history. Pure — unit-testable.
+pub fn build_retrigger_messages(
+    summary: &str,
+    todo_list: &str,
+    original_task: &str,
+) -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "role": "system",
+            "content": format!(
+                "You are continuing a task after a context summarization. \
+                 The following is a summary of the work done so far. Use it to continue \
+                 the task to completion.\n\nSUMMARY:\n{}",
+                summary
+            )
+        }),
+        serde_json::json!({
+            "role": "user",
+            "content": format!(
+                "Original task: {}\n\nRemaining to-do list:\n{}\n\n\
+                 Continue working through the to-do list and complete the task. \
+                 Do not repeat work already summarized.",
+                original_task, todo_list
+            )
+        }),
+    ]
+}
+
+/// Derive a simple to-do list from the last message / current state. In a real
+/// deployment this is produced by the summarization micro-agent; here we provide
+/// a deterministic fallback so the re-trigger always has a plan. Pure.
+pub fn build_fallback_todo_list(last_message: &str) -> String {
+    let trimmed = last_message.trim();
+    if trimmed.is_empty() {
+        "1. Complete the original task and provide the final answer.".to_string()
+    } else {
+        format!(
+            "1. Continue from the last message: {}\n2. Complete the remaining work and provide the final answer.",
+            trimmed.chars().take(200).collect::<String>()
+        )
+    }
+}
+
 /// Detect whether `content` is a "still planning" structured-JSON blob — i.e.
 /// the model explicitly says it is NOT done (`"conclusion": false`) or carries
 /// an empty final_answer. In that case the tool loop must keep going (bounded
 /// by retries) instead of returning the planning JSON as a final answer.
-fn is_planning_json(content: &str) -> bool {
+pub fn is_planning_json(content: &str) -> bool {
     let trimmed = content.trim_start();
     if !trimmed.starts_with('{') {
         return false;
@@ -3017,7 +3777,7 @@ async fn run_spawn_batch(
                 if is_dup {
                     (format!("Sub-agent '{}' was already spawned with this task in this turn; skipped duplicate.", agent), None)
                 } else if let Some(r) = runner {
-                    match Box::pin(run_subagent(r, agent, task)).await {
+                    match Box::pin(run_subagent_with_validation(r, agent, task)).await {
                         Ok((out, trace)) => (out, Some(trace)),
                         Err(e) => (format!("Tool error: {}", e), None),
                     }
@@ -3035,8 +3795,8 @@ async fn run_spawn_batch(
 // Tool definitions & execution
 // ---------------------------------------------------------------------------
 
-fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_json::Value> {
-    build_tool_schemas_inner(enabled, root_path, true)
+pub fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_json::Value> {
+    build_tool_schemas_inner(enabled, root_path, true, None)
 }
 
 /// Internal builder. `allow_spawn_subagent` controls whether the
@@ -3044,10 +3804,13 @@ fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_
 /// so a sub-agent can never delegate to (spawn) another sub-agent — this is
 /// what prevents the cascade where each @mentioned sub-agent re-spawns the
 /// other agents it sees mentioned in its (too-broad) task.
+/// `agent_config` is optional; when provided and `can_spawn_micro_agents` is true,
+/// the `spawn_micro_agent` tool is added.
 fn build_tool_schemas_inner(
     enabled: &[String],
     root_path: Option<&str>,
     allow_spawn_subagent: bool,
+    agent_config: Option<&AgentConfig>,
 ) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
     if enabled.contains(&"web_fetch".to_string()) {
@@ -3437,6 +4200,59 @@ fn build_tool_schemas_inner(
                         }
                     }
                 }));
+            }
+        }
+    }
+
+    // Add a `spawn_micro_agent` tool when the current agent is allowed to
+    // delegate to micro-agents (can_spawn_micro_agents) and micro-agents are
+    // defined in `.micro-agents/`. Only sub-agents with this flag get the tool;
+    // the main agent does not (it delegates to sub-agents, which delegate to
+    // micro-agents).
+    if let Some(ac) = agent_config {
+        if ac.can_spawn_micro_agents {
+            if let Some(rp) = root_path {
+                let micros = list_micro_agent_configs(rp);
+                if !micros.is_empty() {
+                    let micro_list: Vec<String> = micros
+                        .iter()
+                        .filter(|m| ac.allowed_micro_agents.is_empty() || ac.allowed_micro_agents.contains(&m.name))
+                        .map(|m| {
+                            let desc = if m.description.is_empty() { "(no description)" } else { m.description.as_str() };
+                            format!("- {}: {}", m.name, desc)
+                        })
+                        .collect();
+                    if !micro_list.is_empty() {
+                        tools.push(serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": "spawn_micro_agent",
+                                "description": format!(
+                                    "Delegate a focused, mechanical task (fixing a compiler error, writing a test, \
+                                     fixing a lint issue) to a small, fast micro-agent and return its result. \
+                                     Use this for single-purpose, deterministic work that a small model can do \
+                                     reliably and that can be validated with a build/lint/test command. \
+                                     Available micro-agents:\n{}",
+                                    micro_list.join("\n")
+                                ),
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "agent": {
+                                            "type": "string",
+                                            "description": "The name of the micro-agent to spawn (must match one of the available micro-agents)"
+                                        },
+                                        "task": {
+                                            "type": "string",
+                                            "description": "The focused, single-purpose task for the micro-agent (e.g. 'Fix the cargo check errors in src/main.rs')"
+                                        }
+                                    },
+                                    "required": ["agent", "task"]
+                                }
+                            }
+                        }));
+                    }
+                }
             }
         }
     }
@@ -4603,6 +5419,46 @@ fn take_next_line(buf: &mut Vec<u8>) -> Option<String> {
     Some(line.trim().to_string())
 }
 
+/// The tool-calling architecture of the model currently being driven. Different
+/// model families emit tool calls in subtly different shapes, so the stream
+/// parser adapts its normalization to the architecture. This lets nolock drive
+/// a heterogeneous stack — e.g. nemotron 9B (main, max context), lfm2.5 (intent
+/// classifier / agent router), and qwen3.5:0.8b (micro-agent layer) — each with
+/// its own quirks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelArch {
+    /// Nemotron-class: thinking-capable, emits standard Ollama `message.tool_calls`,
+    /// but can get stuck in "thinking only" mode (handled by the retry loop).
+    Nemotron,
+    /// lfm2.5-class: responds with a structured JSON *planning* blob
+    /// (`{"analysis", "next_steps", "tool_calls"}`) instead of real tool_calls.
+    Lfm,
+    /// Qwen-class (incl. small coder models like qwen3.5:0.8b): may emit
+    /// `arguments` as a JSON *string* rather than an object, and occasionally
+    /// nests tool calls under alternate keys.
+    Qwen,
+    /// DeepSeek-class: reasoning model, OpenAI-compatible tool_calls.
+    DeepSeek,
+    /// Unknown / generic — apply the most permissive normalization.
+    Generic,
+}
+
+/// Classify a model name into a `ModelArch`. Pure — unit-testable.
+pub fn model_architecture(model: &str) -> ModelArch {
+    let m = model.to_lowercase();
+    if m.contains("nemotron") {
+        ModelArch::Nemotron
+    } else if m.contains("lfm") {
+        ModelArch::Lfm
+    } else if m.contains("qwen") {
+        ModelArch::Qwen
+    } else if m.contains("deepseek") {
+        ModelArch::DeepSeek
+    } else {
+        ModelArch::Generic
+    }
+}
+
 /// Accumulated deltas from the Ollama `/api/chat` NDJSON stream.
 #[derive(Default, Debug, PartialEq)]
 struct OllamaChunkAcc {
@@ -4616,8 +5472,11 @@ struct OllamaChunkAcc {
 /// emitted — so it can be unit-tested against realistic streaming responses
 /// from thinking-capable models (Nemotron, Qwen3, DeepSeek-R1, …).
 ///
+/// `arch` lets the parser apply architecture-specific normalization to tool
+/// calls (e.g. Qwen small models emit `arguments` as a JSON string).
+///
 /// Returns `true` when the line was valid JSON (even if it carried no deltas).
-fn apply_ollama_stream_line(line: &str, acc: &mut OllamaChunkAcc) -> bool {
+fn apply_ollama_stream_line(line: &str, acc: &mut OllamaChunkAcc, arch: ModelArch) -> bool {
     let Ok(data) = serde_json::from_str::<serde_json::Value>(line) else {
         return false;
     };
@@ -4633,10 +5492,71 @@ fn apply_ollama_stream_line(line: &str, acc: &mut OllamaChunkAcc) -> bool {
     }
     if let Some(calls) = data["message"]["tool_calls"].as_array() {
         if !calls.is_empty() {
-            acc.tool_calls = Some(calls.clone());
+            acc.tool_calls = Some(
+                calls.iter().map(|c| normalize_ollama_tool_call(c, arch)).collect(),
+            );
         }
     }
     true
+}
+
+/// Normalize a single Ollama tool call into the canonical
+/// `{ "id", "type", "function": { "name", "arguments" } }` shape.
+///
+/// Architecture-specific handling:
+///   - Qwen small models (e.g. qwen3.5:0.8b) sometimes emit `arguments` as a
+///     JSON *string* rather than an object, or nest the call under
+///     `{"function": {"name": ..., "arguments": ...}}` vs a flat
+///     `{"name": ..., "arguments": ...}`. We normalize both.
+///   - lfm2.5 may emit `tool_name` instead of `name` (handled here so the
+///     stream path and the planning-JSON path share one normalizer).
+/// Pure — unit-testable.
+pub fn normalize_ollama_tool_call(call: &serde_json::Value, arch: ModelArch) -> serde_json::Value {
+    // Locate the function object: either `call.function` or the call itself.
+    let func = call.get("function").unwrap_or(call);
+    let name = func
+        .get("name")
+        .or_else(|| func.get("tool_name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Normalize arguments: object → keep; JSON string → parse; else empty.
+    let raw_args = func.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+    let args = match raw_args {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str::<serde_json::Value>(trimmed)
+                    .unwrap_or_else(|_| serde_json::json!({ "value": trimmed }))
+            }
+        }
+        other => other,
+    };
+
+    // Qwen small models occasionally emit arguments as a bare array of
+    // positional values (e.g. `["src/main.rs"]`). Coerce to a `{ "value": ... }`
+    // so the tool executor still receives something usable. Only Qwen does this,
+    // so gate it on the architecture to avoid mangling well-formed calls.
+    let args = if args.is_array() && arch == ModelArch::Qwen {
+        serde_json::json!({ "value": args })
+    } else {
+        args
+    };
+
+    let id = call
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    serde_json::json!({
+        "id": id,
+        "type": "function",
+        "function": { "name": name, "arguments": args }
+    })
 }
 
 /// Stream an Ollama NDJSON response line by line, emitting tokens to the
@@ -4644,9 +5564,10 @@ fn apply_ollama_stream_line(line: &str, acc: &mut OllamaChunkAcc) -> bool {
 /// Returns the iteration-scoped content, thinking trace, and any tool calls found.
 async fn stream_ollama_response(
     mut resp: reqwest::Response,
-    app_handle: &tauri::AppHandle,
+    sink: &(dyn EventSink + Send + Sync),
     full_content: &mut String,
     subagent_id: Option<&str>,
+    arch: ModelArch,
 ) -> Result<StreamResult, String> {
     let mut iter_content = String::new();
     let mut iter_thinking = String::new();
@@ -4664,17 +5585,17 @@ async fn stream_ollama_response(
                         iter_thinking: &mut String,
                         tool_calls: &mut Option<Vec<serde_json::Value>>,
                         full_content: &mut String| {
-        if apply_ollama_stream_line(line, acc) {
+        if apply_ollama_stream_line(line, acc, arch) {
             // Thinking-capable models (Qwen3, Nemotron, DeepSeek-R1, etc.) emit
             // a `thinking` field separate from `content`. Capture it for the
             // tool-loop context but stream it with a `thinking` flag so the
             // frontend can display it transiently without adding it to the
             // conversation messages.
             if !acc.thinking.is_empty() {
-                emit_stream_token(app_handle, subagent_id, &acc.thinking, true);
+                sink.emit_stream_token(subagent_id, &acc.thinking, true);
             }
             if !acc.content.is_empty() {
-                emit_stream_token(app_handle, subagent_id, &acc.content, false);
+                sink.emit_stream_token(subagent_id, &acc.content, false);
                 full_content.push_str(&acc.content);
             }
             iter_content.push_str(&acc.content);
@@ -4765,7 +5686,7 @@ async fn stream_ollama_response(
 /// are stable across iterations so the function signature stays under the
 /// clippy default argument limit (7).
 struct OllamaChatContext<'a> {
-    app_handle: &'a tauri::AppHandle,
+    sink: &'a (dyn EventSink + Send + Sync),
     client: &'a reqwest::Client,
     url: &'a str,
     model: &'a str,
@@ -4773,6 +5694,9 @@ struct OllamaChatContext<'a> {
     root_path: Option<&'a str>,
     /// Configured "reasoning-only" retry budget (from the Chat Model panel).
     reasoning_retries: usize,
+    /// The model's context window (in tokens), used to detect near-limit usage
+    /// and trigger context summarization.
+    context_length: u64,
 }
 
 async fn ollama_chat_with_tools(
@@ -4789,6 +5713,10 @@ async fn ollama_chat_with_tools(
     let mut ollama_msgs = build_initial_messages(messages, tools);
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
+    // Running total of hidden reasoning/thinking tokens across all iterations
+    // (main agent + any sub-agents it spawned). Folded into context_tokens so
+    // the session meter/limit reflects thinking, not just visible content.
+    let mut thinking_tokens: u64 = 0;
     // De-duplicate spawn_subagent calls (same agent + task) within this run.
     let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Bounded retries when a thinking model ends a turn with ONLY reasoning
@@ -4798,6 +5726,14 @@ async fn ollama_chat_with_tools(
     // into the chat.
     let mut thinking_only_retries: usize = 0;
     let thinking_only_max_retries = ctx.reasoning_retries;
+    // Track recent iteration content (or a fingerprint) to detect when the model
+    // starts repeating itself (stuck in a loop). When detected, we trigger a
+    // micro-agent to repurpose the last message, summarize the context, and
+    // re-trigger the model with a to-do list.
+    let mut recent_iterations: Vec<String> = Vec::new();
+    // Whether we've already summarized the context this run (avoid repeated
+    // summarization loops).
+    let mut context_summarized = false;
 
     for iteration in 0..max_iterations {
         // --- Build and send request ---
@@ -4842,7 +5778,14 @@ async fn ollama_chat_with_tools(
         }
 
         // --- Stream the response ---
-        let stream = stream_ollama_response(resp, ctx.app_handle, &mut full_content, subagent_id).await?;
+        let arch = model_architecture(ctx.model);
+        let stream = stream_ollama_response(resp, ctx.sink, &mut full_content, subagent_id, arch).await?;
+        // Accumulate this iteration's hidden reasoning so it counts toward the
+        // session token total (the model processes it even though it's not
+        // visible content).
+        if !stream.iter_thinking.is_empty() {
+            accumulate_thinking(&mut thinking_tokens, &stream.iter_thinking);
+        }
 
         // --- Handle tool calls or return final response ---
         if let Some(calls) = stream.tool_calls {
@@ -4893,16 +5836,60 @@ async fn ollama_chat_with_tools(
                         spawned_subagents.insert(dedup_key);
                     }
                     spawn_items.push((tool_call_id, agent, task, args.clone(), is_dup));
+                } else if name == "spawn_micro_agent" {
+                    let agent = args["agent"].as_str().unwrap_or("").to_string();
+                    let task = args["task"].as_str().unwrap_or("").to_string();
+                    ctx.sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
+                    let result = match runner {
+                        Some(r) => Box::pin(run_micro_agent(r, &agent, &task)).await,
+                        None => Err("Micro-agents are not available".to_string()),
+                    };
+                    let result_text = match result {
+                        Ok((text, v)) => {
+                            let mut out = text.clone();
+                            if !v.is_empty() {
+                                out.push_str("\n\n[Validation results]\n");
+                                for vr in &v {
+                                    out.push_str(&format!(
+                                        "- {}: {}\n",
+                                        vr.name,
+                                        if vr.passed { "PASS" } else { "FAIL" }
+                                    ));
+                                }
+                            }
+                            out
+                        }
+                        Err(e) => format!("Tool error: {}", e),
+                    };
+                    ctx.sink.emit_tool_progress(subagent_id, "done", "spawn_micro_agent", tool_path);
+                    let snippet = if result_text.len() > 200 {
+                        format!("{}...", &result_text[..200])
+                    } else {
+                        result_text.clone()
+                    };
+                    all_tool_calls.push(ToolCallLog {
+                        name: "spawn_micro_agent".to_string(),
+                        arguments: serde_json::to_string(args).unwrap_or_default(),
+                        result_snippet: snippet,
+                        result_full: result_text.clone(),
+                        file_changes: Vec::new(),
+                        subagent: None,
+                    });
+                    ollama_msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": result_text
+                    }));
                 } else {
-                    emit_tool_progress(ctx.app_handle, subagent_id, "start", name, tool_path.clone());
+                    ctx.sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
                     let (result, file_changes) =
                         execute_tool_tracked(name, args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
                             .await
                             .unwrap_or_else(|e| {
-                                emit_tool_progress(ctx.app_handle, subagent_id, "error", name, tool_path.clone());
+                                ctx.sink.emit_tool_progress(subagent_id, "error", name, tool_path.clone());
                                 (format!("Tool error: {}", e), Vec::new())
                             });
-                    emit_tool_progress(ctx.app_handle, subagent_id, "done", name, tool_path);
+                    ctx.sink.emit_tool_progress(subagent_id, "done", name, tool_path);
 
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
@@ -4934,7 +5921,13 @@ async fn ollama_chat_with_tools(
                 let outcomes = run_spawn_batch(runner, &batch).await;
 
                 for ((tool_call_id, _, _, args, _), (result, subagent_trace)) in spawn_items.into_iter().zip(outcomes) {
-                    emit_tool_progress(ctx.app_handle, subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
+                    ctx.sink.emit_tool_progress(subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
+
+                    // Charge the sub-agent's hidden reasoning to the parent's
+                    // session token total so a sub-agent-heavy turn is counted.
+                    if let Some(ref trace) = subagent_trace {
+                        thinking_tokens += trace.thinking_tokens;
+                    }
 
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
@@ -4981,19 +5974,22 @@ async fn ollama_chat_with_tools(
                 // it never shows up in the final answer.
                 full_content.truncate(full_content.len().saturating_sub(stream.iter_content.len()));
                 for (pi, tc) in planned.into_iter().enumerate() {
+                    // Normalize the planned call (lfm2.5 may emit `tool_name` /
+                    // string arguments) so it matches the canonical shape.
+                    let tc = normalize_ollama_tool_call(&tc, arch);
                     let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
                     let args = tc["function"]["arguments"].clone();
                     let tool_call_id = format!("call_planned_{}_{}", iteration, pi);
                     let tool_path = args["path"].as_str().map(String::from);
-                    emit_tool_progress(ctx.app_handle, subagent_id, "start", &name, tool_path.clone());
+                    ctx.sink.emit_tool_progress(subagent_id, "start", &name, tool_path.clone());
                     let (result, file_changes) =
                         execute_tool_tracked(&name, &args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
                             .await
                             .unwrap_or_else(|e| {
-                                emit_tool_progress(ctx.app_handle, subagent_id, "error", &name, tool_path.clone());
+                                ctx.sink.emit_tool_progress(subagent_id, "error", &name, tool_path.clone());
                                 (format!("Tool error: {}", e), Vec::new())
                             });
-                    emit_tool_progress(ctx.app_handle, subagent_id, "done", &name, tool_path);
+                    ctx.sink.emit_tool_progress(subagent_id, "done", &name, tool_path);
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
                     } else {
@@ -5024,16 +6020,74 @@ async fn ollama_chat_with_tools(
                 continue;
             }
 
-            // Otherwise it's a final response, unless the model only reasoned
-            // and never produced a visible answer or tool call. In that case
-            // retry (bounded) with an escalating reminder so the user gets a
-            // real answer rather than "(no response)" or a dump of the
-            // thinking trace. A "still planning" JSON (conclusion:false / empty
-            // final_answer) is also NOT a final answer — keep looping.
-            let planning_state = stream.iter_content.is_empty()
-                && !stream.iter_thinking.is_empty()
-                || is_planning_json(&stream.iter_content);
-            if planning_state {
+            // The main agent concludes the task is done when the response is a
+            // COMPLETE final answer: substantive visible content, no pending
+            // tool calls, and not a "still planning" JSON. If it only reasoned
+            // (thinking-only) or emitted a planning JSON, it is NOT done — retry
+            // (bounded) with an escalating reminder so the user gets a real
+            // answer rather than "(no response)" or a dump of the thinking trace.
+            let complete = is_complete_answer(&stream.iter_content, false);
+            if !complete {
+                // Track this iteration's content for repetition detection.
+                recent_iterations.push(stream.iter_content.clone());
+                if recent_iterations.len() > REPETITION_WINDOW {
+                    recent_iterations.remove(0);
+                }
+
+                // Context usage so far (messages + accumulated content + thinking).
+                let context_tokens_now = estimate_json_messages_tokens(&ollama_msgs)
+                    + estimate_chat_tokens(&full_content)
+                    + thinking_tokens;
+
+                // 1. Repetition detection → micro-agent repurpose + summarize +
+                //    re-trigger with a to-do list. This is the "stuck in a loop"
+                //    recovery: instead of endlessly retrying the same nudge, we
+                //    compact the context and give the model a fresh plan.
+                if detect_repetition(&recent_iterations, REPETITION_WINDOW) {
+                    eprintln!(
+                        "[nolock] ollama tool loop iteration={} detected repetition; summarizing context and re-triggering",
+                        iteration
+                    );
+                    let last_message = stream.iter_content.clone();
+                    let todo_list = build_fallback_todo_list(&last_message);
+                    let summary = if let Some(r) = runner {
+                        summarize_context_via_micro_agent(r, &last_message, &todo_list).await
+                            .unwrap_or_else(|| last_message.clone())
+                    } else {
+                        last_message.clone()
+                    };
+                    ollama_msgs = build_retrigger_messages(&summary, &todo_list, &task_hint(messages));
+                    context_summarized = true;
+                    recent_iterations.clear();
+                    continue;
+                }
+
+                // 2. Context near the limit → summarize to free room before the
+                //    model stalls or the request is rejected for exceeding the
+                //    window. Only do this once per run.
+                if !context_summarized
+                    && should_summarize_context(context_tokens_now, ctx.context_length)
+                {
+                    eprintln!(
+                        "[nolock] ollama tool loop iteration={} context at {:.0}% of window; summarizing",
+                        iteration,
+                        context_usage_ratio(context_tokens_now, ctx.context_length) * 100.0
+                    );
+                    let last_message = stream.iter_content.clone();
+                    let todo_list = build_fallback_todo_list(&last_message);
+                    let summary = if let Some(r) = runner {
+                        summarize_context_via_micro_agent(r, &last_message, &todo_list).await
+                            .unwrap_or_else(|| last_message.clone())
+                    } else {
+                        last_message.clone()
+                    };
+                    ollama_msgs = build_retrigger_messages(&summary, &todo_list, &task_hint(messages));
+                    context_summarized = true;
+                    recent_iterations.clear();
+                    continue;
+                }
+
+                // 3. Otherwise: thinking-only retry (existing escalating nudge).
                 if thinking_only_retries < thinking_only_max_retries {
                     thinking_only_retries += 1;
                     eprintln!(
@@ -5081,7 +6135,7 @@ async fn ollama_chat_with_tools(
             if full_content.is_empty() && all_tool_calls.is_empty() {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
-            let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content);
+            let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
             // If we gave up on a "still planning" JSON, surface the readable
             // analysis rather than the raw structured-JSON dump.
             let final_content = if is_planning_json(&full_content) {
@@ -5097,6 +6151,7 @@ async fn ollama_chat_with_tools(
                 },
                 tool_calls: all_tool_calls,
                 context_tokens,
+                thinking_tokens,
             });
         }
     }
@@ -5108,7 +6163,7 @@ async fn ollama_chat_with_tools(
         full_content.len(),
         all_tool_calls.len()
     );
-    let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content);
+    let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
     Ok(ChatResult {
         content: if full_content.is_empty() {
             "(max tool iterations reached, no response)".to_string()
@@ -5117,6 +6172,7 @@ async fn ollama_chat_with_tools(
         },
         tool_calls: all_tool_calls,
         context_tokens,
+        thinking_tokens,
     })
 }
 
@@ -5158,6 +6214,8 @@ body
 struct OpenAIStreamResult {
     /// Content emitted by the model in this iteration.
     iter_content: String,
+    /// Hidden reasoning/thinking emitted by the model this iteration.
+    iter_thinking: String,
     /// Tool calls detected, if any.
     tool_calls: Option<Vec<serde_json::Value>>,
 }
@@ -5166,16 +6224,19 @@ struct OpenAIStreamResult {
 /// and accumulating content. Returns iteration-scoped content and any tool calls.
 async fn stream_openai_response(
     mut resp: reqwest::Response,
-    app_handle: &tauri::AppHandle,
+    sink: &(dyn EventSink + Send + Sync),
     full_content: &mut String,
     subagent_id: Option<&str>,
+    arch: ModelArch,
 ) -> Result<OpenAIStreamResult, String> {
     let mut iter_content = String::new();
+    let mut iter_thinking = String::new();
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
     let mut buf: Vec<u8> = Vec::new();
 
     let process_sse_data = |data: &str,
                             iter_content: &mut String,
+                            iter_thinking: &mut String,
                             tool_calls: &mut Option<Vec<serde_json::Value>>,
                             full_content: &mut String|
      -> Result<(), String> {
@@ -5184,7 +6245,8 @@ async fn stream_openai_response(
             // `thinking` flag so the frontend can display it transiently.
             if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
                 if !thinking.is_empty() {
-                    emit_stream_token(app_handle, subagent_id, thinking, true);
+                    iter_thinking.push_str(thinking);
+                    sink.emit_stream_token(subagent_id, thinking, true);
                 }
             }
             // Content delta
@@ -5192,7 +6254,7 @@ async fn stream_openai_response(
                 if !content.is_empty() {
                     iter_content.push_str(content);
                     full_content.push_str(content);
-                    emit_stream_token(app_handle, subagent_id, content, false);
+                    sink.emit_stream_token(subagent_id, content, false);
                 }
             }
             // Tool calls delta (OpenAI format: delta.tool_calls)
@@ -5238,7 +6300,7 @@ async fn stream_openai_response(
                     if let Some(data) = line.strip_prefix("data: ") {
                         let data = data.trim();
                         if data == "[DONE]" { continue; }
-                        process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
+                        process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
                     }
                 }
             }
@@ -5264,12 +6326,18 @@ async fn stream_openai_response(
         if let Some(data) = line.strip_prefix("data: ") {
             let data = data.trim();
             if data != "[DONE]" {
-                process_sse_data(data, &mut iter_content, &mut tool_calls, full_content)?;
+                process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
             }
         }
     }
 
-    Ok(OpenAIStreamResult { iter_content, tool_calls })
+    // Normalize accumulated tool calls (arguments arrive as JSON strings in the
+    // OpenAI format; DeepSeek/Qwen may also emit alternate shapes).
+    let tool_calls = tool_calls.map(|calls| {
+        calls.iter().map(|c| normalize_ollama_tool_call(c, arch)).collect()
+    });
+
+    Ok(OpenAIStreamResult { iter_content, iter_thinking, tool_calls })
 }
 
 /// Normalize tool-call arguments to a JSON object.
@@ -5296,7 +6364,7 @@ fn normalize_tool_args(raw: &serde_json::Value) -> serde_json::Value {
 /// Run an OpenAI-compatible tool-calling loop (DigitalOcean, OpenRouter, etc.).
 async fn run_openai_tool_loop(
     client: &reqwest::Client,
-    app_handle: &tauri::AppHandle,
+    sink: &(dyn EventSink + Send + Sync),
     url: &str,
     api_key: &str,
     model: &str,
@@ -5313,6 +6381,7 @@ async fn run_openai_tool_loop(
     subagent_id: Option<&str>,
     runner: Option<&SubAgentRunner<'_>>,
     pre_spawned: &std::collections::HashSet<String>,
+    context_length: u64,
 ) -> Result<ChatResult, String> {
     let mut openai_msgs: Vec<serde_json::Value> = messages
         .iter()
@@ -5363,6 +6432,9 @@ async fn run_openai_tool_loop(
 
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
+    // Running total of hidden reasoning/thinking tokens across all iterations
+    // (main agent + any sub-agents it spawned). Folded into context_tokens.
+    let mut thinking_tokens: u64 = 0;
     // De-duplicate spawn_subagent calls (same agent + task) within this run.
     let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -5376,6 +6448,16 @@ async fn run_openai_tool_loop(
         .unwrap_or_default()
         .as_nanos()
         .to_string();
+
+    // Bounded retries when a thinking model (deepseek-r1, qwen3, …) ends a turn
+    // with ONLY reasoning (no content, no tool call). We nudge it to produce a
+    // real answer / structured tool call instead of dumping the reasoning.
+    let mut thinking_only_retries: usize = 0;
+    let thinking_only_max_retries = runner.map(|r| r.reasoning_retries).unwrap_or(THINKING_ONLY_MAX_RETRIES);
+    // Track recent iteration content to detect repetition (stuck in a loop).
+    let mut recent_iterations: Vec<String> = Vec::new();
+    // Whether we've already summarized the context this run.
+    let mut context_summarized = false;
 
     for iteration in 0..max_iterations {
         // Build request body. DigitalOcean deprecates `max_tokens` in favor of
@@ -5439,7 +6521,7 @@ async fn run_openai_tool_loop(
                 // Surface the routed model to the frontend so the user can see
                 // which model the DigitalOcean Inference Router selected (helps
                 // diagnose e.g. reasoning-model "overthinking").
-                app_handle.emit("model-routed", m.to_string()).ok();
+                sink.emit_model_routed(m);
             }
         }
         if !status.is_success() {
@@ -5468,7 +6550,14 @@ async fn run_openai_tool_loop(
         }
 
         // Stream the response
-        let stream = stream_openai_response(resp, app_handle, &mut full_content, subagent_id).await?;
+        let arch = model_architecture(model);
+        let stream = stream_openai_response(resp, sink, &mut full_content, subagent_id, arch).await?;
+        // Accumulate this iteration's hidden reasoning so it counts toward the
+        // session token total (the model processes it even though it's not
+        // visible content).
+        if !stream.iter_thinking.is_empty() {
+            accumulate_thinking(&mut thinking_tokens, &stream.iter_thinking);
+        }
 
         // Handle tool calls or return final response
         if let Some(calls) = stream.tool_calls {
@@ -5538,16 +6627,60 @@ async fn run_openai_tool_loop(
                         spawned_subagents.insert(dedup_key);
                     }
                     spawn_items.push((tool_call_id, agent, task, args.clone(), is_dup));
+                } else if name == "spawn_micro_agent" {
+                    let agent = args["agent"].as_str().unwrap_or("").to_string();
+                    let task = args["task"].as_str().unwrap_or("").to_string();
+                    sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
+                    let result = match runner {
+                        Some(r) => Box::pin(run_micro_agent(r, &agent, &task)).await,
+                        None => Err("Micro-agents are not available".to_string()),
+                    };
+                    let result_text = match result {
+                        Ok((text, v)) => {
+                            let mut out = text.clone();
+                            if !v.is_empty() {
+                                out.push_str("\n\n[Validation results]\n");
+                                for vr in &v {
+                                    out.push_str(&format!(
+                                        "- {}: {}\n",
+                                        vr.name,
+                                        if vr.passed { "PASS" } else { "FAIL" }
+                                    ));
+                                }
+                            }
+                            out
+                        }
+                        Err(e) => format!("Tool error: {}", e),
+                    };
+                    sink.emit_tool_progress(subagent_id, "done", "spawn_micro_agent", tool_path);
+                    let snippet = if result_text.len() > 200 {
+                        format!("{}...", &result_text[..200])
+                    } else {
+                        result_text.clone()
+                    };
+                    all_tool_calls.push(ToolCallLog {
+                        name: "spawn_micro_agent".to_string(),
+                        arguments: serde_json::to_string(&args).unwrap_or_default(),
+                        result_snippet: snippet,
+                        result_full: result_text.clone(),
+                        file_changes: Vec::new(),
+                        subagent: None,
+                    });
+                    openai_msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": result_text
+                    }));
                 } else {
-                    emit_tool_progress(app_handle, subagent_id, "start", name, tool_path.clone());
+                    sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
                     let (result, file_changes) =
                         execute_tool_tracked(name, &args, client, tool_configs, root_path, backend)
                             .await
                             .unwrap_or_else(|e| {
-                                emit_tool_progress(app_handle, subagent_id, "error", name, tool_path.clone());
+                                sink.emit_tool_progress(subagent_id, "error", name, tool_path.clone());
                                 (format!("Tool error: {}", e), Vec::new())
                             });
-                    emit_tool_progress(app_handle, subagent_id, "done", name, tool_path);
+                    sink.emit_tool_progress(subagent_id, "done", name, tool_path);
 
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
@@ -5579,7 +6712,13 @@ async fn run_openai_tool_loop(
                 let outcomes = run_spawn_batch(runner, &batch).await;
 
                 for ((tool_call_id, _, _, args, _), (result, subagent_trace)) in spawn_items.into_iter().zip(outcomes) {
-                    emit_tool_progress(app_handle, subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
+                    sink.emit_tool_progress(subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
+
+                    // Charge the sub-agent's hidden reasoning to the parent's
+                    // session token total so a sub-agent-heavy turn is counted.
+                    if let Some(ref trace) = subagent_trace {
+                        thinking_tokens += trace.thinking_tokens;
+                    }
 
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
@@ -5607,7 +6746,83 @@ async fn run_openai_tool_loop(
                 full_content.push('\n');
             }
         } else {
-            // No tool calls — final response
+            // No tool calls — final response. The main agent concludes the task
+            // is done when the response is a COMPLETE final answer. If it only
+            // reasoned (thinking-only) or repeated itself, recover automatically.
+            let complete = is_complete_answer(&stream.iter_content, false);
+            if !complete {
+                // Track this iteration's content for repetition detection.
+                recent_iterations.push(stream.iter_content.clone());
+                if recent_iterations.len() > REPETITION_WINDOW {
+                    recent_iterations.remove(0);
+                }
+
+                let context_tokens_now = estimate_json_messages_tokens(&openai_msgs)
+                    + estimate_chat_tokens(&full_content)
+                    + thinking_tokens;
+
+                // 1. Repetition detection → micro-agent repurpose + summarize +
+                //    re-trigger with a to-do list.
+                if detect_repetition(&recent_iterations, REPETITION_WINDOW) {
+                    eprintln!(
+                        "[nolock] openai-tool-loop iteration={} detected repetition; summarizing context and re-triggering",
+                        iteration
+                    );
+                    let last_message = stream.iter_content.clone();
+                    let todo_list = build_fallback_todo_list(&last_message);
+                    let summary = if let Some(r) = runner {
+                        summarize_context_via_micro_agent(r, &last_message, &todo_list).await
+                            .unwrap_or_else(|| last_message.clone())
+                    } else {
+                        last_message.clone()
+                    };
+                    openai_msgs = build_retrigger_messages(&summary, &todo_list, &task_hint(messages));
+                    context_summarized = true;
+                    recent_iterations.clear();
+                    continue;
+                }
+
+                // 2. Context near the limit → summarize to free room.
+                if !context_summarized
+                    && should_summarize_context(context_tokens_now, context_length)
+                {
+                    eprintln!(
+                        "[nolock] openai-tool-loop iteration={} context at {:.0}% of window; summarizing",
+                        iteration,
+                        context_usage_ratio(context_tokens_now, context_length) * 100.0
+                    );
+                    let last_message = stream.iter_content.clone();
+                    let todo_list = build_fallback_todo_list(&last_message);
+                    let summary = if let Some(r) = runner {
+                        summarize_context_via_micro_agent(r, &last_message, &todo_list).await
+                            .unwrap_or_else(|| last_message.clone())
+                    } else {
+                        last_message.clone()
+                    };
+                    openai_msgs = build_retrigger_messages(&summary, &todo_list, &task_hint(messages));
+                    context_summarized = true;
+                    recent_iterations.clear();
+                    continue;
+                }
+
+                // 3. Thinking-only retry (bounded nudge).
+                if thinking_only_retries < thinking_only_max_retries {
+                    thinking_only_retries += 1;
+                    eprintln!(
+                        "[nolock] openai-tool-loop iteration={} reasoning-only, retry {}/{}",
+                        iteration, thinking_only_retries, thinking_only_max_retries
+                    );
+                    openai_msgs.push(serde_json::json!({
+                        "role": "system",
+                        "content": "You have just finished your reasoning without producing a visible \
+                                    answer or a tool call. Now provide the final answer as plain, visible \
+                                    text (no reasoning trace). If you need to call a tool to answer, call it \
+                                    in the next response."
+                    }));
+                    continue;
+                }
+            }
+
             eprintln!(
                 "[nolock] openai-tool-loop iteration={} no tool_calls, returning: content_len={} tool_calls={}",
                 iteration,
@@ -5617,7 +6832,7 @@ async fn run_openai_tool_loop(
             if full_content.is_empty() && all_tool_calls.is_empty() {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
-            let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content);
+            let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
             return Ok(ChatResult {
                 content: if full_content.is_empty() {
                     "(no response)".to_string()
@@ -5626,6 +6841,7 @@ async fn run_openai_tool_loop(
                 },
                 tool_calls: all_tool_calls,
                 context_tokens,
+                thinking_tokens,
             });
         }
     }
@@ -5637,7 +6853,7 @@ async fn run_openai_tool_loop(
         full_content.len(),
         all_tool_calls.len()
     );
-    let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content);
+    let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
     Ok(ChatResult {
         content: if full_content.is_empty() {
             "(max tool iterations reached, no response)".to_string()
@@ -5646,6 +6862,7 @@ async fn run_openai_tool_loop(
         },
         tool_calls: all_tool_calls,
         context_tokens,
+        thinking_tokens,
     })
 }
 
@@ -5812,7 +7029,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
             let resp = client
                 .post("https://openrouter.ai/api/v1/chat/completions")
                 .header("Authorization", format!("Bearer {}", api_key))
-                .header("HTTP-Referer", "https://nolock.dev")
+                .header("HTTP-Referer", "https://nolock.impacte.tech")
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
@@ -5980,6 +7197,19 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
 
 #[tauri::command]
 async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatResult, String> {
+    let memory = app_handle.state::<SubAgentMemory>();
+    run_chat(&app_handle, memory.inner(), req).await
+}
+
+/// Core chat entry point, shared by the Tauri command and the headless CLI /
+/// E2E harness. `sink` reports live progress (streamed tokens, tool progress,
+/// sub-agent windows) and `subagent_memory` persists per-agent conversation
+/// memory across turns.
+pub async fn run_chat(
+    sink: &(dyn EventSink + Send + Sync),
+    subagent_memory: &SubAgentMemory,
+    req: ChatRequest,
+) -> Result<ChatResult, String> {
     eprintln!(
         "[nolock] ai_chat backend={} url={} model={} messages={} tools={:?} temp={:?} max_tokens={:?} system_prompt={:?}",
         req.backend,
@@ -6049,9 +7279,21 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             .unwrap_or(CLOUD_DEFAULT_MAX_TOKENS)
             .min(max_output.max(1)),
     );
+    // Bound the LOCAL output budget against the real context window too.
+    // Previously LOCAL_TOOL_MAX_TOKENS (256k) was sent as num_predict even
+    // when the model's working window could not fit it — after sub-agent
+    // results inflate the input, the (much smaller) effective budget gets
+    // burned entirely on thinking tokens and the generation is truncated
+    // before visible content → the "reasoning-only" retry loop. Keep a 4096
+    // floor so tool-dominated agents still have one plausible cycle.
+    let max_tokens = if is_cloud_backend(&req.backend) {
+        max_tokens
+    } else {
+        bound_local_max_tokens(max_tokens, max_output)
+    };
     eprintln!(
-        "[nolock] ai_chat resolved max_tokens={} (local, user={:?}, has_tools={}) cloud_max_tokens={:?}",
-        max_tokens, req.max_tokens, has_tools, cloud_max_tokens
+        "[nolock] ai_chat resolved max_tokens={} (local, user={:?}, has_tools={}) cloud_max_tokens={:?} context_len={} input_estimate={} max_output={}",
+        max_tokens, req.max_tokens, has_tools, cloud_max_tokens, context_len, input_estimate, max_output
     );
 
     // Prepend global system prompt if provided and not already present
@@ -6080,12 +7322,9 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
     // Shared sub-agent conversation memory (persists across turns in the same
     // session). Read once and pass the reference down through the runner.
-    let subagent_memory = app_handle.state::<SubAgentMemory>();
-
-    // Runner used to spawn sub-agents from within the tool loops.
     let main_api_key = req.api_key.clone().unwrap_or_default();
     let runner = SubAgentRunner {
-        app_handle: &app_handle,
+        sink,
         client: &client,
         main_backend: &req.backend,
         main_url: &req.url,
@@ -6097,6 +7336,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
         max_tokens: cloud_max_tokens,
         max_iterations: req.max_iterations,
         reasoning_retries: req.reasoning_retries.unwrap_or(THINKING_ONLY_MAX_RETRIES),
+        context_length: context_len as u64,
         use_model_affinity: req.model_affinity.unwrap_or(true),
         depth: 0,
         memory: &subagent_memory,
@@ -6143,13 +7383,14 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
         "ollama" => {
             if has_tools {
                 let ollama_ctx = OllamaChatContext {
-                    app_handle: &app_handle,
+                    sink,
                     client: &client,
                     url: &req.url,
                     model: &req.model,
                     tool_configs: &req.tool_configs,
                     root_path: req.root_path.as_deref(),
                     reasoning_retries: req.reasoning_retries.unwrap_or(THINKING_ONLY_MAX_RETRIES),
+                    context_length: context_len as u64,
                 };
                 ollama_chat_with_tools(&ollama_ctx, &messages, &tools, req.max_iterations, temperature, max_tokens, None, Some(&runner), &pre_spawned)
                     .await
@@ -6208,6 +7449,8 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 // Start with the failure message; it is replaced as soon as the
                 // model produces a real answer.
                 let mut final_content = "(no response)".to_string();
+                // Running total of hidden reasoning across all retry attempts.
+                let mut total_thinking = String::new();
                 loop {
                     let mut full_content = String::new();
                     let mut full_thinking = String::new();
@@ -6217,20 +7460,14 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                         |line: &str,
                          full_content: &mut String,
                          full_thinking: &mut String| {
-                            if apply_ollama_stream_line(line, &mut acc) {
+                            if apply_ollama_stream_line(line, &mut acc, ModelArch::Generic) {
                                 if !acc.thinking.is_empty() {
                                     full_thinking.push_str(&acc.thinking);
-                                    app_handle.emit("stream-token", StreamPayload {
-                                        token: acc.thinking.clone(),
-                                        thinking: true,
-                                    }).ok();
+                                    sink.emit_stream_token(None, &acc.thinking, true);
                                 }
                                 if !acc.content.is_empty() {
                                     full_content.push_str(&acc.content);
-                                    app_handle.emit("stream-token", StreamPayload {
-                                        token: acc.content.clone(),
-                                        thinking: false,
-                                    }).ok();
+                                    sink.emit_stream_token(None, &acc.content, false);
                                 }
                                 acc = OllamaChunkAcc::default();
                             }
@@ -6257,6 +7494,12 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                 buf.clear();
                             }
                         }
+                    }
+
+                    // Accumulate the hidden reasoning so it counts toward the
+                    // session token total across all retry attempts.
+                    if !full_thinking.is_empty() {
+                        total_thinking.push_str(&full_thinking);
                     }
 
                     if !full_content.is_empty() {
@@ -6309,10 +7552,13 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                             e.to_string()
                         })?;
                 }
+                let mut thinking_tokens = 0u64;
+                accumulate_thinking(&mut thinking_tokens, &total_thinking);
                 Ok(ChatResult {
                     content: final_content,
                     tool_calls: vec![],
-                    context_tokens: estimate_messages_tokens(&messages),
+                    context_tokens: estimate_messages_tokens(&messages) + thinking_tokens,
+                    thinking_tokens,
                 })
             }
         }
@@ -6366,10 +7612,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                     if let Some(content) = json["content"].as_str() {
                                         if !content.is_empty() {
                                             full_content.push_str(content);
-                                            app_handle.emit("stream-token", StreamPayload {
-                                                token: content.to_string(),
-                                                thinking: false,
-                                            }).ok();
+                                            sink.emit_stream_token(None, &content.to_string(), false);
                                         }
                                     }
                                 }
@@ -6388,10 +7631,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                             if let Some(content) = json["content"].as_str() {
                                 if !content.is_empty() {
                                     full_content.push_str(content);
-                                    app_handle.emit("stream-token", StreamPayload {
-                                        token: content.to_string(),
-                                        thinking: false,
-                                    }).ok();
+                                    sink.emit_stream_token(None, &content.to_string(), false);
                                 }
                             }
                         }
@@ -6403,6 +7643,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 content: full_content,
                 tool_calls: vec![],
                 context_tokens: ctx_tokens_estimate,
+                thinking_tokens: 0,
             })
         }
         "openrouter" => {
@@ -6415,7 +7656,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 let full_url = "https://openrouter.ai/api/v1/chat/completions".to_string();
                 run_openai_tool_loop(
                     &client,
-                    &app_handle,
+                    sink,
                     &full_url,
                     &api_key,
                     &req.model,
@@ -6427,11 +7668,12 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     temperature,
                     cloud_max_tokens,
                     req.max_iterations,
-                    Some(vec![("HTTP-Referer", "https://nolock.dev")]),
+                    Some(vec![("HTTP-Referer", "https://nolock.impacte.tech")]),
                     true,
                     None, // subagent_id (main agent)
                     Some(&runner),
                     &pre_spawned,
+                    context_len as u64,
                 )
                 .await
             } else {
@@ -6455,7 +7697,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 let mut resp = client
                     .post("https://openrouter.ai/api/v1/chat/completions")
                     .header("Authorization", format!("Bearer {}", api_key))
-                    .header("HTTP-Referer", "https://nolock.dev")
+                    .header("HTTP-Referer", "https://nolock.impacte.tech")
                     .json(&body)
                     .timeout(std::time::Duration::from_secs(60))
                     .send()
@@ -6492,19 +7734,13 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
                         if !thinking.is_empty() {
                             full_thinking.push_str(thinking);
-                            app_handle.emit("stream-token", StreamPayload {
-                                token: thinking.to_string(),
-                                thinking: true,
-                            }).ok();
+                            sink.emit_stream_token(None, &thinking.to_string(), true);
                         }
                     }
                     if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                         if !content.is_empty() {
                             full_content.push_str(content);
-                            app_handle.emit("stream-token", StreamPayload {
-                                token: content.to_string(),
-                                thinking: false,
-                            }).ok();
+                            sink.emit_stream_token(None, &content.to_string(), false);
                         }
                     }
                 };
@@ -6545,19 +7781,18 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     } else {
                         full_thinking.clone()
                     };
-                    app_handle.emit("stream-token", StreamPayload {
-                        token: as_content.clone(),
-                        thinking: false,
-                    }).ok();
+                    sink.emit_stream_token(None, &as_content, false);
                     as_content
                 } else {
                     full_content
                 };
-                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&final_content);
+                let thinking_tokens = estimate_chat_tokens(&full_thinking);
+                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&final_content) + thinking_tokens;
                 Ok(ChatResult {
                     content: final_content,
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
+                    thinking_tokens,
                 })
             }
         }
@@ -6600,6 +7835,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 
                 // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
                 let mut full_content = String::new();
+                let mut full_thinking = String::new();
                 let mut buf: Vec<u8> = Vec::new();
                 loop {
                     match resp.chunk().await.map_err(|e| e.to_string())? {
@@ -6611,13 +7847,16 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                     let data = data.trim();
                                     if data == "[DONE]" { continue; }
                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
+                                            if !thinking.is_empty() {
+                                                full_thinking.push_str(thinking);
+                                                 sink.emit_stream_token(None, &thinking.to_string(), true);
+                                            }
+                                        }
                                         if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                             if !content.is_empty() {
                                                 full_content.push_str(content);
-                                                 app_handle.emit("stream-token", StreamPayload {
-                                                    token: content.to_string(),
-                                                    thinking: false,
-                                                }).ok();
+                                                 sink.emit_stream_token(None, &content.to_string(), false);
                                             }
                                         }
                                     }
@@ -6633,24 +7872,29 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                         let data = data.trim();
                         if data != "[DONE]" {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
+                                    if !thinking.is_empty() {
+                                        full_thinking.push_str(thinking);
+                                         sink.emit_stream_token(None, &thinking.to_string(), true);
+                                    }
+                                }
                                 if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
                                     if !content.is_empty() {
                                         full_content.push_str(content);
-                                        app_handle.emit("stream-token", StreamPayload {
-                                            token: content.to_string(),
-                                            thinking: false,
-                                        }).ok();
+                                        sink.emit_stream_token(None, &content.to_string(), false);
                                     }
                                 }
                             }
                         }
                     }
                 }
-                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
+                let thinking_tokens = estimate_chat_tokens(&full_thinking);
+                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content) + thinking_tokens;
                 Ok(ChatResult {
                     content: full_content,
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
+                    thinking_tokens,
                 })
             } else {
                 // Local OpenCode Zen — Ollama-compatible NDJSON streaming
@@ -6703,10 +7947,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                                     if let Some(content) = data["response"].as_str() {
                                          if !content.is_empty() {
                                             full_content.push_str(content);
-                                            app_handle.emit("stream-token", StreamPayload {
-                                                token: content.to_string(),
-                                                thinking: false,
-                                            }).ok();
+                                            sink.emit_stream_token(None, &content.to_string(), false);
                                         }
                                     }
                                 }
@@ -6721,10 +7962,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                         if let Some(content) = data["response"].as_str() {
                             if !content.is_empty() {
                                 full_content.push_str(content);
-                                app_handle.emit("stream-token", StreamPayload {
-                                    token: content.to_string(),
-                                    thinking: false,
-                                }).ok();
+                                sink.emit_stream_token(None, &content.to_string(), false);
                             }
                         }
                     }
@@ -6734,6 +7972,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                     content: full_content,
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
+                    thinking_tokens: 0,
                 })
             }
         }
@@ -6754,7 +7993,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
             // Use the OpenAI-compatible tool calling loop
             run_openai_tool_loop(
                 &client,
-                &app_handle,
+                sink,
                 &full_url,
                 &api_key,
                 &req.model,
@@ -6771,6 +8010,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
                 None, // subagent_id (main agent)
                 Some(&runner),
                 &pre_spawned,
+                context_len as u64,
             )
             .await
         }
@@ -6822,6 +8062,8 @@ pub fn run() {
             create_file,
             list_agents,
             read_agent,
+            list_micro_agents,
+            read_micro_agent,
             subagent_reset,
             list_skills,
             run_skill_command,
@@ -8428,7 +9670,7 @@ mod tests {
         ];
         let mut acc = OllamaChunkAcc::default();
         for l in &lines {
-            assert!(apply_ollama_stream_line(l, &mut acc), "line should parse: {}", l);
+            assert!(apply_ollama_stream_line(l, &mut acc, ModelArch::Nemotron), "line should parse: {}", l);
         }
         assert_eq!(acc.thinking, "Let me reason about the bug.");
         assert_eq!(acc.content, "The bug is a null deref.");
@@ -8440,7 +9682,7 @@ mod tests {
         // parse loop (returns false, state untouched).
         let mut acc = OllamaChunkAcc::default();
         let parsed = apply_ollama_stream_line("{\"message\":{\"content\":\"ok",
-                                              &mut acc);
+                                              &mut acc, ModelArch::Generic);
         assert!(!parsed);
         assert!(acc.content.is_empty());
     }
@@ -8450,7 +9692,7 @@ mod tests {
         // Tool calls can appear in any chunk (not just the done:true chunk).
         let line = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"a.rs"}}}]},"done":false}"#;
         let mut acc = OllamaChunkAcc::default();
-        assert!(apply_ollama_stream_line(line, &mut acc));
+        assert!(apply_ollama_stream_line(line, &mut acc, ModelArch::Generic));
         assert!(acc.tool_calls.is_some());
         let calls = acc.tool_calls.unwrap();
         assert_eq!(calls[0]["function"]["name"], "read_file");
@@ -8476,7 +9718,7 @@ mod tests {
         ];
         let mut acc = OllamaChunkAcc::default();
         for l in &stream_lines {
-            assert!(apply_ollama_stream_line(l, &mut acc), "should parse: {}", l);
+            assert!(apply_ollama_stream_line(l, &mut acc, ModelArch::Nemotron), "should parse: {}", l);
         }
         assert!(acc.thinking.contains("user wants"), "thinking trace accumulated");
         let calls = acc.tool_calls.expect("structured tool call must be captured");
@@ -8622,6 +9864,7 @@ mod tests {
             temperature: 0.3,
             tools: vec![],
             thorough: false,
+            ..Default::default()
         };
         let mut providers = HashMap::new();
         // ollama provider entry has a URL but no key configured.
@@ -8684,6 +9927,123 @@ mod tests {
                 "spawn_subagent description should list the available agents:\n{}", desc);
     }
 
+    // ---- Micro-agent config parsing & validation helpers --------------------
+
+    #[test]
+    fn read_agent_parses_nested_validation_block_from_markdown() {
+        // A `.md` agent with the nested `validation:` mapping (see the plan's
+        // Sub-Agent Config example) must fold the indented keys into the JSON
+        // output so load_agent_config picks them up.
+        let content = r#"---
+name: code-reviewer
+description: Reviews code
+model: nemotron:9b
+backend: ollama
+temperature: 0.3
+tools: [read_file, list_directory, grep]
+can_spawn_micro_agents: true
+allowed_micro_agents: [rust-fixer, ts-type-fixer]
+validation:
+  rust_check: true
+  js_ts_lint: true
+  python_check: false
+  custom_commands: []
+  require_all_pass: true
+  max_retries: 5
+---
+
+Review the code."#;
+        let dir = std::env::temp_dir().join("nolock_test_agent_parse");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir.join(".agents")).unwrap();
+        let path = dir.join(".agents").join("code-reviewer.md");
+        std::fs::write(&path, content).unwrap();
+
+        let parsed = read_agent(path.to_string_lossy().to_string()).unwrap();
+        assert_eq!(parsed["can_spawn_micro_agents"], true);
+        assert_eq!(parsed["allowed_micro_agents"][0], "rust-fixer");
+        assert_eq!(parsed["validation"]["rust_check"], true);
+        assert_eq!(parsed["validation"]["js_ts_lint"], true);
+        assert_eq!(parsed["validation"]["max_retries"], 5);
+        assert_eq!(parsed["validation"]["require_all_pass"], true);
+
+        // And the full AgentConfig load path.
+        let cfg = load_agent_config(dir.to_string_lossy().as_ref(), "code-reviewer").unwrap();
+        assert!(cfg.can_spawn_micro_agents);
+        assert_eq!(cfg.allowed_micro_agents, vec!["rust-fixer", "ts-type-fixer"]);
+        assert!(cfg.validation.rust_check);
+        assert!(cfg.validation.js_ts_lint);
+        assert_eq!(cfg.validation.max_retries, 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_micro_agent_config_reads_tools_and_validation() {
+        let dir = std::env::temp_dir().join("nolock_test_micro_parse");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir.join(".micro-agents")).unwrap();
+        let content = r#"---
+name: rust-fixer
+description: Fixes Rust errors
+model: qwen2.5-coder:1.5b
+backend: ollama
+temperature: 0.1
+tools: [read_file, edit, write_file, bash_sandbox]
+validation:
+  rust_check: true
+  max_retries: 3
+---
+
+Fix the errors."#;
+        let path = dir.join(".micro-agents").join("rust-fixer.md");
+        std::fs::write(&path, content).unwrap();
+
+        let cfg = load_micro_agent_config(dir.to_string_lossy().as_ref(), "rust-fixer").unwrap();
+        assert_eq!(cfg.name, "rust-fixer");
+        assert_eq!(cfg.model, "qwen2.5-coder:1.5b");
+        assert_eq!(cfg.backend, "ollama");
+        assert!(cfg.tools.iter().any(|t| t == "edit"));
+        assert!(cfg.validation.rust_check);
+        assert_eq!(cfg.validation.max_retries, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_has_validation_for_task_detects_language_mismatch() {
+        let mut cfg = validation::ValidationConfig::default();
+        cfg.rust_check = true;
+        // Rust task + rust check enabled → available.
+        assert!(validation::project_has_validation_for_task("Fix cargo errors in src/main.rs", &cfg));
+        // TS task but no js_ts_lint enabled → NOT available (should fall back to
+        // the main agent rather than spawn a micro-agent it can't verify).
+        assert!(!validation::project_has_validation_for_task("Fix the eslint errors in App.tsx", &cfg));
+    }
+
+    #[test]
+    fn spawn_micro_agent_tool_only_added_when_can_spawn_micro_agents() {
+        let root = env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri");
+        // Agent WITHOUT the flag → no spawn_micro_agent tool.
+        let plain = AgentConfig { name: "plain".into(), ..Default::default() };
+        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(root), false, Some(&plain));
+        assert!(tools.iter().all(|t| t["function"]["name"].as_str() != Some("spawn_micro_agent")));
+
+        // Agent WITH the flag + a .micro-agents dir present → tool added and
+        // lists only the allowed subset.
+        let delegating = AgentConfig {
+            name: "delegator".into(),
+            can_spawn_micro_agents: true,
+            allowed_micro_agents: vec!["rust-fixer".to_string(), "ts-type-fixer".to_string()],
+            ..Default::default()
+        };
+        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(root), false, Some(&delegating));
+        let micro = tools
+            .iter()
+            .find(|t| t["function"]["name"].as_str() == Some("spawn_micro_agent"));
+        assert!(micro.is_some(), "expected spawn_micro_agent tool for a delegating sub-agent");
+        let desc = micro.unwrap()["function"]["description"].as_str().unwrap_or("");
+        assert!(desc.contains("rust-fixer"), "should list allowed micro-agents: {}", desc);
+    }
+
     #[test]
     fn apply_ollama_stream_line_captures_realistic_spawn_subagent_call() {
         // Replays the EXACT tool-call shape a thinking model (nemotron / lfm2.5)
@@ -8692,11 +10052,183 @@ mod tests {
         // never triggers.
         let line = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_dreqrkza","function":{"index":0,"name":"spawn_subagent","arguments":{"agent":"code-reviewer","task":"review src/main.rs for bugs"}}}],"thinking":"ok"},"done":false}"#;
         let mut acc = OllamaChunkAcc::default();
-        assert!(apply_ollama_stream_line(line, &mut acc));
+        assert!(apply_ollama_stream_line(line, &mut acc, ModelArch::Nemotron));
         let calls = acc.tool_calls.expect("spawn_subagent tool call must survive parsing");
         assert_eq!(calls[0]["function"]["name"], "spawn_subagent");
         assert_eq!(calls[0]["function"]["arguments"]["agent"], "code-reviewer");
         assert_eq!(calls[0]["function"]["arguments"]["task"], "review src/main.rs for bugs");
+    }
+
+    // ---- Model-architecture-aware tool-call parsing ------------------------
+
+    #[test]
+    fn model_architecture_classifies_known_families() {
+        assert_eq!(model_architecture("nemotron-nano-9b-v2"), ModelArch::Nemotron);
+        assert_eq!(model_architecture("lfm2.5"), ModelArch::Lfm);
+        assert_eq!(model_architecture("qwen3.5:0.8b"), ModelArch::Qwen);
+        assert_eq!(model_architecture("deepseek-r1"), ModelArch::DeepSeek);
+        assert_eq!(model_architecture("some-other-model"), ModelArch::Generic);
+    }
+
+    // ---- find_subsequence boundary safety -----------------------------------
+
+    #[test]
+    fn find_subsequence_does_not_panic_when_needle_longer_than_haystack() {
+        // Regression: when the needle is longer than the (remaining) haystack,
+        // the old loop used `saturating_sub` then sliced `[0..needle.len()]`,
+        // which was out of bounds. Must return None instead of panicking.
+        let hay: Vec<char> = "ab".chars().collect();
+        let needle: Vec<char> = "abc".chars().collect();
+        assert_eq!(find_subsequence(&hay, &needle, 0), None);
+    }
+
+    #[test]
+    fn find_subsequence_respects_start_offset_and_remaining_length() {
+        let hay: Vec<char> = "xyzabc".chars().collect();
+        let needle: Vec<char> = "abc".chars().collect();
+        // needle fits when search starts early...
+        assert_eq!(find_subsequence(&hay, &needle, 0), Some(3));
+        // ...but a late start leaves too little room → None (not a panic).
+        assert_eq!(find_subsequence(&hay, &needle, 4), None);
+    }
+
+    // ---- Repetition detection & context summarization ----------------------
+
+    #[test]
+    fn detect_repetition_flags_repeating_content() {
+        // Three identical iterations → repetition detected.
+        let recent = vec![
+            "I will fix the bug".to_string(),
+            "I will fix the bug".to_string(),
+            "I will fix the bug".to_string(),
+        ];
+        assert!(detect_repetition(&recent, REPETITION_WINDOW));
+    }
+
+    #[test]
+    fn detect_repetition_does_not_flag_progress() {
+        // Distinct iterations → not repetition.
+        let recent = vec![
+            "Reading the file".to_string(),
+            "Found the bug".to_string(),
+            "Applying the fix".to_string(),
+        ];
+        assert!(!detect_repetition(&recent, REPETITION_WINDOW));
+    }
+
+    #[test]
+    fn detect_repetition_requires_full_window() {
+        // Fewer than the window → not repetition.
+        let recent = vec!["same".to_string(), "same".to_string()];
+        assert!(!detect_repetition(&recent, REPETITION_WINDOW));
+    }
+
+    #[test]
+    fn detect_repetition_ignores_empty_content() {
+        let recent = vec![
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+        ];
+        assert!(!detect_repetition(&recent, REPETITION_WINDOW));
+    }
+
+    #[test]
+    fn should_summarize_context_triggers_at_threshold() {
+        // 80% usage → summarize.
+        assert!(should_summarize_context(80_000, 100_000));
+        // 50% usage → don't summarize.
+        assert!(!should_summarize_context(50_000, 100_000));
+        // Zero context length → never summarize.
+        assert!(!should_summarize_context(100, 0));
+    }
+
+    #[test]
+    fn context_usage_ratio_is_fraction() {
+        assert!((context_usage_ratio(50_000, 100_000) - 0.5).abs() < 1e-9);
+        assert_eq!(context_usage_ratio(0, 100_000), 0.0);
+        assert_eq!(context_usage_ratio(100, 0), 0.0);
+    }
+
+    #[test]
+    fn build_retrigger_messages_contains_summary_and_todo() {
+        let msgs = build_retrigger_messages("summary here", "1. finish", "original task");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert!(msgs[0]["content"].as_str().unwrap().contains("summary here"));
+        assert_eq!(msgs[1]["role"], "user");
+        assert!(msgs[1]["content"].as_str().unwrap().contains("original task"));
+        assert!(msgs[1]["content"].as_str().unwrap().contains("1. finish"));
+    }
+
+    #[test]
+    fn build_fallback_todo_list_handles_empty() {
+        let todo = build_fallback_todo_list("");
+        assert!(todo.contains("Complete the original task"));
+        let todo2 = build_fallback_todo_list("fix the parser");
+        assert!(todo2.contains("fix the parser"));
+    }
+
+    #[test]
+    fn is_complete_answer_requires_content_and_no_tool_calls() {
+        assert!(is_complete_answer("The answer is 42.", false));
+        assert!(!is_complete_answer("", false));
+        assert!(!is_complete_answer("The answer is 42.", true));
+        // A "still planning" JSON is not complete.
+        assert!(!is_complete_answer(r#"{"conclusion": false, "final_answer": ""}"#, false));
+    }
+
+    #[test]
+    fn normalize_ollama_tool_call_parses_string_arguments_for_qwen() {
+        // Qwen small models (qwen3.5:0.8b) emit `arguments` as a JSON *string*.
+        let call = serde_json::json!({
+            "id": "call_1",
+            "function": {
+                "name": "read_file",
+                "arguments": "{\"path\": \"src/main.rs\"}"
+            }
+        });
+        let norm = normalize_ollama_tool_call(&call, ModelArch::Qwen);
+        assert_eq!(norm["function"]["name"], "read_file");
+        assert_eq!(norm["function"]["arguments"]["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn normalize_ollama_tool_call_handles_flat_tool_name_shape() {
+        // lfm2.5 emits `tool_name` at the top level (no `function` wrapper).
+        let call = serde_json::json!({
+            "tool_name": "grep",
+            "arguments": { "pattern": "TODO", "path": "src" }
+        });
+        let norm = normalize_ollama_tool_call(&call, ModelArch::Lfm);
+        assert_eq!(norm["function"]["name"], "grep");
+        assert_eq!(norm["function"]["arguments"]["pattern"], "TODO");
+    }
+
+    #[test]
+    fn normalize_ollama_tool_call_coerces_positional_array_only_for_qwen() {
+        // Qwen may emit positional args as a bare array → coerce to {value: [...]}.
+        let call = serde_json::json!({
+            "function": { "name": "read_file", "arguments": ["src/main.rs"] }
+        });
+        let norm = normalize_ollama_tool_call(&call, ModelArch::Qwen);
+        assert_eq!(norm["function"]["arguments"]["value"][0], "src/main.rs");
+
+        // Non-Qwen architectures must NOT mangle a well-formed array argument.
+        let norm_generic = normalize_ollama_tool_call(&call, ModelArch::Generic);
+        assert!(norm_generic["function"]["arguments"].is_array());
+    }
+
+    #[test]
+    fn apply_ollama_stream_line_normalizes_qwen_string_arguments() {
+        // A realistic qwen3.5:0.8b micro-agent tool call with string arguments.
+        let line = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"edit","arguments":"{\"path\":\"src/lib.rs\",\"edits\":[{\"old_text\":\"a\",\"new_text\":\"b\"}]}"}}]},"done":false}"#;
+        let mut acc = OllamaChunkAcc::default();
+        assert!(apply_ollama_stream_line(line, &mut acc, ModelArch::Qwen));
+        let calls = acc.tool_calls.expect("qwen tool call must survive parsing");
+        assert_eq!(calls[0]["function"]["name"], "edit");
+        assert_eq!(calls[0]["function"]["arguments"]["path"], "src/lib.rs");
+        assert_eq!(calls[0]["function"]["arguments"]["edits"][0]["new_text"], "b");
     }
 
     // ---- unwrap_structured_answer (sub-agent output cleanup) --------------
@@ -8932,6 +10464,7 @@ mod tests {
             &["read_file".to_string()],
             Some(env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri")),
             false,
+            None,
         );
         let spawn = tools
             .iter()
@@ -8946,6 +10479,7 @@ mod tests {
             &["read_file".to_string()],
             Some(env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri")),
             true,
+            None,
         );
         let spawn = tools
             .iter()
@@ -9149,5 +10683,62 @@ mod tests {
     fn parse_ollama_context_length_defaults_when_unknown() {
         let data = serde_json::json!({ "parameters": "temperature 0.5" });
         assert_eq!(parse_ollama_context_length(&data), 8192);
+    }
+
+    // ---- thinking tokens count toward the session limit -------------------
+
+    #[test]
+    fn accumulate_thinking_counts_reasoning_chars() {
+        let mut total = 0u64;
+        accumulate_thinking(&mut total, "Let me reason step by step about the bug.");
+        assert_eq!(total, estimate_chat_tokens("Let me reason step by step about the bug."));
+        // Empty thinking adds nothing.
+        accumulate_thinking(&mut total, "");
+        assert!(total > 0);
+        // A second accumulation adds, not replaces.
+        let before = total;
+        accumulate_thinking(&mut total, "more thinking");
+        assert_eq!(total, before + estimate_chat_tokens("more thinking"));
+    }
+
+    #[test]
+    fn thinking_tokens_are_folded_into_context_tokens() {
+        // Mirrors the tool-loop return: msg tokens + content tokens + thinking.
+        let msgs = serde_json::json!([
+            {"role":"user","content":"review this code"},
+            {"role":"tool","content":"result"}
+        ]);
+        let msg_tokens = estimate_json_messages_tokens(msgs.as_array().unwrap());
+        let content = "Here is the review.";
+        let mut thinking = 0u64;
+        accumulate_thinking(&mut thinking, "long hidden reasoning trace that the model consumed");
+        let context_tokens = msg_tokens + estimate_chat_tokens(content) + thinking;
+        assert!(context_tokens > msg_tokens + estimate_chat_tokens(content), "thinking must inflate context_tokens");
+        assert_eq!(context_tokens, msg_tokens + estimate_chat_tokens(content) + thinking);
+    }
+
+    #[test]
+    fn bound_local_max_tokens_caps_output_against_window() {
+        // 256k tool budget on a small context window → bounded down, floor 4096.
+        assert_eq!(bound_local_max_tokens(256_000, 0), 4096);
+        // When there is room, the cap respects the window.
+        assert_eq!(bound_local_max_tokens(256_000, 8_000), 8_000);
+        // User's explicit smaller budget is never raised above itself.
+        assert_eq!(bound_local_max_tokens(2_048, 8_000), 2_048);
+        // Plenty of context → the tool budget survives (bounded only by window).
+        assert_eq!(bound_local_max_tokens(256_000, 1_000_000), 256_000);
+    }
+
+    #[test]
+    fn chat_result_serializes_thinking_tokens() {
+        let r = ChatResult {
+            content: "answer".to_string(),
+            tool_calls: vec![],
+            context_tokens: 123,
+            thinking_tokens: 45,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["context_tokens"], 123);
+        assert_eq!(json["thinking_tokens"], 45);
     }
 }
