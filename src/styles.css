@@ -1440,6 +1440,20 @@ html, body, #root {
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
 }
 
+.tool-call-window-badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--accent);
+  background: rgba(100, 180, 255, 0.12);
+  border: 1px solid rgba(100, 180, 255, 0.3);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
 .tool-call-window-summary {
   margin-left: auto;
   max-width: 60%;
