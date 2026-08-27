@@ -1,7 +1,7 @@
 ---
 name: intent-classifier
 description: Classifies the user's intent and routes the task to the correct sub-agent(s)
-model: lfm2.5
+model: lfm2.5:8b
 backend: ollama
 temperature: 0.1
 tools: read_file, list_directory
@@ -91,7 +91,7 @@ User: "Research best practices for auth, then review my auth.ts against them"
 
 ## Configuration
 
-- **Model**: `lfm2.5` ( Ollama )
+- **Model**: `lfm2.5:8b` ( Ollama )
 - **Temperature**: 0.1 (low temperature for deterministic classification)
 - **Tools**: `read_file`, `list_directory` (only to disambiguate the prompt if needed)
 
