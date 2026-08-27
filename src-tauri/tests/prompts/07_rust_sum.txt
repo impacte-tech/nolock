@@ -1,0 +1,1 @@
+Write a Rust program that sums the integers from 1 to 100 inclusive (the result is 5050) and prints the result. Use the rust_repl tool to COMPILE AND RUN it and confirm the printed output is 5050.

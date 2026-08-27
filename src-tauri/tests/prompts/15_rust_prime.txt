@@ -1,0 +1,1 @@
+Write a Rust program that checks whether 29 is prime and prints "prime" or "not prime". Use the rust_repl tool to COMPILE AND RUN it and confirm the printed output is "prime".

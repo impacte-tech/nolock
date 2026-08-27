@@ -1,0 +1,1 @@
+@code-reviewer fix the compile error in src/main.rs by writing valid Rust, then VALIDATE your fix: compile and run it with the rust_repl tool (or cargo via bash_sandbox) and confirm it runs. Report what you ran and the output it produced.

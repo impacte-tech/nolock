@@ -1,0 +1,1 @@
+Create a shell script at valid.sh that prints exactly 'VALIDATED_OK'. Use the bash_sandbox tool to run `bash valid.sh` and confirm the output is VALIDATED_OK.

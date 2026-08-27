@@ -1,7 +1,7 @@
 ---
 name: context-summarizer
 description: Summarizes conversation context and produces a to-do list when the model repeats itself or the context is near its limit
-model: qwen2.5-coder:3b
+model: qwen3.5:0.8b
 backend: ollama
 temperature: 0.1
 tools: []

@@ -1,0 +1,1 @@
+Inspect the Rust project at the project root. Run `cargo check` and report the compiler error.

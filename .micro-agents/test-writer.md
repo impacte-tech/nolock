@@ -1,7 +1,7 @@
 ---
 name: test-writer
 description: Writes unit tests (TDD) for a module or function
-model: qwen2.5-coder:3b
+model: qwen3.5:0.8b
 backend: ollama
 temperature: 0.2
 tools: [read_file, edit, write_file, bash_sandbox]

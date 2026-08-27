@@ -18,15 +18,28 @@
 mod main_impl;
 
 use main_impl::{
-    ChatMessage, ChatRequest, ChatResult, CliSink, SubAgentMemory, ToolCallLog,
+    ChatMessage, ChatRequest, ChatResult, CliSink, SubAgentMemory,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const OLLAMA_URL: &str = "http://localhost:11434";
 const MAIN_MODEL: &str = "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU";
 const LFM_MODEL: &str = "lfm2.5:latest";
 const MICRO_MODEL: &str = "qwen3.5:0.8b";
+
+/// Load a prompt from `tests/prompts/<name>.txt`, trimming surrounding
+/// whitespace. Segregating prompts into files keeps the scenario text separate
+/// from the test logic, so prompts can be edited/tuned without touching Rust.
+fn prompt(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/prompts")
+        .join(format!("{}.txt", name));
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read prompt file {}: {}", path.display(), e))
+        .trim()
+        .to_string()
+}
 
 /// The full standard tool set the main agent uses in the app.
 fn standard_tools() -> Vec<String> {
@@ -201,7 +214,7 @@ async fn run(sink: &CliSink, memory: &SubAgentMemory, req: ChatRequest) -> ChatR
 async fn main_agent_plain_chat_concludes_task() {
     let sink = CliSink;
     let memory = SubAgentMemory::new();
-    let req = request(None, "Say hello in one short sentence.", vec![], MAIN_MODEL);
+    let req = request(None, &prompt("01_plain_chat"), vec![], MAIN_MODEL);
     let res = run(&sink, &memory, req).await;
     eprintln!("\n=== main_agent_plain_chat output ===\n{}", res.content);
     assert!(!res.content.trim().is_empty(), "main agent must produce an answer");
@@ -219,7 +232,7 @@ async fn main_agent_with_tools_runs_tool_loop() {
     let memory = SubAgentMemory::new();
     let req = request(
         Some(root.to_str().unwrap()),
-        "Inspect the Rust project at the project root. Run `cargo check` and report the compiler error.",
+        &prompt("02_tool_loop_cargo_check"),
         standard_tools(),
         MAIN_MODEL,
     );
@@ -245,7 +258,7 @@ async fn main_delegates_to_sub_agent_which_spawns_micro_agent() {
     // also spawn it via the spawn_subagent tool. Both exercise the same runner.
     let mut req = request(
         Some(root.to_str().unwrap()),
-        "@code-reviewer run `cargo check` in the project root, then fix the compiler error. Report what you changed.",
+        &prompt("03_hierarchy_delegation"),
         standard_tools(),
         MAIN_MODEL,
     );
@@ -279,7 +292,7 @@ async fn sub_agent_memory_persists_across_turns() {
     // Turn 1: ask the reviewer a concrete question.
     let mut req1 = request(
         Some(&root_str),
-        "@code-reviewer what is the type of `x` in src/main.rs?",
+        &prompt("04_memory_turn1"),
         standard_tools(),
         MAIN_MODEL,
     );
@@ -291,7 +304,7 @@ async fn sub_agent_memory_persists_across_turns() {
     // answer ("as you said earlier...").
     let mut req2 = request(
         Some(&root_str),
-        "@code-reviewer how would you fix it?",
+        &prompt("04_memory_turn2"),
         standard_tools(),
         MAIN_MODEL,
     );
@@ -324,7 +337,7 @@ async fn micro_agent_runs_validation_pipeline() {
     // compile error via the rust-fixer micro-agent.
     let req = request(
         Some(root.to_str().unwrap()),
-        "@code-reviewer use the rust-fixer micro-agent to fix the compile error in src/main.rs. Then run cargo check to confirm.",
+        &prompt("05_micro_agent_validation"),
         standard_tools(),
         MAIN_MODEL,
     );
@@ -363,8 +376,7 @@ async fn agent_creates_and_runs_rust_fibonacci() {
     let memory = SubAgentMemory::new();
     let req = request(
         None,
-        "Write a Rust function that computes the 10th Fibonacci number (which is 55). \
-         Use the rust_repl tool to COMPILE AND RUN it, and confirm the printed output is 55.",
+        &prompt("06_rust_fibonacci"),
         validation_tools(),
         MAIN_MODEL,
     );
@@ -395,9 +407,7 @@ async fn agent_creates_and_runs_rust_sum() {
     let memory = SubAgentMemory::new();
     let req = request(
         None,
-        "Write a Rust program that sums the integers from 1 to 100 inclusive (the result is 5050) \
-         and prints the result. Use the rust_repl tool to COMPILE AND RUN it and confirm the \
-         printed output is 5050.",
+        &prompt("07_rust_sum"),
         validation_tools(),
         MAIN_MODEL,
     );
@@ -427,8 +437,7 @@ async fn agent_writes_and_runs_shell_script() {
     let memory = SubAgentMemory::new();
     let req = request(
         Some(root.to_str().unwrap()),
-        "Create a shell script at valid.sh that prints exactly 'VALIDATED_OK'. \
-         Use the bash_sandbox tool to run `bash valid.sh` and confirm the output is VALIDATED_OK.",
+        &prompt("08_shell_script"),
         validation_tools(),
         MAIN_MODEL,
     );
@@ -459,8 +468,7 @@ async fn agent_writes_and_runs_python_script() {
     let memory = SubAgentMemory::new();
     let req = request(
         Some(root.to_str().unwrap()),
-        "Create a Python script at compute.py that computes 6*7 and prints the result. \
-         Use the bash_sandbox tool to run `python3 compute.py` and confirm the printed output is 42.",
+        &prompt("09_python_script"),
         validation_tools(),
         MAIN_MODEL,
     );
@@ -495,10 +503,7 @@ async fn agent_writes_and_runs_rust_tests() {
     let memory = SubAgentMemory::new();
     let mut req = request(
         Some(root.to_str().unwrap()),
-        "Use the write_file tool to REPLACE src/main.rs with a Rust file that has: \
-         (1) a fn main() that prints \"hi\", and (2) a #[test] fn test_addition() that asserts \
-         2+2==4, and (3) the #[cfg(test)] mod tests wrapper. \
-         Then use the bash_sandbox tool to run `cargo test` and confirm the new test passes.",
+        &prompt("10_rust_tests"),
         validation_tools(),
         MAIN_MODEL,
     );
@@ -540,9 +545,7 @@ async fn hierarchy_delegates_code_creation_with_validation() {
 
     let mut req = request(
         Some(root.to_str().unwrap()),
-        "@code-reviewer fix the compile error in src/main.rs by writing valid Rust, then \
-         VALIDATE your fix: compile and run it with the rust_repl tool (or cargo via bash_sandbox) \
-         and confirm it runs. Report what you ran and the output it produced.",
+        &prompt("11_hierarchy_code_validation"),
         validation_tools(),
         MAIN_MODEL,
     );
@@ -580,10 +583,7 @@ async fn micro_agent_creates_and_runs_code_directly() {
     // ran it" instead of actually invoking the tool, so we require the tool call.
     let mut req = request(
         Some(root.to_str().unwrap()),
-        "@code-reviewer write a tiny Rust program that prints the string \"55\". \
-         You MUST actually invoke the rust_repl tool to COMPILE AND RUN that program — \
-         do NOT write your final answer until you have called rust_repl and seen its output. \
-         Report the exact printed output you observed from rust_repl.",
+        &prompt("12_micro_agent_code"),
         validation_tools(),
         MAIN_MODEL,
     );
@@ -598,4 +598,152 @@ async fn micro_agent_creates_and_runs_code_directly() {
     eprintln!("[trace] validators used: {:?}", validators.iter().map(|(n, r)| (n.clone(), r.chars().take(80).collect::<String>())).collect::<Vec<_>>());
     assert!(!validators.is_empty(), "micro-agent layer must validate code with rust_repl or bash_sandbox");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// =============================================================================
+// Additional scenarios (prompts segregated in tests/prompts/)
+// =============================================================================
+
+/// 13. Parallel agents: two @mentioned agents run concurrently and the main
+///     agent synthesizes both results. Exercises the pre-spawn parallel path.
+#[tokio::test]
+#[ignore = "requires local Ollama + model inference (slow, multi-tier)"]
+async fn parallel_agents_synthesize_results() {
+    let root = setup_fixture_project();
+    let sink = CliSink;
+    let memory = SubAgentMemory::new();
+
+    let mut req = request(
+        Some(root.to_str().unwrap()),
+        &prompt("13_parallel_agents"),
+        standard_tools(),
+        MAIN_MODEL,
+    );
+    req.referenced_agents = vec!["code-reviewer".to_string(), "researcher".to_string()];
+    req.max_iterations = 12;
+
+    let res = run(&sink, &memory, req).await;
+    eprintln!("\n=== parallel_agents_synthesize_results output ===\n{}", res.content);
+    assert!(!res.content.trim().is_empty());
+    // The combined answer should reference both the type error AND the concept.
+    assert!(
+        res.content.contains("type") || res.content.contains("mismatch") || res.content.contains("error"),
+        "combined answer should mention the type error (got: {})",
+        res.content.chars().take(200).collect::<String>()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 14. Rust factorial via rust_repl — deterministic expected value 5040.
+#[tokio::test]
+#[ignore = "requires local Ollama + model inference"]
+async fn agent_creates_and_runs_rust_factorial() {
+    let sink = CliSink;
+    let memory = SubAgentMemory::new();
+    let req = request(None, &prompt("14_rust_factorial"), validation_tools(), MAIN_MODEL);
+    let res = run(&sink, &memory, req).await;
+    eprintln!("\n=== agent_creates_and_runs_rust_factorial output ===\n{}", res.content);
+    assert!(!res.content.trim().is_empty());
+
+    let validators = collect_validation_tool_calls(&res.tool_calls);
+    assert!(validators.iter().any(|(n, _)| n == "rust_repl"), "must use rust_repl");
+    assert!(
+        validators.iter().any(|(_, r)| r.contains("5040")),
+        "rust_repl must print 5040 (validators: {:?})",
+        validators.iter().map(|(n, r)| format!("{}: {}", n, r.chars().take(120).collect::<String>())).collect::<Vec<_>>()
+    );
+}
+
+/// 15. Rust primality check via rust_repl — deterministic expected "prime".
+#[tokio::test]
+#[ignore = "requires local Ollama + model inference"]
+async fn agent_creates_and_runs_rust_prime() {
+    let sink = CliSink;
+    let memory = SubAgentMemory::new();
+    let req = request(None, &prompt("15_rust_prime"), validation_tools(), MAIN_MODEL);
+    let res = run(&sink, &memory, req).await;
+    eprintln!("\n=== agent_creates_and_runs_rust_prime output ===\n{}", res.content);
+    assert!(!res.content.trim().is_empty());
+
+    let validators = collect_validation_tool_calls(&res.tool_calls);
+    assert!(validators.iter().any(|(n, _)| n == "rust_repl"), "must use rust_repl");
+    assert!(
+        validators.iter().any(|(_, r)| r.contains("prime")),
+        "rust_repl must print prime (validators: {:?})",
+        validators.iter().map(|(n, r)| format!("{}: {}", n, r.chars().take(120).collect::<String>())).collect::<Vec<_>>()
+    );
+}
+
+/// 16. Shell script with arguments via bash_sandbox — deterministic "Hello, World!".
+#[tokio::test]
+#[ignore = "requires local Ollama + model inference"]
+async fn agent_writes_and_runs_shell_with_args() {
+    let root = setup_fixture_project();
+    let sink = CliSink;
+    let memory = SubAgentMemory::new();
+    let req = request(
+        Some(root.to_str().unwrap()),
+        &prompt("16_shell_args"),
+        validation_tools(),
+        MAIN_MODEL,
+    );
+    let res = run(&sink, &memory, req).await;
+    eprintln!("\n=== agent_writes_and_runs_shell_with_args output ===\n{}", res.content);
+    assert!(!res.content.trim().is_empty());
+
+    let validators = collect_validation_tool_calls(&res.tool_calls);
+    assert!(validators.iter().any(|(n, _)| n == "bash_sandbox"), "must use bash_sandbox");
+    assert!(
+        validators.iter().any(|(_, r)| r.contains("Hello, World!")),
+        "bash_sandbox must print Hello, World! (validators: {:?})",
+        validators.iter().map(|(n, r)| format!("{}: {}", n, r.chars().take(120).collect::<String>())).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 17. Python file I/O via bash_sandbox — deterministic "cba" (reverse of "abc").
+#[tokio::test]
+#[ignore = "requires local Ollama + model inference"]
+async fn agent_writes_and_runs_python_file_io() {
+    let root = setup_fixture_project();
+    let sink = CliSink;
+    let memory = SubAgentMemory::new();
+    let req = request(
+        Some(root.to_str().unwrap()),
+        &prompt("17_python_file_io"),
+        validation_tools(),
+        MAIN_MODEL,
+    );
+    let res = run(&sink, &memory, req).await;
+    eprintln!("\n=== agent_writes_and_runs_python_file_io output ===\n{}", res.content);
+    assert!(!res.content.trim().is_empty());
+
+    let validators = collect_validation_tool_calls(&res.tool_calls);
+    assert!(validators.iter().any(|(n, _)| n == "bash_sandbox"), "must use bash_sandbox");
+    assert!(
+        validators.iter().any(|(_, r)| r.contains("cba")),
+        "bash_sandbox must print cba (validators: {:?})",
+        validators.iter().map(|(n, r)| format!("{}: {}", n, r.chars().take(120).collect::<String>())).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 18. Rust sum of even numbers via rust_repl — deterministic expected 110.
+#[tokio::test]
+#[ignore = "requires local Ollama + model inference"]
+async fn agent_creates_and_runs_rust_even_sum() {
+    let sink = CliSink;
+    let memory = SubAgentMemory::new();
+    let req = request(None, &prompt("18_rust_even_sum"), validation_tools(), MAIN_MODEL);
+    let res = run(&sink, &memory, req).await;
+    eprintln!("\n=== agent_creates_and_runs_rust_even_sum output ===\n{}", res.content);
+    assert!(!res.content.trim().is_empty());
+
+    let validators = collect_validation_tool_calls(&res.tool_calls);
+    assert!(validators.iter().any(|(n, _)| n == "rust_repl"), "must use rust_repl");
+    assert!(
+        validators.iter().any(|(_, r)| r.contains("110")),
+        "rust_repl must print 110 (validators: {:?})",
+        validators.iter().map(|(n, r)| format!("{}: {}", n, r.chars().take(120).collect::<String>())).collect::<Vec<_>>()
+    );
 }
