@@ -474,6 +474,60 @@ Then in nolock's AI Settings (`Ctrl+A, I`):
 
 > **Note:** For agent chat with tool calling, the model must support the `tools` parameter in Ollama's `/api/chat` endpoint. The `qwen3.5:0.8b-mlx` model provides a good balance of capability and resource usage. Larger models will provide better results at the cost of higher resource usage.
 
+### Micro-Agent Model Strategy
+
+nolock's **micro-agents** are the bottom tier of the hierarchical agent cascade:
+small, focused agents that do *mechanical* work (fixing a compiler error, writing a
+test, fixing a lint issue) and then **prove** they finished by running a deterministic
+validation (e.g. `cargo check`, `tsc --noEmit`, `ruff`, `go build`). They are defined
+in the `.micro-agents/` folder and are spawned by sub-agents that have
+`can_spawn_micro_agents: true`.
+
+Because micro-agents are the highest-volume tier, they should run on the **smallest
+model that can still call tools reliably** — this is where the token/GPU savings are
+largest (mechanical work shifted off the 9B main model onto a sub-1B coder).
+
+#### Recommended micro-agent model
+
+| Micro-agent | Model | Why |
+|---|---|---|
+| `rust-fixer`, `ts-type-fixer`, `lint-fixer`, `python-fixer`, `go-fixer`, `test-writer`, `context-summarizer` | `qwen3.5:0.8b` | Small, fast, reliable tool-calling; good enough for focused mechanical fixes + running the validation command. |
+
+The default templates in `.micro-agents/*.md` are pre-configured to this model:
+
+```yaml
+---
+name: rust-fixer
+model: qwen3.5:0.8b
+backend: ollama
+temperature: 0.1
+tools: [read_file, edit, write_file, bash_sandbox]
+validation:
+  rust_check: true
+  max_retries: 3
+---
+```
+
+#### How the tiers split the work
+
+| Tier | Model | Role |
+|---|---|---|
+| **Main agent** | `nemotron-nano-9b-v2` | Planning, orchestration, high-level reasoning |
+| **Sub-agent** | `lfm2.5` | Domain tasks, intent classification / routing |
+| **Micro-agent** | `qwen3.5:0.8b` | Mechanical fixes + deterministic validation |
+
+#### Deterministic validation is the contract
+
+A micro-agent is only considered "done" when its configured validation passes
+(`cargo check`, `tsc`, `ruff`, etc.). If validation fails, the micro-agent retries
+(up to `max_retries`). This is what makes the small-model tier *reliable*: even a
+1B model can be trusted to conclude correctly because the result is verified by a
+real build/lint/test command, not by the model's own claim.
+
+> **Tip:** If you have a larger coder model available (e.g. `qwen2.5-coder:7b`), you
+> can point individual micro-agents at it for harder tasks by editing the `model:` line
+> in the relevant `.micro-agents/<name>.md` file. The validation contract is unchanged.
+
 ### Keyboard Shortcuts
 
 #### Editor Settings (Ctrl+E chord)

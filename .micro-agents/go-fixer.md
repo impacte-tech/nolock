@@ -1,7 +1,7 @@
 ---
 name: go-fixer
 description: Fixes go vet/build errors with minimal changes
-model: qwen2.5-coder:1.5b
+model: qwen3.5:0.8b
 backend: ollama
 temperature: 0.1
 tools: [read_file, edit, write_file, bash_sandbox]
