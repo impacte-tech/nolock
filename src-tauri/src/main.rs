@@ -7,6 +7,7 @@ use tauri::Emitter;
 use regex::Regex;
 
 mod browser;
+mod fabric;
 mod hooks;
 mod linter;
 mod macos_keyboard;
@@ -310,6 +311,13 @@ fn list_agents(root_path: String) -> Result<Vec<AgentEntry>, String> {
 ///
 /// The system prompt content...
 /// ```
+#[tauri::command]
+fn validate_agents(root_path: String) -> Vec<String> {
+    // nemo-fabric-core "behind the scenes" validation of every agent file in
+    // `.agents/`. Returns a list of human-readable issues (empty = all valid).
+    fabric::validate_agents_directory(&root_path)
+}
+
 #[tauri::command]
 fn read_agent(path: String) -> Result<serde_json::Value, String> {
     let content = std::fs::read_to_string(&path)
@@ -2854,6 +2862,13 @@ pub async fn run_subagent(
         .sink
         .emit_subagent_start(&id, &agent.name, task, &model);
 
+    // nemo-fabric-core gate (request side): normalize the sub-agent invocation
+    // into the fabric AgentRunRequest contract. Currently informational — the
+    // task + project root are captured for diagnostics. The result side is
+    // validated after the run (see the match below).
+    let _fabric_request = fabric::build_agent_run_request(task, runner.root_path);
+    let _ = &_fabric_request;
+
     let sub_runner = SubAgentRunner { depth: runner.depth + 1, ..*runner };
 
     let result = if backend == "ollama" {
@@ -2916,6 +2931,26 @@ pub async fn run_subagent(
             // Store this turn (task → answer) as the agent's memory so a later
             // trigger of the sAME @agent continues from this context.
             runner.memory.push_turn(root, &agent.name, task, &clean);
+
+            // nemo-fabric-core gate: normalize the completed run into the fabric
+            // AgentRunResult contract and validate invariants. This is the
+            // "behind the scenes" check that a successful agent-to-agent handoff
+            // is actually well-formed (no error on success, well-formed
+            // artifacts). Any violation is logged; we still return the result so
+            // a validation miss never silently kills a working flow.
+            if let Err(v_err) = fabric::validate_subagent_run(
+                &agent.name,
+                true,
+                &clean,
+                None,
+                Vec::new(),
+            ) {
+                eprintln!(
+                    "[nolock] fabric run-validation WARNING for sub-agent '{}': {}",
+                    agent.name, v_err
+                );
+            }
+
             let trace = SubAgentTrace {
                 id: id.clone(),
                 agent: agent.name.clone(),
@@ -2932,6 +2967,21 @@ pub async fn run_subagent(
         }
         Err(e) => {
             let err_msg = format!("Sub-agent error: {}", e);
+            // nemo-fabric-core gate for the failure path: a failed run MUST carry
+            // a structured error. nolock surfaces the message the same way, but
+            // this validates the contract so the error isn't dropped.
+            if let Err(v_err) = fabric::validate_subagent_run(
+                &agent.name,
+                false,
+                "",
+                Some(&e),
+                Vec::new(),
+            ) {
+                eprintln!(
+                    "[nolock] fabric run-validation WARNING for sub-agent '{}': {}",
+                    agent.name, v_err
+                );
+            }
             runner
                 .sink
                 .emit_subagent_done(&id, &err_msg);
@@ -3177,6 +3227,21 @@ pub async fn run_micro_agent(
         let all_passed = validations.iter().all(|v| v.passed);
         last_validations = validations;
         if all_passed || attempt == max_retries {
+            // nemo-fabric-core gate: a completed micro-agent run must be
+            // well-formed (succeeded + no error); violations are logged, not
+            // fatal, so deterministic validation still owns the retry decision.
+            if let Err(v_err) = fabric::validate_subagent_run(
+                &agent.name,
+                true,
+                &clean,
+                None,
+                Vec::new(),
+            ) {
+                eprintln!(
+                    "[nolock] fabric run-validation WARNING for micro-agent '{}': {}",
+                    agent.name, v_err
+                );
+            }
             return Ok((clean, last_validations));
         }
     }
@@ -8062,6 +8127,7 @@ pub fn run() {
             create_file,
             list_agents,
             read_agent,
+            validate_agents,
             list_micro_agents,
             read_micro_agent,
             subagent_reset,

@@ -1,0 +1,1 @@
+Use the write_file tool to REPLACE src/main.rs with a Rust file that has: (1) a fn main() that prints "hi", and (2) a #[test] fn test_addition() that asserts 2+2==4, and (3) the #[cfg(test)] mod tests wrapper. Then use the bash_sandbox tool to run `cargo test` and confirm the new test passes.
