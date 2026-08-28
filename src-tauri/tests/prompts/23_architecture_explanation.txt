@@ -1,0 +1,1 @@
+Explain the architecture of this repository's agent system: how the main agent, sub-agents, and micro-agents relate, and how deterministic validation ensures reliability. Use the .agents and .micro-agents folders as evidence. Do not ask clarifying questions — provide the full explanation directly.

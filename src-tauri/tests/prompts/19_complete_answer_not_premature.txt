@@ -1,0 +1,1 @@
+Explain how Rust's ownership model prevents memory leaks, and give a concrete example. Do not ask clarifying questions — provide the full answer directly.

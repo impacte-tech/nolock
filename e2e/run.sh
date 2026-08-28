@@ -14,6 +14,7 @@
 #   ./e2e/run.sh unit             # run the pure unit tests (no Ollama needed)
 #   ./e2e/run.sh e2e [--nocapture]   # run the full E2E cascade (requires Ollama)
 #   ./e2e/run.sh cli "<message>"  # smoke-test the headless CLI on a prompt
+#   ./e2e/run.sh measure [args]   # measure E2E pass rate (see e2e/measure.sh)
 #   ./e2e/run.sh all              # unit + e2e + cli smoke test
 # =============================================================================
 set -euo pipefail
@@ -81,12 +82,17 @@ cmd_all() {
   cmd_cli "${1:-}"
 }
 
+cmd_measure() {
+  "$ROOT/e2e/measure.sh" "$@"
+}
+
 case "${1:-all}" in
   check)  cmd_check ;;
   models) cmd_models ;;
   unit)   cmd_unit ;;
   e2e)    shift; cmd_e2e "$@" ;;
   cli)    shift; cmd_cli "${1:-}" ;;
+  measure) shift; cmd_measure "$@" ;;
   all)    shift; cmd_all "${1:-}" ;;
   *) echo "unknown command: $1"; exit 2 ;;
 esac

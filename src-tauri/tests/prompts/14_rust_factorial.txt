@@ -1,1 +1,1 @@
-Write a Rust program that computes the factorial of 7 (which is 5040) and prints it. Use the rust_repl tool to COMPILE AND RUN it and confirm the printed output is 5040.
+Write a Rust program that computes the factorial of 7 and prints it. Use the rust_repl tool to COMPILE AND RUN it, and report the printed output.

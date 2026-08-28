@@ -1,1 +1,1 @@
-Create a shell script at greet.sh that takes a name as an argument and prints "Hello, <name>!". Use the bash_sandbox tool to run `bash greet.sh World` and confirm the output is "Hello, World!".
+Create a shell script at greet.sh that takes a name as an argument and prints "Hello, <name>!". Use the bash_sandbox tool to run `bash greet.sh World` and report the output.

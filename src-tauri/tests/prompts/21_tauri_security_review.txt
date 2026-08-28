@@ -1,0 +1,1 @@
+Check for Tauri v2 security improvements in this repository. Inspect the src-tauri directory, identify any security-relevant configuration or code patterns, and report concrete recommendations. Do not ask clarifying questions — provide the full review directly.
