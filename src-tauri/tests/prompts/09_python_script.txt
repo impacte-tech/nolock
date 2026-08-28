@@ -1,1 +1,1 @@
-Create a Python script at compute.py that computes 6*7 and prints the result. Use the bash_sandbox tool to run `python3 compute.py` and confirm the printed output is 42.
+Create a Python script at compute.py that computes 6*7 and prints the result. Use the bash_sandbox tool to run `python3 compute.py` and report the printed output.

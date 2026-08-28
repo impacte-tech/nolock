@@ -1,0 +1,1 @@
+Write a Rust program that computes the greatest common divisor of 48 and 36 using Euclid's algorithm and prints it. Use the rust_repl tool to COMPILE AND RUN it, and report the printed output.

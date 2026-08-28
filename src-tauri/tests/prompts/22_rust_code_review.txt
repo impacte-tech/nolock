@@ -1,0 +1,1 @@
+Review the Rust code in src/main.rs and identify the top 3 potential improvements for code quality and maintainability. Be specific and reference actual patterns you observe. Do not ask clarifying questions — provide the full review directly.

@@ -2997,6 +2997,34 @@ const MAX_CONCURRENT_SUBAGENTS: usize = 2;
 /// Maximum micro-agent nesting depth (Sub → Micro → Micro).
 pub const MAX_MICRO_AGENT_DEPTH: usize = 2;
 
+// ---------------------------------------------------------------------------
+// Structured agent-result markers (A2A handoff contract)
+// ---------------------------------------------------------------------------
+// Every sub-agent / micro-agent result surfaced back to the orchestrator (the
+// main agent) is prefixed with one of these markers so the orchestrator can
+// unambiguously tell success from failure or an empty response — instead of
+// having to infer it from free text. The main agent's system prompt instructs
+// it to retry on FAILED/EMPTY and to take over the task itself if a delegate
+// keeps failing (fallback chain).
+pub const AGENT_RESULT_OK: &str = "[AGENT_RESULT: OK]";
+pub const AGENT_RESULT_FAILED: &str = "[AGENT_RESULT: FAILED]";
+pub const AGENT_RESULT_EMPTY: &str = "[AGENT_RESULT: EMPTY]";
+
+/// Prefix `body` with the given structured result marker.
+fn tag_agent_result(marker: &str, body: &str) -> String {
+    format!("{}\n{}", marker, body)
+}
+
+/// Classify a delegate's raw output into the appropriate marker: OK when it has
+/// substantive content, EMPTY when it produced nothing usable.
+fn classify_agent_result(body: &str) -> &'static str {
+    if body.trim().is_empty() {
+        AGENT_RESULT_EMPTY
+    } else {
+        AGENT_RESULT_OK
+    }
+}
+
 /// Run a sub-agent with a deterministic validation auto-retry loop.
 ///
 /// The sub-agent runs once via `run_subagent`, then its changed files are
@@ -3076,7 +3104,7 @@ pub async fn run_micro_agent(
     runner: &SubAgentRunner<'_>,
     agent_name: &str,
     task: &str,
-) -> Result<(String, Vec<validation::ValidationResult>), String> {
+) -> Result<(String, Vec<validation::ValidationResult>, SubAgentTrace), String> {
     if runner.depth >= MAX_MICRO_AGENT_DEPTH {
         return Err(format!(
             "Micro-agent nesting depth limit ({}) exceeded",
@@ -3142,6 +3170,9 @@ pub async fn run_micro_agent(
     let sub_runner = SubAgentRunner { depth: runner.depth + 1, ..*runner };
 
     let mut last_validations: Vec<validation::ValidationResult> = Vec::new();
+    // Track the previous attempt's cleaned output so the retry nudge can
+    // distinguish an empty/stalled response from a validation failure.
+    let mut last_clean = String::new();
     let max_retries = if agent.validation.max_retries == 0 {
         DEFAULT_MICRO_AGENT_MAX_RETRIES
     } else {
@@ -3153,12 +3184,21 @@ pub async fn run_micro_agent(
         // validation errors from the previous attempt.
         let mut msgs = base_msgs.clone();
         if attempt > 1 {
-            msgs.push(ChatMessage {
-                role: "user".to_string(),
-                content: format!(
+            // Distinguish an empty/stalled response from a validation failure so
+            // the retry nudge is specific to the failure mode.
+            let feedback = if last_clean.trim().is_empty() {
+                "Your previous response was empty or contained no usable output. \
+                 Return ONLY the final answer (the script's output or a concise summary). \
+                 Do not produce thinking-only output and do not stop without a result."
+            } else {
+                &format!(
                     "Previous attempt failed validation:\n{}\n\nFix the errors and retry.",
                     validation::format_validation_errors(&last_validations)
-                ),
+                )
+            };
+            msgs.push(ChatMessage {
+                role: "user".to_string(),
+                content: feedback.to_string(),
             });
         }
 
@@ -3214,8 +3254,12 @@ pub async fn run_micro_agent(
             .await
         };
 
-        let clean = match result {
-            Ok(chat) => unwrap_structured_answer(&chat.content),
+        let (clean, tool_calls, thinking_tokens) = match result {
+            Ok(chat) => (
+                unwrap_structured_answer(&chat.content),
+                chat.tool_calls.clone(),
+                chat.thinking_tokens,
+            ),
             Err(e) => return Err(format!("Micro-agent '{}' failed: {}", agent.name, e)),
         };
 
@@ -3223,10 +3267,14 @@ pub async fn run_micro_agent(
         let changed_files = validation::extract_changed_files(&clean);
         let validations = validation::run_validations(root, &agent.validation, &changed_files).await;
 
-        // 3. Check if all passed (or we're out of retries).
+        // 3. Check if all passed (or we're out of retries). An empty/stalled
+        //    response also triggers a retry (with a specific nudge) so a
+        //    thinking-only stall never surfaces as a successful-but-empty result.
         let all_passed = validations.iter().all(|v| v.passed);
         last_validations = validations;
-        if all_passed || attempt == max_retries {
+        last_clean = clean.clone();
+        let empty_response = clean.trim().is_empty();
+        if (all_passed && !empty_response) || attempt == max_retries {
             // nemo-fabric-core gate: a completed micro-agent run must be
             // well-formed (succeeded + no error); violations are logged, not
             // fatal, so deterministic validation still owns the retry decision.
@@ -3242,7 +3290,16 @@ pub async fn run_micro_agent(
                     agent.name, v_err
                 );
             }
-            return Ok((clean, last_validations));
+            let trace = SubAgentTrace {
+                id: id.clone(),
+                agent: agent.name.clone(),
+                task: task.to_string(),
+                model: model.clone(),
+                result: clean.clone(),
+                tool_calls,
+                thinking_tokens,
+            };
+            return Ok((clean, last_validations, trace));
         }
     }
 
@@ -3270,7 +3327,7 @@ async fn summarize_context_via_micro_agent(
 ) -> Option<String> {
     let prompt = build_context_summarization_prompt(last_message, todo_list);
     match run_micro_agent(runner, "context-summarizer", &prompt).await {
-        Ok((summary, _)) if !summary.trim().is_empty() => Some(summary),
+        Ok((summary, _, _)) if !summary.trim().is_empty() => Some(summary),
         _ => None,
     }
 }
@@ -3511,13 +3568,90 @@ fn find_subsequence(haystack: &[char], needle: &[char], start: usize) -> Option<
     None
 }
 
+/// Minimum visible characters for a response to count as a complete answer.
+/// Shorter replies (e.g. "ok", "sure", a bare acknowledgment) are treated as
+/// premature conclusions and the loop nudges the agent to actually answer.
+const MIN_COMPLETE_ANSWER_CHARS: usize = 12;
+
+/// Detect a "premature conclusion" — a response that stops the loop but does
+/// not actually complete the task: a question, a clarification request, or a
+/// suspiciously short reply. This is what keeps the main agent from "closing
+/// the iteration with a question too quickly" instead of doing the work.
+/// Pure — unit-testable.
+fn is_premature_answer(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // A question (ends with '?') is the agent asking for input instead of
+    // doing the work — treat as premature so the loop pushes it to answer.
+    if trimmed.ends_with('?') {
+        return true;
+    }
+    // Suspiciously short: not enough substance to be a real answer.
+    if trimmed.chars().count() < MIN_COMPLETE_ANSWER_CHARS {
+        return true;
+    }
+    // Clarification / hand-back phrases.
+    let lower = trimmed.to_lowercase();
+    const CLARIFY: &[&str] = &[
+        "could you clarify",
+        "what do you mean",
+        "can you provide",
+        "what would you like",
+        "please clarify",
+        "could you please",
+        "how can i help",
+        "is there anything",
+        "what can i do",
+        "please let me know",
+        "what information",
+        "could you tell me",
+        "what exactly",
+        "can you be more specific",
+    ];
+    CLARIFY.iter().any(|p| lower.contains(p))
+}
+
+/// Extract a best-effort answer from a thinking-only trace when the model
+/// stalled and never produced a visible answer. Takes the last substantive
+/// sentence(s) of the reasoning as a fallback so the user gets *something*
+/// instead of "(no response)". Pure — unit-testable.
+fn extract_answer_from_thinking(thinking: &str) -> String {
+    let trimmed = thinking.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // Split into sentences and keep the trailing ones that look like a real
+    // conclusion (not a question, not empty).
+    let sentences: Vec<&str> = trimmed
+        .split(|c: char| c == '.' || c == '!' || c == '?' || c == '\n')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    // Walk backwards to find the last substantive, non-question sentence.
+    for s in sentences.iter().rev() {
+        if s.ends_with('?') {
+            continue;
+        }
+        if s.chars().count() < MIN_COMPLETE_ANSWER_CHARS {
+            continue;
+        }
+        return s.to_string();
+    }
+    // Fall back to the last sentence regardless of length.
+    sentences.last().map(|s| s.to_string()).unwrap_or_default()
+}
+
 /// Decide whether a main-agent response is a *complete final answer* — i.e. the
 /// task is done and the tool loop should conclude rather than keep retrying.
 ///
 /// A response is complete when it has substantive visible content AND is not a
-/// "still planning" JSON blob. This is the deterministic "task done" signal the
-/// main agent uses to conclude automatically (instead of stalling or waiting
-/// for a manual continue). Pure — unit-testable.
+/// "still planning" JSON blob AND is not a premature conclusion (a question, a
+/// clarification request, or a suspiciously short reply). This is the
+/// deterministic "task done" signal the main agent uses to conclude
+/// automatically (instead of stalling, waiting for a manual continue, or
+/// closing too early with a question). Pure — unit-testable.
 pub fn is_complete_answer(content: &str, has_tool_calls: bool) -> bool {
     // A pending tool call means the agent is still working — not done.
     if has_tool_calls {
@@ -3527,9 +3661,12 @@ pub fn is_complete_answer(content: &str, has_tool_calls: bool) -> bool {
     if is_planning_json(content) {
         return false;
     }
+    // A premature conclusion (question / too short / clarification) is not done.
+    if is_premature_answer(content) {
+        return false;
+    }
     // Otherwise: substantive visible content = done.
-    let trimmed = content.trim();
-    !trimmed.is_empty()
+    !content.trim().is_empty()
 }
 
 /// Fraction of the context window that is "near the limit" — when usage reaches
@@ -3843,11 +3980,11 @@ async fn run_spawn_batch(
                     (format!("Sub-agent '{}' was already spawned with this task in this turn; skipped duplicate.", agent), None)
                 } else if let Some(r) = runner {
                     match Box::pin(run_subagent_with_validation(r, agent, task)).await {
-                        Ok((out, trace)) => (out, Some(trace)),
-                        Err(e) => (format!("Tool error: {}", e), None),
+                        Ok((out, trace)) => (tag_agent_result(classify_agent_result(&out), &out), Some(trace)),
+                        Err(e) => (tag_agent_result(AGENT_RESULT_FAILED, &format!("Tool error: {}", e)), None),
                     }
                 } else {
-                    ("Tool error: sub-agents are not available".to_string(), None)
+                    (tag_agent_result(AGENT_RESULT_FAILED, "Tool error: sub-agents are not available"), None)
                 }
             }
         });
@@ -5409,7 +5546,10 @@ fn build_initial_messages(
     let has_spawn_subagent = tools
         .iter()
         .any(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
-    if has_spawn_subagent {
+    let has_spawn_micro_agent = tools
+        .iter()
+        .any(|t| t["function"]["name"].as_str() == Some("spawn_micro_agent"));
+    if has_spawn_subagent || has_spawn_micro_agent {
         ollama_msgs.push(serde_json::json!({
             "role": "system",
             "content": "When the `spawn_subagent` tool is available, delegate focused tasks that \
@@ -5421,7 +5561,14 @@ fn build_initial_messages(
                         time or wait between spawns. After the sub-agents return their results, \
                         incorporate them into a complete final answer that directly addresses \
                         the user's original request: do not stop after spawning — wait for \
-                        their results and then write the final response."
+                        their results and then write the final response.\n\n\
+                        [A2A retry contract] Every sub-agent / micro-agent result is prefixed \
+                        with a status marker: [AGENT_RESULT: OK], [AGENT_RESULT: FAILED], or \
+                        [AGENT_RESULT: EMPTY]. If a delegate returns FAILED or EMPTY, retry it \
+                        ONCE with a more specific task that includes the error/feedback. If it \
+                        fails again, COMPLETE THE TASK YOURSELF with your own tools (write_file, \
+                        bash_sandbox, etc.) — never leave the task incomplete because a delegate \
+                        failed."
         }));
     }
 
@@ -5909,8 +6056,8 @@ async fn ollama_chat_with_tools(
                         Some(r) => Box::pin(run_micro_agent(r, &agent, &task)).await,
                         None => Err("Micro-agents are not available".to_string()),
                     };
-                    let result_text = match result {
-                        Ok((text, v)) => {
+                    let (result_text, micro_trace) = match result {
+                        Ok((text, v, trace)) => {
                             let mut out = text.clone();
                             if !v.is_empty() {
                                 out.push_str("\n\n[Validation results]\n");
@@ -5922,9 +6069,9 @@ async fn ollama_chat_with_tools(
                                     ));
                                 }
                             }
-                            out
+                            (tag_agent_result(classify_agent_result(&out), &out), Some(trace))
                         }
-                        Err(e) => format!("Tool error: {}", e),
+                        Err(e) => (tag_agent_result(AGENT_RESULT_FAILED, &format!("Tool error: {}", e)), None),
                     };
                     ctx.sink.emit_tool_progress(subagent_id, "done", "spawn_micro_agent", tool_path);
                     let snippet = if result_text.len() > 200 {
@@ -5938,7 +6085,7 @@ async fn ollama_chat_with_tools(
                         result_snippet: snippet,
                         result_full: result_text.clone(),
                         file_changes: Vec::new(),
-                        subagent: None,
+                        subagent: micro_trace,
                     });
                     ollama_msgs.push(serde_json::json!({
                         "role": "tool",
@@ -6467,6 +6614,9 @@ async fn run_openai_tool_loop(
         let has_spawn_subagent = tools
             .iter()
             .any(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
+        let has_spawn_micro_agent = tools
+            .iter()
+            .any(|t| t["function"]["name"].as_str() == Some("spawn_micro_agent"));
         let mut sys_prompt = format!(
             "You are a helpful assistant with access to tools. Use them whenever they help: \
              call web_search or web_fetch for current information, documentation, or anything \
@@ -6487,6 +6637,16 @@ async fn run_openai_tool_loop(
                  them into a complete final answer that directly addresses the user's original \
                  request: do not stop after spawning — wait for their results and then write \
                  the final response.",
+            );
+        }
+        if has_spawn_subagent || has_spawn_micro_agent {
+            sys_prompt.push_str(
+                "\n\n[A2A retry contract] Every sub-agent / micro-agent result is prefixed \
+                 with a status marker: [AGENT_RESULT: OK], [AGENT_RESULT: FAILED], or \
+                 [AGENT_RESULT: EMPTY]. If a delegate returns FAILED or EMPTY, retry it ONCE \
+                 with a more specific task that includes the error/feedback. If it fails again, \
+                 COMPLETE THE TASK YOURSELF with your own tools (write_file, bash_sandbox, etc.) \
+                 — never leave the task incomplete because a delegate failed.",
             );
         }
         openai_msgs.insert(0, serde_json::json!({
@@ -6696,12 +6856,12 @@ async fn run_openai_tool_loop(
                     let agent = args["agent"].as_str().unwrap_or("").to_string();
                     let task = args["task"].as_str().unwrap_or("").to_string();
                     sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
-                    let result = match runner {
+let result = match runner {
                         Some(r) => Box::pin(run_micro_agent(r, &agent, &task)).await,
                         None => Err("Micro-agents are not available".to_string()),
                     };
-                    let result_text = match result {
-                        Ok((text, v)) => {
+                    let (result_text, micro_trace) = match result {
+                        Ok((text, v, trace)) => {
                             let mut out = text.clone();
                             if !v.is_empty() {
                                 out.push_str("\n\n[Validation results]\n");
@@ -6713,9 +6873,9 @@ async fn run_openai_tool_loop(
                                     ));
                                 }
                             }
-                            out
+                            (tag_agent_result(classify_agent_result(&out), &out), Some(trace))
                         }
-                        Err(e) => format!("Tool error: {}", e),
+                        Err(e) => (tag_agent_result(AGENT_RESULT_FAILED, &format!("Tool error: {}", e)), None),
                     };
                     sink.emit_tool_progress(subagent_id, "done", "spawn_micro_agent", tool_path);
                     let snippet = if result_text.len() > 200 {
@@ -6729,7 +6889,7 @@ async fn run_openai_tool_loop(
                         result_snippet: snippet,
                         result_full: result_text.clone(),
                         file_changes: Vec::new(),
-                        subagent: None,
+                        subagent: micro_trace,
                     });
                     openai_msgs.push(serde_json::json!({
                         "role": "tool",
@@ -7382,7 +7542,28 @@ pub async fn run_chat(
     };
 
     let client = reqwest::Client::new();
-    let tools = build_tool_schemas(&req.tools_enabled, req.root_path.as_deref());
+    // The main agent may delegate mechanical work to micro-agents. Load its
+    // config from `.agents/main.md` if present; otherwise default to allowing
+    // micro-agent spawning so the orchestrator can route suitable tasks to a
+    // dedicated micro-agent (e.g. shell-runner for shell scripts). This adds the
+    // `spawn_micro_agent` tool to the main agent's tool set (alongside the
+    // existing `spawn_subagent`), so it can hand off focused, deterministic work.
+    let main_agent_config = req.root_path.as_deref().and_then(|rp| {
+        load_agent_config(rp, "main").ok().or_else(|| {
+            Some(AgentConfig {
+                name: "main".to_string(),
+                can_spawn_micro_agents: true,
+                allowed_micro_agents: Vec::new(),
+                ..Default::default()
+            })
+        })
+    });
+    let tools = build_tool_schemas_inner(
+        &req.tools_enabled,
+        req.root_path.as_deref(),
+        true,
+        main_agent_config.as_ref(),
+    );
     let has_tools = !tools.is_empty();
 
     // Shared sub-agent conversation memory (persists across turns in the same
@@ -7567,14 +7748,16 @@ pub async fn run_chat(
                         total_thinking.push_str(&full_thinking);
                     }
 
-                    if !full_content.is_empty() {
-                        // Real answer received.
+                    if is_complete_answer(&full_content, false) {
+                        // Real, complete answer received (not a question, not a
+                        // premature/too-short reply). Accept it.
                         final_content = full_content;
                         break;
                     }
-                    // The model only reasoned (or produced nothing). If we still
-                    // have budget, retry with a nudge. Do NOT dump thinking into
-                    // the visible message.
+                    // The model only reasoned, produced nothing, OR concluded
+                    // prematurely (a question / clarification / too-short reply).
+                    // If we still have budget, retry with a nudge so it actually
+                    // answers instead of closing the turn with a question.
                     if full_thinking.is_empty() {
                         // Genuinely empty — no thinking, no content.
                         eprintln!("[nolock] ollama chat returned nothing (attempt {})", attempts);
@@ -7598,7 +7781,8 @@ pub async fn run_chat(
                     retry_msgs.push(serde_json::json!({
                         "role": "user",
                         "content": "Please answer normally now — provide the actual answer as plain, visible text. \
-                                    Do NOT output an internal reasoning trace; just the answer."
+                                    Do NOT output an internal reasoning trace, do NOT ask a clarifying question, \
+                                    and do NOT just acknowledge the request. Give the real answer directly."
                     }));
                     let retry_body = serde_json::json!({
                         "model": req.model,
@@ -7619,6 +7803,17 @@ pub async fn run_chat(
                 }
                 let mut thinking_tokens = 0u64;
                 accumulate_thinking(&mut thinking_tokens, &total_thinking);
+                // If the model never produced a visible answer (stalled on
+                // thinking-only across all retries), fall back to a best-effort
+                // answer extracted from the accumulated reasoning rather than
+                // returning "(no response)". This keeps the main agent from
+                // stalling silently.
+                if final_content == "(no response)" && !total_thinking.trim().is_empty() {
+                    let fallback = extract_answer_from_thinking(&total_thinking);
+                    if !fallback.is_empty() {
+                        final_content = fallback;
+                    }
+                }
                 Ok(ChatResult {
                     content: final_content,
                     tool_calls: vec![],
@@ -10242,6 +10437,54 @@ Fix the errors."#;
         assert!(!is_complete_answer("The answer is 42.", true));
         // A "still planning" JSON is not complete.
         assert!(!is_complete_answer(r#"{"conclusion": false, "final_answer": ""}"#, false));
+    }
+
+    #[test]
+    fn is_complete_answer_rejects_premature_questions() {
+        // A question / clarification is a premature conclusion — not done.
+        assert!(!is_complete_answer("What would you like me to do?", false));
+        assert!(!is_complete_answer("Could you clarify what you mean?", false));
+        assert!(!is_complete_answer("How can I help you today?", false));
+        assert!(!is_complete_answer("Can you provide more details?", false));
+    }
+
+    #[test]
+    fn is_complete_answer_rejects_too_short_replies() {
+        // Bare acknowledgments are too short to be a real answer.
+        assert!(!is_complete_answer("ok", false));
+        assert!(!is_complete_answer("sure", false));
+        assert!(!is_complete_answer("done", false));
+        assert!(!is_complete_answer("yes", false));
+        // A real (if short) answer is still complete.
+        assert!(is_complete_answer("The answer is 42.", false));
+    }
+
+#[test]
+    fn is_premature_answer_detects_clarification_phrases() {
+        assert!(is_premature_answer("What do you mean by that?"));
+        assert!(is_premature_answer("Please clarify the requirements."));
+        assert!(is_premature_answer("What information do you need?"));
+        assert!(!is_premature_answer("The fix is in src/main.rs."));
+    }
+
+    #[test]
+    fn extract_answer_from_thinking_returns_last_substantive_sentence() {
+        let thinking = "Let me reason about this. The user wants a greeting. The answer is hello.";
+        let ans = extract_answer_from_thinking(thinking);
+        assert_eq!(ans, "The answer is hello");
+    }
+
+    #[test]
+    fn extract_answer_from_thinking_skips_questions() {
+        let thinking = "What should I do? The user asked for a greeting. I should say hello.";
+        let ans = extract_answer_from_thinking(thinking);
+        assert_eq!(ans, "I should say hello");
+    }
+
+    #[test]
+    fn extract_answer_from_thinking_handles_empty() {
+        assert_eq!(extract_answer_from_thinking(""), "");
+        assert_eq!(extract_answer_from_thinking("   "), "");
     }
 
     #[test]

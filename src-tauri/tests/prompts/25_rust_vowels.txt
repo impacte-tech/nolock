@@ -1,0 +1,1 @@
+Write a Rust program that counts the number of vowels in the string "hello world" and prints it. Use the rust_repl tool to COMPILE AND RUN it, and report the printed output.

@@ -1,0 +1,1 @@
+Create a Python script at sumlist.py that reads a list of numbers from a file numbers.txt (one per line), sums them, and prints the total. First create numbers.txt containing 10, 20, 30, then use the bash_sandbox tool to run `python3 sumlist.py` and report the printed output.

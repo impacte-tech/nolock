@@ -1,1 +1,1 @@
-Create a Python script at reverse.py that reads a string from a file input.txt, reverses it, and prints the reversed string. First write input.txt containing "abc", then use the bash_sandbox tool to run `python3 reverse.py` and confirm the printed output is "cba".
+Create a Python script at reverse.py that reads a string from a file input.txt, reverses it, and prints the reversed string. First write input.txt containing "abc", then use the bash_sandbox tool to run `python3 reverse.py` and report the printed output.
