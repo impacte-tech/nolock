@@ -15,7 +15,7 @@
 #
 # IMPORTANT — parallel batches vs. local Ollama:
 #   Each E2E pass loads the main (nemotron ~6.8GB) + router (lfm2.5 ~5.4GB) +
-#   micro (qwen3.5) models. Running several passes in parallel exceeds VRAM on a
+#   micro (gemma4:e2b ~7.2GB) models. Running several passes in parallel exceeds VRAM on a
 #   single GPU, so Ollama evicts models and drops connections, causing most tests
 #   to FAIL with "error sending request for http://localhost:11434/api/chat".
 #   The default is therefore SEQUENTIAL (batch=1), which is the only reliable

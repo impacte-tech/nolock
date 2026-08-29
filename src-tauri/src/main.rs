@@ -345,6 +345,8 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
     let mut validation_python_check = false;
     let mut validation_go_check = false;
     let mut validation_custom_commands: Vec<String> = Vec::new();
+    let mut validation_custom_commands_expected: Vec<String> = Vec::new();
+    let mut validation_verify_reported_output = false;
     let mut validation_require_all_pass = true;
     let mut validation_max_retries = 3;
     let prompt;
@@ -381,6 +383,8 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
                             "python_check" => validation_python_check = value.parse().unwrap_or(false),
                             "go_check" => validation_go_check = value.parse().unwrap_or(false),
                             "custom_commands" => validation_custom_commands = parse_tools_list(&value),
+                            "custom_commands_expected" => validation_custom_commands_expected = parse_tools_list(&value),
+                            "verify_reported_output" => validation_verify_reported_output = value.parse().unwrap_or(false),
                             "require_all_pass" => validation_require_all_pass = value.parse().unwrap_or(true),
                             "max_retries" => validation_max_retries = value.parse().unwrap_or(3),
                             _ => {}
@@ -416,6 +420,12 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
                         }
                         "validation_custom_commands" => {
                             validation_custom_commands = parse_tools_list(&value);
+                        }
+                        "validation_custom_commands_expected" => {
+                            validation_custom_commands_expected = parse_tools_list(&value);
+                        }
+                        "validation_verify_reported_output" => {
+                            validation_verify_reported_output = value.parse().unwrap_or(false);
                         }
                         "validation_require_all_pass" => {
                             validation_require_all_pass = value.parse().unwrap_or(true);
@@ -455,6 +465,8 @@ fn read_agent(path: String) -> Result<serde_json::Value, String> {
             "python_check": validation_python_check,
             "go_check": validation_go_check,
             "custom_commands": validation_custom_commands,
+            "custom_commands_expected": validation_custom_commands_expected,
+            "verify_reported_output": validation_verify_reported_output,
             "require_all_pass": validation_require_all_pass,
             "max_retries": validation_max_retries,
         }
@@ -567,6 +579,13 @@ pub fn load_agent_config(root_path: &str, name: &str) -> Result<AgentConfig, Str
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
+            custom_commands_expected: parsed["validation"]["custom_commands_expected"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            verify_reported_output: parsed["validation"]["verify_reported_output"]
+                .as_bool()
+                .unwrap_or(false),
             require_all_pass: parsed["validation"]["require_all_pass"].as_bool().unwrap_or(true),
             max_retries: parsed["validation"]["max_retries"].as_u64().unwrap_or(3) as usize,
         },
@@ -630,6 +649,13 @@ pub fn load_micro_agent_config(root_path: &str, name: &str) -> Result<MicroAgent
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
+            custom_commands_expected: parsed["validation"]["custom_commands_expected"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            verify_reported_output: parsed["validation"]["verify_reported_output"]
+                .as_bool()
+                .unwrap_or(false),
             require_all_pass: parsed["validation"]["require_all_pass"].as_bool().unwrap_or(true),
             max_retries: parsed["validation"]["max_retries"].as_u64().unwrap_or(3) as usize,
         },
@@ -3265,7 +3291,18 @@ pub async fn run_micro_agent(
 
         // 2. Run deterministic validations on the changed files.
         let changed_files = validation::extract_changed_files(&clean);
-        let validations = validation::run_validations(root, &agent.validation, &changed_files).await;
+        let mut validations = validation::run_validations(root, &agent.validation, &changed_files).await;
+
+        // 2b. Generic self-consistency check for script-running agents: when
+        //     `verify_reported_output` is set, re-run the last `bash_sandbox`
+        //     command the micro-agent executed and require non-empty output.
+        //     This catches "the command failed" / "produced no output" even
+        //     when no task-specific custom command is configured.
+        if agent.validation.verify_reported_output {
+            if let Some(v) = verify_reported_output_check(root, &tool_calls, task, runner).await {
+                validations.push(v);
+            }
+        }
 
         // 3. Check if all passed (or we're out of retries). An empty/stalled
         //    response also triggers a retry (with a specific nudge) so a
@@ -3304,6 +3341,156 @@ pub async fn run_micro_agent(
     }
 
     Err("Max retries exceeded".to_string())
+}
+
+/// Re-run the last `bash_sandbox` command a micro-agent executed and verify it
+/// produced output. When the task text states an expected result (e.g. "data.txt
+/// with 5 lines", "prints exactly 'VALIDATED_OK'"), the re-run output must also
+/// contain that expected value — this catches "the command ran but produced the
+/// wrong answer" (e.g. `wc -l` returning 4 instead of 5). Returns `None` when
+/// there is no bash_sandbox call to verify (no-op for non-shell micro-agents).
+async fn verify_reported_output_check(
+    root: &str,
+    tool_calls: &[ToolCallLog],
+    task: &str,
+    runner: &SubAgentRunner<'_>,
+) -> Option<validation::ValidationResult> {
+    // Find the bash_sandbox call that references the script file named in the
+    // task (e.g. "count.sh"). We prefer the script-referencing call over the
+    // last bash_sandbox call: a micro-agent may run a fallback command that
+    // happens to produce the right output while the actual script command
+    // failed (e.g. `./count.sh` → Permission denied). The script-referencing
+    // call is the one that proves the script itself ran.
+    let script_name = extract_script_name(task);
+    let target = tool_calls.iter().rev().find(|c| {
+        if c.name != "bash_sandbox" {
+            return false;
+        }
+        if script_name.is_empty() {
+            return true;
+        }
+        c.arguments.contains(&script_name)
+    })?;
+    let args: serde_json::Value = serde_json::from_str(&target.arguments).unwrap_or(serde_json::json!({}));
+    let command = args["command"].as_str()?;
+    eprintln!(
+        "[nolock] verify_reported_output: re-running bash_sandbox command={} (expected={:?})",
+        &command[..command.len().min(120)],
+        extract_expected_output(task)
+    );
+    let result = execute_tool(
+        "bash_sandbox",
+        &args,
+        runner.client,
+        runner.tool_configs,
+        Some(root),
+        "ollama",
+    )
+    .await
+    .unwrap_or_else(|e| format!("Tool error: {}", e));
+
+    let expected = extract_expected_output(task);
+    let non_empty = !result.trim().is_empty();
+    let matches_expected = expected.is_empty() || result.contains(&expected);
+    let passed = non_empty && matches_expected;
+    eprintln!(
+        "[nolock] verify_reported_output: result={:?} non_empty={} matches_expected={} passed={}",
+        result.chars().take(120).collect::<String>(),
+        non_empty,
+        matches_expected,
+        passed
+    );
+    Some(validation::ValidationResult {
+        name: format!("re-run bash_sandbox: {}", command),
+        passed,
+        output: result.clone(),
+        error: if passed {
+            None
+        } else if !non_empty {
+            Some("Re-run of the shell command produced no output".to_string())
+        } else {
+            Some(format!(
+                "Re-run output did not contain expected {:?}",
+                expected
+            ))
+        },
+    })
+}
+
+/// Extract the script filename from a task description (e.g. "count.sh" from
+/// "Create a shell script at count.sh"). Returns empty when no `.sh` file is
+/// named.
+fn extract_script_name(task: &str) -> String {
+    // Match a `.sh` filename anywhere in the task.
+    let lower = task.to_lowercase();
+    let mut best = String::new();
+    let mut search = 0usize;
+    while let Some(pos) = lower[search..].find(".sh") {
+        let abs = search + pos;
+        // Walk backwards to the start of the filename token.
+        let mut start = abs;
+        while start > 0 {
+            let c = lower.as_bytes()[start - 1];
+            if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'.' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let candidate = &task[start..abs + 3];
+        // Prefer the longest candidate (e.g. "count.sh" over "sh").
+        if candidate.len() > best.len() {
+            best = candidate.to_string();
+        }
+        search = abs + 3;
+    }
+    best
+}
+
+/// Extract an expected-output substring from a task description, if stated.
+/// Recognises the common patterns used by the shell e2e prompts:
+///   - "with N lines" / "N lines"  → the number N (line-count tasks)
+///   - "prints exactly 'X'"        → X
+///   - "prints \"X\""              → X
+/// Returns an empty string when no expected output is stated (caller then only
+/// checks for non-empty output).
+fn extract_expected_output(task: &str) -> String {
+    // "data.txt with 5 lines" / "with 5 lines" → "5"
+    if let Some(caps) = regex_capture(task, r"(?i)with\s+(\d+)\s+lines") {
+        return caps;
+    }
+    if let Some(caps) = regex_capture(task, r"(?i)prints\s+exactly\s+'([^']+)'") {
+        return caps;
+    }
+    if let Some(caps) = regex_capture(task, r#"(?i)prints\s+"([^"]+)""#) {
+        return caps;
+    }
+    String::new()
+}
+
+/// Simple regex capture helper (avoids pulling in the `regex` crate if not
+/// already a dependency). Returns the first capture group or empty string.
+fn regex_capture(text: &str, pattern: &str) -> Option<String> {
+    // Minimal pattern support: find the literal prefix/suffix around a capture.
+    // Patterns used here are simple: a fixed prefix, then the captured group,
+    // then a fixed suffix. We locate the prefix, then read until the suffix.
+    let (prefix, suffix) = split_pattern(pattern)?;
+    let start = text.find(&prefix)? + prefix.len();
+    let rest = &text[start..];
+    let end = rest.find(&suffix)?;
+    Some(rest[..end].to_string())
+}
+
+/// Split a simple regex like `(?i)with\s+(\d+)\s+lines` into the literal text
+/// before and after the capture group. Only supports the fixed patterns used by
+/// `extract_expected_output`; returns `None` for anything else.
+fn split_pattern(pattern: &str) -> Option<(String, String)> {
+    let p = pattern.strip_prefix("(?i)")?;
+    let open = p.find('(')?;
+    let close = p[open..].find(')')? + open;
+    let prefix = p[..open].replace("\\s+", " ");
+    let suffix = p[close + 1..].replace("\\s+", " ");
+    Some((prefix, suffix))
 }
 
 /// Extract a short "task hint" (the original user task) from the message list,
@@ -10252,6 +10439,7 @@ temperature: 0.1
 tools: [read_file, edit, write_file, bash_sandbox]
 validation:
   rust_check: true
+  verify_reported_output: true
   max_retries: 3
 ---
 
@@ -10265,6 +10453,7 @@ Fix the errors."#;
         assert_eq!(cfg.backend, "ollama");
         assert!(cfg.tools.iter().any(|t| t == "edit"));
         assert!(cfg.validation.rust_check);
+        assert!(cfg.validation.verify_reported_output);
         assert_eq!(cfg.validation.max_retries, 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -10596,6 +10785,41 @@ Fix the errors."#;
         assert!(out.contains("I explored the project structure"), "got: {}", out);
         assert!(!out.contains("next_steps"), "raw JSON leaked: {}", out);
         assert!(!out.contains("{"), "raw JSON leaked: {}", out);
+    }
+
+    #[test]
+    fn extract_script_name_finds_sh_filename() {
+        assert_eq!(
+            extract_script_name("Create a shell script at count.sh that counts lines"),
+            "count.sh"
+        );
+        assert_eq!(
+            extract_script_name("Create valid.sh that prints exactly 'VALIDATED_OK'"),
+            "valid.sh"
+        );
+        // No .sh file → empty.
+        assert_eq!(extract_script_name("Run the script and report the output"), "");
+    }
+
+    #[test]
+    fn extract_expected_output_recognises_task_patterns() {
+        // Line-count task: "data.txt with 5 lines" → "5"
+        assert_eq!(
+            extract_expected_output("Create data.txt with 5 lines, then run `bash count.sh data.txt`"),
+            "5"
+        );
+        // "prints exactly 'X'"
+        assert_eq!(
+            extract_expected_output("Create valid.sh that prints exactly 'VALIDATED_OK'"),
+            "VALIDATED_OK"
+        );
+        // "prints \"X\""
+        assert_eq!(
+            extract_expected_output("Create greet.sh that prints \"Hello, <name>!\""),
+            "Hello, <name>!"
+        );
+        // No stated expectation → empty (caller only checks non-empty output).
+        assert_eq!(extract_expected_output("Run the script and report the output"), "");
     }
 
     #[test]

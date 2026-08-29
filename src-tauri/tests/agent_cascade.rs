@@ -3,8 +3,8 @@
 //!
 //! Models used (must be pulled into Ollama):
 //!   - Main agent:      oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU
-//!   - Agent router:    lfm2.5:latest
-//!   - Micro-agent:     qwen3.5:0.8b
+//!   - Agent router:    oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU
+//!   - Micro-agent:     gemma4:e2b
 //!
 //! These tests are `#[ignore]` by default because they require a running Ollama
 //! server and real model inference (slow + non-deterministic). Run them with:
@@ -26,14 +26,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const OLLAMA_URL: &str = "http://localhost:11434";
 const MAIN_MODEL: &str = "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU";
-const LFM_MODEL: &str = "lfm2.5:latest";
-const MICRO_MODEL: &str = "qwen3.5:0.8b";
-/// The shell-runner micro-agent uses a larger model than the default micro
-/// agents: multi-step write-both-files-then-run tasks need more capability than
-/// the 0.8b coder model reliably provides (measured: it made a different
-/// mistake on every attempt). qwen3.5:4b is the smallest locally-available
-/// model that handles the sequence.
-const SHELL_RUNNER_MODEL: &str = "qwen3.5:4b";
+const LFM_MODEL: &str = "oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU";
+const MICRO_MODEL: &str = "gemma4:e2b";
+/// The shell-runner micro-agent uses the same micro-agent model as the other
+/// micro agents (gemma4:e2b reliably chains write_file + bash_sandbox).
+const SHELL_RUNNER_MODEL: &str = "gemma4:e2b";
 
 /// Load a prompt from `tests/prompts/<name>.txt`, trimming surrounding
 /// whitespace. Segregating prompts into files keeps the scenario text separate
@@ -191,7 +188,7 @@ fn setup_fixture_project_with_src(broken_src: Option<&str>) -> PathBuf {
         "---\n\
          name: ts-type-fixer\n\
          description: Fixes TypeScript/ESLint errors\n\
-         model: qwen3.5:0.8b\n\
+         model: gemma4:e2b\n\
          backend: ollama\n\
          temperature: 0.1\n\
          tools: [read_file, edit, write_file, bash_sandbox]\n\
@@ -202,9 +199,11 @@ fn setup_fixture_project_with_src(broken_src: Option<&str>) -> PathBuf {
 
     // --- .micro-agents/shell-runner.md — writes & runs shell scripts via
     // bash_sandbox, so the main agent can delegate shell tasks to it. The
-    // custom_commands validator deterministically re-runs the script after each
-    // attempt, so the micro-agent self-corrects (e.g. creates a missing input
-    // file) via the validation retry loop instead of returning a broken result.
+    // verify_reported_output validator deterministically re-runs the script
+    // command after each attempt and requires the expected output, so the
+    // micro-agent self-corrects (e.g. creates a missing input file, fixes a
+    // missing trailing newline, or uses `bash count.sh` instead of `./count.sh`)
+    // via the validation retry loop instead of returning a broken result.
     std::fs::write(
         dir.join(".micro-agents/shell-runner.md"),
         format!(
@@ -215,18 +214,23 @@ fn setup_fixture_project_with_src(broken_src: Option<&str>) -> PathBuf {
              backend: ollama\n\
              temperature: 0.1\n\
              tools: [read_file, write_file, bash_sandbox]\n\
-             validation:\n    custom_commands: [\"bash count.sh data.txt\"]\n    max_retries: 3\n\
+             validation:\n    custom_commands: [\"bash count.sh data.txt\"]\n    verify_reported_output: true\n    max_retries: 3\n\
              ---\n\n\
              You are a shell-script specialist. Write the script (and any input files) with\n\
              write_file using RELATIVE paths (e.g. `data.txt`, `count.sh`) so they land in\n\
              the project root. NEVER use absolute paths like `/tmp/...` — they are rejected.\n\
              When the script must accept a file argument, reference it as `$1`\n\
              (the first positional argument) — never invent an environment variable name.\n\
-             When creating a data file, ensure EVERY line ends with a newline (e.g. use\n\
-             `printf` with `\\n`), otherwise `wc -l` undercounts the last line.\n\
+             When creating a data file, ensure EVERY line ends with a newline, INCLUDING\n\
+             the last line. `wc -l` counts newline characters, not lines: a file with 5\n\
+             lines but no trailing newline after the 5th line reports 4. The content\n\
+             string MUST end with `\\n` after the final line. Example for a 5-line file:\n\
+             `content: \"line1\\nline2\\nline3\\nline4\\nline5\\n\"` (note the trailing `\\n`).\n\
              Run it with bash_sandbox using the project root as the working directory so\n\
              relative paths resolve, using the EXACT command from the task (e.g.\n\
-             `bash count.sh data.txt`). Confirm the printed output matches what the task\n\
+             `bash count.sh data.txt`). NEVER run the script as `./count.sh` — the file is\n\
+             not executable; always prefix with `bash`.\n\
+             Confirm the printed output matches what the task\n\
              expects; if it is wrong or errors, fix the script and re-run. You MUST actually\n\
              invoke bash_sandbox to run the script — do not merely describe the steps.\n\
              Return only the script's output.\n",

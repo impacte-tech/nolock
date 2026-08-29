@@ -6,7 +6,7 @@
 # Ollama models:
 #   - Main agent    : nemotron-nano-9b-v2 (planning / orchestration)
 #   - Agent router  : lfm2.5              (intent classification / routing)
-#   - Micro-agent   : qwen3.5:0.8b        (mechanical fixes + validation)
+#   - Micro-agent   : gemma4:e2b           (mechanical fixes + validation)
 #
 # Run modes:
 #   ./e2e/run.sh check            # verify Ollama + required models are present
@@ -24,8 +24,8 @@ TAURI="$ROOT/src-tauri"
 SERVER="http://localhost:11434"
 
 MAIN_MODEL="oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU"
-LFM_MODEL="lfm2.5:latest"
-MICRO_MODEL="qwen3.5:0.8b"
+LFM_MODEL="oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU"
+MICRO_MODEL="gemma4:e2b"
 
 require_ollama() {
   curl -sf "$SERVER/api/tags" >/dev/null 2>&1 \

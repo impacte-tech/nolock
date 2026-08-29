@@ -401,7 +401,7 @@ agent's** provider/model instead of the main chat model:
 ---
 name: code-reviewer
 description: Reviews code for bugs and security issues
-model: gemma4:12b-mlx
+model: oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU
 backend: ollama            # ← runs on the local executor
 temperature: 0.3
 tools: read_file, list_directory, grep
@@ -491,14 +491,14 @@ largest (mechanical work shifted off the 9B main model onto a sub-1B coder).
 
 | Micro-agent | Model | Why |
 |---|---|---|
-| `rust-fixer`, `ts-type-fixer`, `lint-fixer`, `python-fixer`, `go-fixer`, `test-writer`, `context-summarizer` | `qwen3.5:0.8b` | Small, fast, reliable tool-calling; good enough for focused mechanical fixes + running the validation command. |
+| `rust-fixer`, `ts-type-fixer`, `lint-fixer`, `python-fixer`, `go-fixer`, `test-writer`, `context-summarizer` | `gemma4:e2b` | Small, fast, reliable tool-calling; good enough for focused mechanical fixes + running the validation command. |
 
 The default templates in `.micro-agents/*.md` are pre-configured to this model:
 
 ```yaml
 ---
 name: rust-fixer
-model: qwen3.5:0.8b
+model: gemma4:e2b
 backend: ollama
 temperature: 0.1
 tools: [read_file, edit, write_file, bash_sandbox]
@@ -512,9 +512,9 @@ validation:
 
 | Tier | Model | Role |
 |---|---|---|
-| **Main agent** | `nemotron-nano-9b-v2` | Planning, orchestration, high-level reasoning |
-| **Sub-agent** | `lfm2.5` | Domain tasks, intent classification / routing |
-| **Micro-agent** | `qwen3.5:0.8b` | Mechanical fixes + deterministic validation |
+| **Main agent** | `oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU` | Planning, orchestration, high-level reasoning |
+| **Sub-agent** | `oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU` | Domain tasks, intent classification / routing |
+| **Micro-agent** | `gemma4:e2b` | Mechanical fixes + deterministic validation |
 
 #### Deterministic validation is the contract
 
