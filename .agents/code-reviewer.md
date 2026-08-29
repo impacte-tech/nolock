@@ -1,7 +1,7 @@
 ---
 name: code-reviewer
 description: Reviews code for bugs, security issues and style; suggests concrete fixes
-model: oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU
+model: oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU
 
 backend: ollama
 temperature: 0.3
@@ -66,7 +66,7 @@ const result = await invokeAgent("code-reviewer", {
 
 ## Configuration
 
-- **Model**: gemma4:12b-mlx ( Ollama )
+- **Model**: oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU ( Ollama )
 - **Temperature**: 0.3 (low temperature for deterministic reviews)
 - **Tools**: read_file, list_directory, grep
 

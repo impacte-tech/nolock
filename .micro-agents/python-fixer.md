@@ -1,7 +1,7 @@
 ---
 name: python-fixer
 description: Fixes ruff/pyright errors with minimal changes
-model: qwen3.5:0.8b
+model: gemma4:e2b
 backend: ollama
 temperature: 0.1
 tools: [read_file, edit, write_file, bash_sandbox]

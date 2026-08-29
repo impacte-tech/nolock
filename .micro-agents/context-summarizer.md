@@ -1,7 +1,7 @@
 ---
 name: context-summarizer
 description: Summarizes conversation context and produces a to-do list when the model repeats itself or the context is near its limit
-model: qwen3.5:0.8b
+model: gemma4:e2b
 backend: ollama
 temperature: 0.1
 tools: []

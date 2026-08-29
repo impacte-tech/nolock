@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Researches a topic (web + files) and returns a concise sourced summary
-model: oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU
+model: oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU
 backend: ollama
 temperature: 0.7
 tools: web_search, web_fetch, read_file, grep
@@ -52,7 +52,7 @@ const result = await invokeAgent("researcher", {
 
 ## Configuration
 
-- **Model**: qwen3.5:9b-mlx ( Ollama )
+- **Model**: oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU ( Ollama )
 - **Temperature**: 0.7 (higher temperature for comprehensive research)
 - **Tools**: web_search, web_fetch, read_file, grep
 
