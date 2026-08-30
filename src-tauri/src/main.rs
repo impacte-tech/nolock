@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tauri::Emitter;
 
@@ -11,6 +11,8 @@ mod fabric;
 mod hooks;
 mod linter;
 mod macos_keyboard;
+pub mod secrets;
+mod switchyard;
 mod terminal_memory;
 pub mod validation;
 
@@ -316,6 +318,23 @@ fn validate_agents(root_path: String) -> Vec<String> {
     // nemo-fabric-core "behind the scenes" validation of every agent file in
     // `.agents/`. Returns a list of human-readable issues (empty = all valid).
     fabric::validate_agents_directory(&root_path)
+}
+
+/// Read the project's `.routers/switchyard.json` (defaults to disabled when the
+/// file is absent). Used by the Switchyard Router panel.
+#[tauri::command]
+fn read_switchyard_config(root_path: String) -> Result<switchyard::SwitchyardConfig, String> {
+    switchyard::read_switchyard_config(&root_path)
+}
+
+/// Validate + persist the project's `.routers/switchyard.json`.
+#[tauri::command]
+fn write_switchyard_config(
+    root_path: String,
+    config: switchyard::SwitchyardConfig,
+) -> Result<(), String> {
+    switchyard::validate_switchyard_config(&config)?;
+    switchyard::write_switchyard_config(&root_path, &config)
 }
 
 #[tauri::command]
@@ -2196,9 +2215,9 @@ struct SessionRecord {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
     #[serde(default)]
-    url: String,
+    pub url: String,
     #[serde(default)]
-    api_key: String,
+    pub api_key: String,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -2751,7 +2770,7 @@ pub async fn run_subagent(
     // Resolve the sub-agent's provider: its own backend/model when set,
     // otherwise fall back to the main agent's. Endpoint/credential come from
     // the matching entry in the providers map, else the main agent's.
-    let (backend, model, url, api_key) = resolve_agent_provider(
+    let (mut backend, mut model, mut url, mut api_key) = resolve_agent_provider(
         &agent,
         runner.main_backend,
         runner.main_model,
@@ -2759,6 +2778,62 @@ pub async fn run_subagent(
         runner.main_api_key,
         runner.providers,
     );
+
+    // ---- Switchyard routing (sub-agent) ----------------------------------
+    // When the project's `.routers/switchyard.json` is enabled and has a
+    // `subagent` route, the embedded libsy router may override the sub-agent's
+    // provider/model. Fail-safe: any error keeps the resolved provider above.
+    if let Some(root) = runner.root_path {
+        let providers: HashMap<String, switchyard::ProviderEndpoint> = runner
+            .providers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    switchyard::ProviderEndpoint {
+                        url: v.url.clone(),
+                        api_key: v.api_key.clone(),
+                    },
+                )
+            })
+            .collect();
+        let judge_transport: switchyard::JudgeTransport = {
+            let client = runner.client.clone();
+            Arc::new(move |backend, model, url, api_key, prompt| {
+                let client = client.clone();
+                Box::pin(async move {
+                    switchyard_judge_completion(&client, &backend, &model, &url, &api_key, &prompt)
+                        .await
+                })
+            })
+        };
+        match switchyard::resolve_route(
+            root,
+            switchyard::RoutePurpose::Subagent,
+            task,
+            &providers,
+            runner.main_backend,
+            runner.main_model,
+            runner.main_url,
+            runner.main_api_key,
+            judge_transport,
+        )
+        .await
+        {
+            Ok(Some(selected)) => {
+                eprintln!(
+                    "[switchyard] subagent '{}' route '{}' -> {} ({})",
+                    agent_name, selected.route_name, selected.model, selected.backend
+                );
+                backend = selected.backend;
+                model = selected.model;
+                url = selected.url;
+                api_key = selected.api_key;
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[switchyard] subagent routing skipped: {}", e),
+        }
+    }
 
     // Resolve the sub-agent's tool set.
     let tool_names: Vec<String> = if agent.tools.is_empty() {
@@ -7613,6 +7688,61 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
     run_chat(&app_handle, memory.inner(), req).await
 }
 
+/// Serve a Switchyard classifier/judge model call over nolock's own transport.
+/// A minimal non-tool chat completion: Ollama uses `/api/chat`, every other
+/// backend uses the OpenAI-compatible `/chat/completions` shape.
+async fn switchyard_judge_completion(
+    client: &reqwest::Client,
+    backend: &str,
+    model: &str,
+    url: &str,
+    api_key: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": false,
+    });
+    let endpoint = if backend == "ollama" {
+        format!("{}/api/chat", url)
+    } else {
+        format!("{}/chat/completions", url)
+    };
+    let mut request = client
+        .post(&endpoint)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(120));
+    if !api_key.is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| format!("switchyard judge request failed: {}", e))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("switchyard judge read failed: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("switchyard judge HTTP {}: {}", status, text));
+    }
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("switchyard judge parse failed: {}", e))?;
+    if backend == "ollama" {
+        v["message"]["content"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "switchyard judge: no message.content in ollama response".to_string())
+    } else {
+        v["choices"][0]["message"]["content"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "switchyard judge: no choices[0].message.content".to_string())
+    }
+}
+
 /// Core chat entry point, shared by the Tauri command and the headless CLI /
 /// E2E harness. `sink` reports live progress (streamed tokens, tool progress,
 /// sub-agent windows) and `subagent_memory` persists per-agent conversation
@@ -7620,7 +7750,7 @@ async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatR
 pub async fn run_chat(
     sink: &(dyn EventSink + Send + Sync),
     subagent_memory: &SubAgentMemory,
-    req: ChatRequest,
+    mut req: ChatRequest,
 ) -> Result<ChatResult, String> {
     eprintln!(
         "[nolock] ai_chat backend={} url={} model={} messages={} tools={:?} temp={:?} max_tokens={:?} system_prompt={:?}",
@@ -7729,6 +7859,74 @@ pub async fn run_chat(
     };
 
     let client = reqwest::Client::new();
+
+    // ---- Switchyard routing (main chat) ----------------------------------
+    // When the project's `.routers/switchyard.json` is enabled and has a
+    // `chat` route, the embedded libsy router picks the backend/model for this
+    // request. Fail-safe: any error falls through to the user-configured
+    // provider below.
+    if let Some(root) = req.root_path.as_deref() {
+        let providers: HashMap<String, switchyard::ProviderEndpoint> = req
+            .providers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    switchyard::ProviderEndpoint {
+                        url: v.url.clone(),
+                        api_key: v.api_key.clone(),
+                    },
+                )
+            })
+            .collect();
+        let judge_transport: switchyard::JudgeTransport = {
+            let client = client.clone();
+            Arc::new(move |backend, model, url, api_key, prompt| {
+                let client = client.clone();
+                Box::pin(async move {
+                    switchyard_judge_completion(&client, &backend, &model, &url, &api_key, &prompt)
+                        .await
+                })
+            })
+        };
+        let default_api_key = req.api_key.clone().unwrap_or_default();
+        match switchyard::resolve_route(
+            root,
+            switchyard::RoutePurpose::Chat,
+            &user_task,
+            &providers,
+            &req.backend,
+            &req.model,
+            &req.url,
+            &default_api_key,
+            judge_transport,
+        )
+        .await
+        {
+            Ok(Some(selected)) => {
+                eprintln!(
+                    "[switchyard] route '{}' ({:?}) -> {} ({}){}",
+                    selected.route_name,
+                    selected.algorithm,
+                    selected.model,
+                    selected.backend,
+                    selected
+                        .reasoning
+                        .as_deref()
+                        .map(|r| format!(" — {}", r))
+                        .unwrap_or_default()
+                );
+                sink.emit_model_routed(&selected.model);
+                req.backend = selected.backend;
+                req.model = selected.model;
+                req.url = selected.url;
+                req.api_key = Some(selected.api_key);
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[switchyard] routing skipped: {}", e),
+        }
+    }
+
     // The main agent may delegate mechanical work to micro-agents. Load its
     // config from `.agents/main.md` if present; otherwise default to allowing
     // micro-agent spawning so the orchestrator can route suitable tasks to a
@@ -8510,6 +8708,8 @@ pub fn run() {
             list_agents,
             read_agent,
             validate_agents,
+            read_switchyard_config,
+            write_switchyard_config,
             list_micro_agents,
             read_micro_agent,
             subagent_reset,
@@ -8545,6 +8745,9 @@ pub fn run() {
             terminal_memory::get_top_commands,
             terminal_memory::get_command_categories,
             terminal_memory::save_command_category,
+            secrets::store_secret,
+            secrets::get_secret,
+            secrets::delete_secret,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nolock");

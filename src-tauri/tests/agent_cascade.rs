@@ -1110,3 +1110,126 @@ async fn agent_writes_and_runs_python_sum_list() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+// ---------------------------------------------------------------------------
+// Switchyard routing e2e (OpenRouter)
+// ---------------------------------------------------------------------------
+
+/// A sink that records the routed model and streamed content so a test can
+/// assert that Switchyard actually redirected the request.
+struct RecordingSink {
+    routed: std::sync::Mutex<Vec<String>>,
+    content: std::sync::Mutex<String>,
+}
+
+impl main_impl::EventSink for RecordingSink {
+    fn emit_stream_token(&self, _id: Option<&str>, token: &str, _thinking: bool) {
+        self.content.lock().unwrap().push_str(token);
+    }
+    fn emit_tool_progress(
+        &self,
+        _id: Option<&str>,
+        _kind: &str,
+        _name: &str,
+        _path: Option<String>,
+    ) {
+    }
+    fn emit_model_routed(&self, model: &str) {
+        self.routed.lock().unwrap().push(model.to_string());
+    }
+    fn emit_subagent_start(&self, _id: &str, _agent: &str, _task: &str, _model: &str) {}
+    fn emit_subagent_done(&self, _id: &str, _result: &str) {}
+}
+
+/// E2E: the project's `.routers/switchyard.json` (nemotron-family route behind
+/// the `random` general router) redirects the main chat to one of OpenRouter's
+/// Nemotron models.
+///
+/// Requires network + an OpenRouter API key. The key is read from the OS
+/// keychain (service com.nolock.app, account apiKey.openrouter) or the
+/// NOLOCK_OPENROUTER_API_KEY env var. Skips (does not fail) when no key is
+/// available.
+#[tokio::test]
+#[ignore = "requires network + OpenRouter API key (keychain or NOLOCK_OPENROUTER_API_KEY)"]
+async fn switchyard_routes_chat_to_nemotron_family_on_openrouter() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let router_path = root.join(".routers").join("switchyard.json");
+    assert!(
+        router_path.exists(),
+        "expected .routers/switchyard.json in the repo root"
+    );
+
+    // Resolve the OpenRouter key: OS keychain first, then opencode's shared
+    // auth store (~/.local/share/opencode/auth.json), then env var.
+    let key = main_impl::secrets::read_keychain(
+        main_impl::secrets::KEYCHAIN_SERVICE,
+        "apiKey.openrouter",
+    )
+    .ok()
+    .flatten()
+    .or_else(|| main_impl::secrets::read_opencode_auth_key("openrouter").ok().flatten())
+    .or_else(|| std::env::var("NOLOCK_OPENROUTER_API_KEY").ok());
+    let Some(key) = key else {
+        eprintln!("SKIP: no OpenRouter API key in keychain, opencode auth.json, or NOLOCK_OPENROUTER_API_KEY");
+        return;
+    };
+
+    let mut providers = HashMap::new();
+    providers.insert(
+        "openrouter".to_string(),
+        main_impl::ProviderConfig {
+            url: "https://openrouter.ai/api/v1".to_string(),
+            api_key: key,
+        },
+    );
+
+    // backend is deliberately ollama — Switchyard must redirect to OpenRouter.
+    let req = ChatRequest {
+        backend: "ollama".to_string(),
+        url: OLLAMA_URL.to_string(),
+        model: MAIN_MODEL.to_string(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Say hello in one short sentence.".to_string(),
+        }],
+        api_key: None,
+        providers,
+        tool_configs: HashMap::new(),
+        tools_enabled: vec![],
+        temperature: Some(0.3),
+        max_tokens: Some(256),
+        context_length: Some(128_000),
+        system_prompt: None,
+        root_path: Some(root.to_string_lossy().to_string()),
+        max_iterations: 4,
+        model_affinity: Some(true),
+        referenced_agents: Vec::new(),
+        reasoning_retries: Some(4),
+    };
+
+    let sink = RecordingSink {
+        routed: std::sync::Mutex::new(Vec::new()),
+        content: std::sync::Mutex::new(String::new()),
+    };
+    let memory = SubAgentMemory::new();
+    let res = main_impl::run_chat(&sink, &memory, req)
+        .await
+        .expect("switchyard-routed chat should succeed");
+
+    let routed = sink.routed.lock().unwrap().clone();
+    eprintln!("[switchyard e2e] routed models: {:?}", routed);
+    eprintln!("[switchyard e2e] content: {}", res.content);
+
+    assert!(
+        routed.iter().any(|m| {
+            m.contains("nemotron-3-ultra")
+                || m.contains("nemotron-3-super")
+                || m.contains("nemotron-3.5-lightning")
+        }),
+        "expected a Nemotron-family model to be routed, got {:?}",
+        routed
+    );
+    assert!(
+        !res.content.trim().is_empty(),
+        "routed chat must produce an answer"
+    );
+}

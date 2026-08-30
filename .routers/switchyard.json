@@ -1,0 +1,30 @@
+{
+  "enabled": true,
+  "routes": [
+    {
+      "name": "nemotron-family",
+      "purpose": "chat",
+      "algorithm": "random",
+      "targets": [
+        {
+          "id": "nemotron-ultra",
+          "label": "Nemotron Ultra",
+          "backend": "openrouter",
+          "model": "nvidia/nemotron-3-ultra-550b-a55b"
+        },
+        {
+          "id": "nemotron-super",
+          "label": "Nemotron Super",
+          "backend": "openrouter",
+          "model": "nvidia/nemotron-3-super-120b-a12b"
+        },
+        {
+          "id": "nemotron-lightning",
+          "label": "Nemotron 3.5 Lightning",
+          "backend": "openrouter",
+          "model": "nvidia/nemotron-3.5-lightning"
+        }
+      ]
+    }
+  ]
+}

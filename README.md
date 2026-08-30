@@ -51,6 +51,8 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 | **Tauri 2** | A framework for building desktop applications with a web frontend and a Rust backend. | The core application framework — manages windows, system tray, native menus, IPC between frontend and backend, and application lifecycle. |
 | **serde / serde_json** | A serialization/deserialization framework for Rust. | Handles all JSON serialization for IPC commands, AI API requests/responses, and configuration persistence. |
 | **reqwest** | An ergonomic, batteries-included HTTP client for Rust. | Makes HTTP requests to AI backends (Ollama, llama.cpp, OpenRouter, OpenCode Zen) for chat completions, code completions, and model information. |
+| **switchyard-libsy** | NVIDIA NeMo Switchyard's embeddable routing library — the "general routers" (random, passthrough, llm-classifier) that pick which model/backend serves a request. | Routes main-chat and sub-agent requests across models/providers at runtime. Policy is per-project `.routers/switchyard.json`; nolock keeps its own transport, libsy only decides the target. |
+| **nemo-fabric-core** | NVIDIA NeMo Fabric's core config & runtime contracts for agents. | Validates every agent file in `.agents/` against the typed `AgentConfig` contract and normalizes agent-to-agent runs (see `src-tauri/src/fabric.rs`). |
 | **portable-pty** | A cross-platform PTY (pseudo-terminal) library for Rust that works on Linux, macOS, and Windows. | Spawns and manages real interactive shell sessions (bash, zsh, etc.) with proper terminal dimensions, resizing, and signal handling. |
 | **regex** | A Rust library for regular expression matching. | Powers workspace-wide file search with regex mode, case-insensitive matching, and batch find-and-replace across files. |
 | **wry** | A cross-platform webview rendering library used by Tauri. | On Linux, creates a native GTK-based webview overlay for the in-app browser panel (supporting sites that block iframes). |
@@ -89,6 +91,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **Native Browser Panel** — Embedded web browser using a native OS webview (not an iframe) — browse any site without leaving the app.
 - **Resizable Panels** — All panels (explorer, editor, terminal, browser, chat) are fully resizable with drag handles.
 - **Multi-Backend AI** — Switch between Ollama, llama.cpp, OpenRouter, and OpenCode Zen for completions and chat.
+- **Switchyard Router** — Route requests across models/providers at runtime with NVIDIA NeMo Switchyard's embedded "general routers" (random, passthrough, llm-classifier). Per-project policy lives in `.routers/switchyard.json`; open via <kbd>Ctrl+A, Y</kbd>.
 - **Privacy-First** — No telemetry, no accounts, no cloud dependency. Everything runs on your machine.
 
 ---
@@ -451,6 +454,68 @@ This is the heart of the token-saving design:
 its entire tool-call trace — a large saving on long agentic runs. Each provider's API
 key is stored independently (OS keychain), so a sub-agent can route to a different
 provider than the main model without leaking credentials.
+
+#### Switchyard Router — runtime model routing
+
+The **Switchyard Router** (open via *AI Integrations → Switchyard Router...* or
+`Ctrl+A, Y`) lets you route requests across models/providers at runtime using NVIDIA
+NeMo Switchyard's embedded "general routers". Unlike the static per-agent
+`backend`/`model` frontmatter, routing is decided **per request** by the router
+algorithm. nolock keeps its own transport (so the nemotron thinking/tool pipeline is
+untouched); Switchyard only *picks the target*.
+
+Policy is stored per-project in **`.routers/switchyard.json`** (versioned project
+config, like `.agents/`). Targets reference `(backend, model)` only — credentials keep
+coming from your provider URLs / OS keychain, so no secrets live in the file.
+
+```jsonc
+{
+  "enabled": true,
+  "routes": [
+    {
+      "name": "nemotron-family",
+      "purpose": "chat",              // chat | subagent | agent-select | fitm
+      "algorithm": "random",          // passthrough | random | llm-classifier
+      "targets": [
+        { "id": "ultra",     "label": "Nemotron Ultra",         "backend": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b" },
+        { "id": "super",     "label": "Nemotron Super",         "backend": "openrouter", "model": "nvidia/nemotron-3-super-120b-a12b" },
+        { "id": "lightning", "label": "Nemotron 3.5 Lightning", "backend": "openrouter", "model": "nvidia/nemotron-3.5-lightning" }
+      ]
+    }
+  ]
+}
+```
+
+Supported algorithms ("general routers"):
+
+| Algorithm | Behavior |
+|---|---|
+| `passthrough` | Always call one configured target. |
+| `random` | Pick among N targets with uniform or weighted routing (great for A/B benchmarking). |
+| `llm-classifier` | A judge model classifies each task and routes between an `efficient` and a `capable` target. |
+
+Routing is **fail-safe**: if the config is missing, disabled, malformed, or the router
+errors, nolock falls through to your normal provider resolution — a routing bug can
+never block a chat. The repo ships a default `nemotron-family` route that spreads the
+main chat across OpenRouter's Nemotron Ultra / Super / 3.5 Lightning behind the
+`random` router.
+
+##### E2E: routing against OpenRouter
+
+The e2e harness can exercise the Switchyard route against a real OpenRouter key:
+
+```bash
+# Key resolution order: OS keychain (service com.nolock.app, account apiKey.openrouter)
+# → opencode's shared auth store (~/.local/share/opencode/auth.json, provider "openrouter")
+# → NOLOCK_OPENROUTER_API_KEY env var.
+./e2e/run.sh switchyard-e2e
+```
+
+This runs `switchyard_routes_chat_to_nemotron_family_on_openrouter`, which sends a
+plain chat request with `backend=ollama` and asserts that Switchyard redirects it to
+one of the Nemotron-family models on OpenRouter. The headless CLI can also read keys
+with `--keychain` (keys `apiKey.<backend>`), mirroring the GUI's `Model Providers`
+panel.
 
 ### Recommended Ollama Models
 

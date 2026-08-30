@@ -13,6 +13,7 @@
 #   ./e2e/run.sh models           # pull/ensure the required models are present
 #   ./e2e/run.sh unit             # run the pure unit tests (no Ollama needed)
 #   ./e2e/run.sh e2e [--nocapture]   # run the full E2E cascade (requires Ollama)
+#   ./e2e/run.sh switchyard-e2e      # Switchyard routing e2e (OpenRouter, needs API key)
 #   ./e2e/run.sh cli "<message>"  # smoke-test the headless CLI on a prompt
 #   ./e2e/run.sh measure [args]   # measure E2E pass rate (see e2e/measure.sh)
 #   ./e2e/run.sh all              # unit + e2e + cli smoke test
@@ -64,6 +65,13 @@ cmd_e2e() {
   (cd "$TAURI" && cargo test --test agent_cascade -- --ignored --nocapture "$@")
 }
 
+# Switchyard routing e2e: routes the main chat to OpenRouter's Nemotron family
+# via the project's .routers/switchyard.json. Requires network + an OpenRouter
+# API key (read from the OS keychain, or NOLOCK_OPENROUTER_API_KEY env var).
+cmd_switchyard_e2e() {
+  (cd "$TAURI" && cargo test --test agent_cascade switchyard_routes_chat_to_nemotron_family_on_openrouter -- --ignored --nocapture)
+}
+
 cmd_cli() {
   local message="${1:-Hello from the CLI. Answer in one short sentence.}"
   require_ollama
@@ -91,6 +99,7 @@ case "${1:-all}" in
   models) cmd_models ;;
   unit)   cmd_unit ;;
   e2e)    shift; cmd_e2e "$@" ;;
+  switchyard-e2e) cmd_switchyard_e2e ;;
   cli)    shift; cmd_cli "${1:-}" ;;
   measure) shift; cmd_measure "$@" ;;
   all)    shift; cmd_all "${1:-}" ;;
