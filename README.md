@@ -473,14 +473,15 @@ coming from your provider URLs / OS keychain, so no secrets live in the file.
   "enabled": true,
   "routes": [
     {
-      "name": "nemotron-family",
+      "name": "nemotron-capability",
       "purpose": "chat",              // chat | subagent | agent-select | fitm
-      "algorithm": "random",          // passthrough | random | llm-classifier
+      "algorithm": "llm-classifier",  // passthrough | random | llm-classifier
       "targets": [
-        { "id": "ultra",     "label": "Nemotron Ultra",         "backend": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b" },
-        { "id": "super",     "label": "Nemotron Super",         "backend": "openrouter", "model": "nvidia/nemotron-3-super-120b-a12b" },
-        { "id": "lightning", "label": "Nemotron 3.5 Lightning", "backend": "openrouter", "model": "nvidia/nemotron-3.5-lightning" }
-      ]
+        { "id": "lightning", "label": "Nemotron 3.5 Lightning", "backend": "openrouter", "model": "nvidia/nemotron-3.5-lightning", "tier": "efficient", "costPer1k": 0.00008 },
+        { "id": "super",     "label": "Nemotron Super",         "backend": "openrouter", "model": "nvidia/nemotron-3-super-120b-a12b",  "tier": "capable",   "costPer1k": 0.000085 },
+        { "id": "ultra",     "label": "Nemotron Ultra",         "backend": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b",  "tier": "capable",   "costPer1k": 0.0005 }
+      ],
+      "judge": { "backend": "openrouter", "model": "nvidia/nemotron-3.5-lightning", "baseThreshold": 0.5 }
     }
   ]
 }
@@ -491,14 +492,22 @@ Supported algorithms ("general routers"):
 | Algorithm | Behavior |
 |---|---|
 | `passthrough` | Always call one configured target. |
-| `random` | Pick among N targets with uniform or weighted routing (great for A/B benchmarking). |
-| `llm-classifier` | A judge model classifies each task and routes between an `efficient` and a `capable` target. |
+| `random` | Pick among N targets. With `costPer1k` set and no explicit `weights`, targets are weighted by inverse cost so cheaper models are picked more often (cost-aware). |
+| `llm-classifier` | A judge model classifies each task and routes between an `efficient` and a `capable` target. The judge is served with the classifier's JSON schema enforced, so it returns a complete verdict. |
+
+**Cost-aware routing.** Each target can carry a `costPer1k` (USD per 1K input tokens).
+Two places it matters:
+- `llm-classifier`: when the judge picks a tier, the **cheapest** target in that tier
+  is selected — e.g. a `capable` tier holding both Super and Ultra prefers Super.
+- `random`: with no explicit `weights`, targets are weighted by inverse cost, so the
+  cheaper models are called more often.
 
 Routing is **fail-safe**: if the config is missing, disabled, malformed, or the router
 errors, nolock falls through to your normal provider resolution — a routing bug can
-never block a chat. The repo ships a default `nemotron-family` route that spreads the
-main chat across OpenRouter's Nemotron Ultra / Super / 3.5 Lightning behind the
-`random` router.
+never block a chat. The repo ships a default `nemotron-capability` route: a
+`llm-classifier` (judge = Nemotron 3.5 Lightning) that routes simple tasks to
+Lightning (efficient) and harder tasks to the cheapest capable model (Super), with
+Ultra as the costlier capable fallback.
 
 ##### E2E: routing against OpenRouter
 
