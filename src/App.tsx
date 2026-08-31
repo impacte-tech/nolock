@@ -23,7 +23,7 @@ import ResizableHandle from "./components/ResizableHandle";
 import ShortcutsScreen from "./components/ShortcutsScreen";
 import SearchPanel from "./components/SearchPanel";
 import { MarkdownContent } from "./components/ChatPanel";
-import nolockLogo from "./assets/nolocklogo-white.svg";
+import nolockLogo from "./assets/nolocklogo-green.svg";
 
 // ---------------------------------------------------------------------------
 // localStorage migration — copy old zencode.* keys to nolock.*
