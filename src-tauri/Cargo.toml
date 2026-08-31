@@ -28,6 +28,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # Used to validate agent creation (typed config) and agent-to-agent flows
 # (run planning, normalized results, artifact manifests, diagnostics).
 nemo-fabric-core = "0.2.0"
+# NVIDIA NeMo Switchyard — embeddable "general routers" (random, passthrough,
+# llm-classifier) that pick which model/backend serves a request. nolock keeps
+# its own transport; libsy only decides the target (see src/switchyard.rs).
+switchyard-libsy = "0.2.0"
+switchyard-protocol = "0.2.0"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

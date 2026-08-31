@@ -12,6 +12,7 @@ import ChatModelPanel from "./components/ChatModelPanel";
 import FITMModelPanel from "./components/FITMModelPanel";
 import ToolsPanel from "./components/ToolsPanel";
 import RlhfPanel from "./components/RlhfPanel";
+import SwitchyardPanel from "./components/SwitchyardPanel";
 import EditorSettings from "./components/EditorSettings";
 import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import AgentManager from "./components/AgentManager";
@@ -102,6 +103,7 @@ export default function App() {
   const [showTools, setShowTools] = useState(false);
   const [showRlhf, setShowRlhf] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSwitchyard, setShowSwitchyard] = useState(false);
 
   // --- Agent Manager ---
   const [showAgentManager, setShowAgentManager] = useState(false);
@@ -906,6 +908,7 @@ export default function App() {
         { label: "Skills...", action: () => { setAgentManagerInitialTab("skills"); setShowAgentManager(true); }, shortcut: "Ctrl+A, K" },
         { label: "Hooks...", action: () => setShowHooks(true), shortcut: "Ctrl+A, H" },
         { label: "Human Feedback (RLHF)...", action: () => setShowRlhf(true), shortcut: "Ctrl+A, R" },
+        { label: "Switchyard Router...", action: () => setShowSwitchyard(true), shortcut: "Ctrl+A, Y" },
       ],
     },
     {
@@ -1221,7 +1224,7 @@ export default function App() {
         )}
       </div>
 
-      <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} />
+      <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} rootPath={rootPath} />
 
       <ModelProvidersPanel visible={showModelProviders} onClose={() => setShowModelProviders(false)} />
       <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />
@@ -1229,6 +1232,7 @@ export default function App() {
       <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} rootPath={rootPath} />
       <HooksPanel visible={showHooks} onClose={() => setShowHooks(false)} rootPath={rootPath} />
       <RlhfPanel visible={showRlhf} onClose={() => setShowRlhf(false)} />
+      <SwitchyardPanel visible={showSwitchyard} onClose={() => setShowSwitchyard(false)} rootPath={rootPath} />
       <EditorSettings visible={showSettings} onClose={() => setShowSettings(false)} />
 
       <AgentManager

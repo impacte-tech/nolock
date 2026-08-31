@@ -27,7 +27,16 @@ use std::collections::HashMap;
 #[path = "../main.rs"]
 mod main_impl;
 
-use main_impl::{ChatMessage, ChatRequest, ChatResult, CliSink, SubAgentMemory};
+use main_impl::{ChatMessage, ChatRequest, ChatResult, CliSink, ProviderConfig, SubAgentMemory};
+
+/// Default endpoint URL per backend — mirrors `src/lib/backends.ts`.
+const DEFAULT_BACKEND_URLS: &[(&str, &str)] = &[
+    ("ollama", "http://localhost:11434"),
+    ("llamacpp", "http://localhost:8080"),
+    ("openrouter", "https://openrouter.ai/api/v1"),
+    ("opencode", "https://opencode.ai/zen/v1"),
+    ("digitalocean", "https://inference.do-ai.run/v1"),
+];
 
 fn print_usage() {
     eprintln!(
@@ -48,6 +57,8 @@ fn print_usage() {
          --max-iterations <int>         tool-loop iterations (default 10)\n  \
          --referenced-agents <a,b>      pre-spawn @agent mentions\n  \
          --api-key <key>                API key for cloud backends\n  \
+         --keychain                     read API keys from the OS keychain\n  \
+                                        (service com.nolock.app, keys apiKey.<backend>)\n  \
          --reasoning-retries <int>      thinking-only retry budget (default 8)\n  \
          --no-color                     disable ANSI in streamed output\n"
     );
@@ -63,6 +74,17 @@ fn parse_args(args: &[String]) -> Result<HashMap<String, String>, String> {
                 print_usage();
                 std::process::exit(0);
             }
+            if key == "keychain" {
+                // Valueless boolean flag: `--keychain` or `--keychain 1`.
+                let value = args
+                    .get(i + 1)
+                    .filter(|v| !v.starts_with("--"))
+                    .map(|v| v.clone())
+                    .unwrap_or_else(|| "1".to_string());
+                map.insert(key.to_string(), value);
+                i += if args.get(i + 1).is_some_and(|v| !v.starts_with("--")) { 2 } else { 1 };
+                continue;
+            }
             if i + 1 < args.len() {
                 map.insert(key.to_string(), args[i + 1].clone());
                 i += 2;
@@ -74,6 +96,45 @@ fn parse_args(args: &[String]) -> Result<HashMap<String, String>, String> {
         }
     }
     Ok(map)
+}
+
+/// Read a keychain secret, tolerating an unavailable keyring backend (headless).
+fn keychain_value(key: &str) -> Option<String> {
+    main_impl::secrets::read_keychain(main_impl::secrets::KEYCHAIN_SERVICE, key)
+        .ok()
+        .flatten()
+}
+
+/// Resolve a provider's API key the way nolock does: OS keychain first, then
+/// opencode's shared auth store (`~/.local/share/opencode/auth.json`).
+fn provider_api_key(backend: &str) -> Option<String> {
+    let from_keychain = keychain_value(&format!("apiKey.{}", backend));
+    if from_keychain.is_some() {
+        return from_keychain;
+    }
+    main_impl::secrets::read_opencode_auth_key(backend).ok().flatten()
+}
+
+/// Build the per-provider endpoint map the same way the frontend does
+/// (`buildProvidersMap` in ChatPanel.tsx), so Switchyard routing can resolve any
+/// target backend's url + api key. Keys come from the OS keychain when `--keychain`.
+fn build_providers(use_keychain: bool) -> HashMap<String, ProviderConfig> {
+    let mut providers = HashMap::new();
+    for (backend, url) in DEFAULT_BACKEND_URLS {
+        let api_key = if use_keychain {
+            provider_api_key(backend).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        providers.insert(
+            backend.to_string(),
+            ProviderConfig {
+                url: url.to_string(),
+                api_key,
+            },
+        );
+    }
+    providers
 }
 
 fn build_request(args: &HashMap<String, String>) -> Result<ChatRequest, String> {
@@ -98,8 +159,30 @@ fn build_request(args: &HashMap<String, String>) -> Result<ChatRequest, String> 
         .map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
         .unwrap_or_default();
 
+    let backend = args.get("backend").cloned().unwrap_or_else(|| "ollama".to_string());
+    let use_keychain = args.get("keychain").map(|v| v == "1" || v == "true").unwrap_or(false);
+
+    // Resolve the main request's API key: explicit --api-key wins, then the
+    // NOLOCK_OPENROUTER_API_KEY env var (for openrouter), then keychain/opencode
+    // auth (when --keychain).
+    let api_key = args
+        .get("api-key")
+        .cloned()
+        .or_else(|| {
+            std::env::var("NOLOCK_OPENROUTER_API_KEY")
+                .ok()
+                .filter(|_| backend == "openrouter")
+        })
+        .or_else(|| {
+            if use_keychain {
+                provider_api_key(&backend)
+            } else {
+                None
+            }
+        });
+
     Ok(ChatRequest {
-        backend: args.get("backend").cloned().unwrap_or_else(|| "ollama".to_string()),
+        backend,
         url: args
             .get("url")
             .cloned()
@@ -109,8 +192,8 @@ fn build_request(args: &HashMap<String, String>) -> Result<ChatRequest, String> 
             .cloned()
             .unwrap_or_else(|| "nemotron-nano-9b-v2".to_string()),
         messages,
-        api_key: args.get("api-key").cloned(),
-        providers: HashMap::new(),
+        api_key,
+        providers: build_providers(use_keychain),
         tool_configs: HashMap::new(),
         tools_enabled: tools,
         temperature: args.get("temperature").and_then(|v| v.parse().ok()),

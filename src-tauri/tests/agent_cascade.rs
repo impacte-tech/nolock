@@ -1110,3 +1110,339 @@ async fn agent_writes_and_runs_python_sum_list() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+// ---------------------------------------------------------------------------
+// Switchyard routing e2e (OpenRouter)
+// ---------------------------------------------------------------------------
+
+/// A sink that records the routed model, sub-agent start models, and streamed
+/// content so a test can assert that Switchyard actually redirected requests.
+struct RecordingSink {
+    routed: std::sync::Mutex<Vec<String>>,
+    subagent_models: std::sync::Mutex<Vec<String>>,
+    content: std::sync::Mutex<String>,
+}
+
+impl main_impl::EventSink for RecordingSink {
+    fn emit_stream_token(&self, _id: Option<&str>, token: &str, _thinking: bool) {
+        self.content.lock().unwrap().push_str(token);
+    }
+    fn emit_tool_progress(
+        &self,
+        _id: Option<&str>,
+        _kind: &str,
+        _name: &str,
+        _path: Option<String>,
+    ) {
+    }
+    fn emit_model_routed(&self, model: &str) {
+        self.routed.lock().unwrap().push(model.to_string());
+    }
+    fn emit_subagent_start(&self, _id: &str, _agent: &str, _task: &str, model: &str) {
+        self.subagent_models.lock().unwrap().push(model.to_string());
+    }
+    fn emit_subagent_done(&self, _id: &str, _result: &str) {}
+}
+
+/// Resolve the OpenRouter API key from the OS keychain — the SAME storage the
+/// user's UI writes to (service `com.nolock.app`, account `apiKey.openrouter`,
+/// via the Model Providers panel). The e2e validation must exercise the real
+/// user-configured credential path, so there is deliberately NO fallback to
+/// opencode's auth.json or an env var: if the key is not in the keychain, the
+/// test FAILS completely (no silent skip).
+fn openrouter_key() -> String {
+    match main_impl::secrets::read_keychain(
+        main_impl::secrets::KEYCHAIN_SERVICE,
+        "apiKey.openrouter",
+    ) {
+        Ok(Some(key)) if !key.trim().is_empty() => key,
+        Ok(_) => panic!(
+            "OpenRouter API key not found in the OS keychain. Store it via the UI \
+             (Model Providers panel → OpenRouter → API key), which writes to the \
+             keychain under service '{}', account 'apiKey.openrouter'.",
+            main_impl::secrets::KEYCHAIN_SERVICE
+        ),
+        Err(e) => panic!(
+            "Failed to read the OpenRouter API key from the OS keychain: {}. \
+             Store it via the UI (Model Providers panel → OpenRouter → API key).",
+            e
+        ),
+    }
+}
+
+/// Build the provider map the Switchyard router resolves targets against.
+fn openrouter_providers(key: &str) -> HashMap<String, main_impl::ProviderConfig> {
+    let mut providers = HashMap::new();
+    providers.insert(
+        "openrouter".to_string(),
+        main_impl::ProviderConfig {
+            url: "https://openrouter.ai/api/v1".to_string(),
+            api_key: key.to_string(),
+        },
+    );
+    providers
+}
+
+/// Write a `.routers/switchyard.json` under `root`.
+fn write_switchyard_config(root: &Path, config_json: &str) {
+    let dir = root.join(".routers");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("switchyard.json"), config_json).unwrap();
+}
+
+/// Build a chat request that starts on ollama but carries the openrouter
+/// provider map, so Switchyard can redirect it. Tools are enabled to reproduce
+/// the real app scenario (a trivial greeting must not trigger the tool loop).
+fn switchyard_chat_request(
+    root: &str,
+    message: &str,
+    providers: HashMap<String, main_impl::ProviderConfig>,
+    referenced_agents: Vec<String>,
+) -> ChatRequest {
+    ChatRequest {
+        backend: "ollama".to_string(),
+        url: OLLAMA_URL.to_string(),
+        model: MAIN_MODEL.to_string(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: message.to_string(),
+        }],
+        api_key: None,
+        providers,
+        tool_configs: HashMap::new(),
+        tools_enabled: vec!["web_search".into(), "read_file".into(), "list_directory".into()],
+        temperature: Some(0.3),
+        max_tokens: Some(256),
+        context_length: Some(128_000),
+        system_prompt: None,
+        root_path: Some(root.to_string()),
+        max_iterations: 4,
+        model_affinity: Some(true),
+        referenced_agents,
+        reasoning_retries: Some(4),
+    }
+}
+
+/// Run a chat request, retrying on transient OpenRouter 429 rate-limits. The
+/// `random` router may pick a model that is temporarily rate-limited upstream;
+/// retrying gives it a chance to land on a healthy model. Also retries when the
+/// router fell through to the default provider (empty `routed`) — which happens
+/// when a transient judge 429 is swallowed by the fail-safe routing. Any other
+/// error is returned immediately.
+async fn run_chat_retry_on_429(
+    sink: &RecordingSink,
+    memory: &SubAgentMemory,
+    req: ChatRequest,
+) -> Result<ChatResult, String> {
+    let mut last_err = String::new();
+    for attempt in 0..6 {
+        match main_impl::run_chat(sink, memory, req.clone()).await {
+            Ok(res) => {
+                let routed = sink.routed.lock().unwrap().clone();
+                if routed.is_empty() && attempt < 5 {
+                    eprintln!(
+                        "[switchyard e2e] attempt {} routed nothing (judge 429?), retrying…",
+                        attempt + 1
+                    );
+                    last_err = "routing fell through (no model routed)".to_string();
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                return Ok(res);
+            }
+            Err(e) if e.contains("429") && attempt < 5 => {
+                eprintln!("[switchyard e2e] attempt {} hit 429, retrying…", attempt + 1);
+                last_err = e;
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err)
+}
+
+/// E2E: the project's `.routers/switchyard.json` (nemotron-family route behind
+/// the `random` general router) redirects the main chat to one of OpenRouter's
+/// Nemotron models.
+#[tokio::test]
+#[ignore = "requires network + OpenRouter API key stored in the OS keychain (UI Model Providers panel)"]
+async fn switchyard_routes_chat_to_nemotron_family_on_openrouter() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let router_path = root.join(".routers").join("switchyard.json");
+    assert!(
+        router_path.exists(),
+        "expected .routers/switchyard.json in the repo root"
+    );
+
+    let key = openrouter_key();
+
+    let req = switchyard_chat_request(
+        root.to_string_lossy().as_ref(),
+        "Hi",
+        openrouter_providers(&key),
+        Vec::new(),
+    );
+
+    let sink = RecordingSink {
+        routed: std::sync::Mutex::new(Vec::new()),
+        subagent_models: std::sync::Mutex::new(Vec::new()),
+        content: std::sync::Mutex::new(String::new()),
+    };
+    let memory = SubAgentMemory::new();
+    let res = run_chat_retry_on_429(&sink, &memory, req)
+        .await
+        .expect("switchyard-routed chat should succeed");
+
+    let routed = sink.routed.lock().unwrap().clone();
+    eprintln!("[switchyard e2e] routed models: {:?}", routed);
+    eprintln!("[switchyard e2e] content: {}", res.content);
+
+    assert!(
+        routed.iter().any(|m| {
+            m.contains("nemotron-3-ultra")
+                || m.contains("nemotron-3-super")
+                || m.contains("nemotron-3.5-lightning")
+        }),
+        "expected a Nemotron-family model to be routed, got {:?}",
+        routed
+    );
+    assert!(
+        !res.content.trim().is_empty(),
+        "routed chat must produce an answer"
+    );
+    // Regression guard for the "Hi" loop bug: a trivial greeting must conclude
+    // with a short answer and must NOT trigger a tool spree (list_directory /
+    // read_file / web_search) or the repetition→summarize→re-trigger machinery.
+    assert!(
+        res.tool_calls.is_empty(),
+        "greeting must not trigger tool calls, got {:?}",
+        res.tool_calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+    );
+    assert!(
+        res.content.trim().chars().count() < 300,
+        "greeting answer should be short, got {} chars",
+        res.content.trim().chars().count()
+    );
+}
+
+/// E2E: a `passthrough` route always selects its single target — validates the
+/// config's passthrough algorithm against a real backend.
+#[tokio::test]
+#[ignore = "requires network + OpenRouter API key stored in the OS keychain (UI Model Providers panel)"]
+async fn switchyard_passthrough_routes_to_exact_model() {
+    let key = openrouter_key();
+
+    let root = std::env::temp_dir().join(format!("nolock_sy_e2e_pt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    write_switchyard_config(
+        &root,
+        r#"{
+            "enabled": true,
+            "routes": [{
+                "name": "pt-super",
+                "purpose": "chat",
+                "algorithm": "passthrough",
+                "targets": [{
+                    "id": "super",
+                    "label": "Super",
+                    "backend": "openrouter",
+                    "model": "nvidia/nemotron-3-super-120b-a12b"
+                }]
+            }]
+        }"#,
+    );
+
+    let req = switchyard_chat_request(
+        root.to_string_lossy().as_ref(),
+        "Say hello",
+        openrouter_providers(&key),
+        Vec::new(),
+    );
+
+    let sink = RecordingSink {
+        routed: std::sync::Mutex::new(Vec::new()),
+        subagent_models: std::sync::Mutex::new(Vec::new()),
+        content: std::sync::Mutex::new(String::new()),
+    };
+    let memory = SubAgentMemory::new();
+    let res = run_chat_retry_on_429(&sink, &memory, req)
+        .await
+        .expect("passthrough-routed chat should succeed");
+
+    let routed = sink.routed.lock().unwrap().clone();
+    eprintln!("[switchyard e2e passthrough] routed models: {:?}", routed);
+    eprintln!("[switchyard e2e passthrough] content: {}", res.content);
+
+    assert_eq!(
+        routed,
+        vec!["nvidia/nemotron-3-super-120b-a12b".to_string()],
+        "passthrough must select exactly the configured target, got {:?}",
+        routed
+    );
+    assert!(
+        !res.content.trim().is_empty(),
+        "routed chat must produce an answer"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// E2E: a `subagent`-purpose route redirects sub-agent requests to the
+/// configured target — validates the config's subagent routing.
+#[tokio::test]
+#[ignore = "requires network + OpenRouter API key stored in the OS keychain (UI Model Providers panel)"]
+async fn switchyard_subagent_route_redirects_sub_agent() {
+    let key = openrouter_key();
+
+    // Use the fixture project (has .agents/code-reviewer.md) + a temp
+    // .routers/switchyard.json with a subagent-purpose passthrough route.
+    let root = setup_fixture_project();
+    write_switchyard_config(
+        &root,
+        r#"{
+            "enabled": true,
+            "routes": [{
+                "name": "subagent-lightning",
+                "purpose": "subagent",
+                "algorithm": "passthrough",
+                "targets": [{
+                    "id": "lightning",
+                    "label": "Lightning",
+                    "backend": "openrouter",
+                    "model": "nvidia/nemotron-3.5-lightning"
+                }]
+            }]
+        }"#,
+    );
+
+    let req = switchyard_chat_request(
+        root.to_string_lossy().as_ref(),
+        "@code-reviewer say hello",
+        openrouter_providers(&key),
+        vec!["code-reviewer".to_string()],
+    );
+
+    let sink = RecordingSink {
+        routed: std::sync::Mutex::new(Vec::new()),
+        subagent_models: std::sync::Mutex::new(Vec::new()),
+        content: std::sync::Mutex::new(String::new()),
+    };
+    let memory = SubAgentMemory::new();
+    let res = run_chat_retry_on_429(&sink, &memory, req)
+        .await
+        .expect("subagent-routed chat should succeed");
+
+    let subagent_models = sink.subagent_models.lock().unwrap().clone();
+    eprintln!("[switchyard e2e subagent] sub-agent models: {:?}", subagent_models);
+    eprintln!("[switchyard e2e subagent] content: {}", res.content);
+
+    assert!(
+        subagent_models.iter().any(|m| m == "nvidia/nemotron-3.5-lightning"),
+        "sub-agent must be routed to the configured target, got {:?}",
+        subagent_models
+    );
+    assert!(
+        !res.content.trim().is_empty(),
+        "chat must produce an answer"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

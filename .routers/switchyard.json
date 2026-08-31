@@ -1,0 +1,41 @@
+{
+  "enabled": true,
+  "routes": [
+    {
+      "name": "nemotron-capability",
+      "purpose": "chat",
+      "algorithm": "llm-classifier",
+      "targets": [
+        {
+          "id": "lightning",
+          "label": "Nemotron 3.5 Lightning",
+          "backend": "openrouter",
+          "model": "nvidia/nemotron-3.5-lightning",
+          "tier": "efficient",
+          "costPer1k": 0.00008
+        },
+        {
+          "id": "super",
+          "label": "Nemotron Super",
+          "backend": "openrouter",
+          "model": "nvidia/nemotron-3-super-120b-a12b",
+          "tier": "capable",
+          "costPer1k": 0.000085
+        },
+        {
+          "id": "ultra",
+          "label": "Nemotron Ultra",
+          "backend": "openrouter",
+          "model": "nvidia/nemotron-3-ultra-550b-a55b",
+          "tier": "capable",
+          "costPer1k": 0.0005
+        }
+      ],
+      "judge": {
+        "backend": "openrouter",
+        "model": "nvidia/nemotron-3.5-lightning",
+        "baseThreshold": 0.5
+      }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+# Pin the toolchain to the MSRV required by switchyard-libsy / switchyard-protocol
+# (rust-version 1.96.1). The stable toolchain (1.96.0) is one patch behind and
+# cargo refuses to build those crates with it.
+[toolchain]
+channel = "1.96.1"
