@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/assets/nolocklogo-white.svg" alt="nolock" width="400"/>
+  <img src="src/assets/nolocklogo-green.svg" alt="nolock" width="400"/>
 </p>
 
 <h1 align="center">nolock</h1>
@@ -53,6 +53,8 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 | **reqwest** | An ergonomic, batteries-included HTTP client for Rust. | Makes HTTP requests to AI backends (Ollama, llama.cpp, OpenRouter, OpenCode Zen) for chat completions, code completions, and model information. |
 | **switchyard-libsy** | NVIDIA NeMo Switchyard's embeddable routing library — the "general routers" (random, passthrough, llm-classifier) that pick which model/backend serves a request. | Routes main-chat and sub-agent requests across models/providers at runtime. Policy is per-project `.routers/switchyard.json`; nolock keeps its own transport, libsy only decides the target. |
 | **nemo-fabric-core** | NVIDIA NeMo Fabric's core config & runtime contracts for agents. | Validates every agent file in `.agents/` against the typed `AgentConfig` contract and normalizes agent-to-agent runs (see `src-tauri/src/fabric.rs`). |
+
+> **NVIDIA libraries:** See **[`.docs/NVIDIA-GTC-2026.md`](.docs/NVIDIA-GTC-2026.md)** for a deep dive on how nolock embeds `nemo-fabric-core` (agent validation) and `switchyard-libsy` (model routing).
 | **portable-pty** | A cross-platform PTY (pseudo-terminal) library for Rust that works on Linux, macOS, and Windows. | Spawns and manages real interactive shell sessions (bash, zsh, etc.) with proper terminal dimensions, resizing, and signal handling. |
 | **regex** | A Rust library for regular expression matching. | Powers workspace-wide file search with regex mode, case-insensitive matching, and batch find-and-replace across files. |
 | **wry** | A cross-platform webview rendering library used by Tauri. | On Linux, creates a native GTK-based webview overlay for the in-app browser panel (supporting sites that block iframes). |
@@ -144,7 +146,7 @@ All feedback is stored as **JSONL** (one JSON object per line) under the project
     <provider>_<model>/data.jsonl      ← DPO chosen/rejected pairs
 ```
 
-Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), making it easy to train on data from specific models. The JSONL schemas follow the standard formats expected by KTO and DPO training scripts:
+Each model configuration gets its own subdirectory (e.g., `ollama_nemotron-nano-9b-v2`), making it easy to train on data from specific models. The JSONL schemas follow the standard formats expected by KTO and DPO training scripts:
 
 **KTO entry:**
 ```json
@@ -153,7 +155,7 @@ Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), ma
   "completion": "Rust is a systems language.",
   "label": true,
   "model_provider": "ollama",
-  "model_name": "qwen3.5:0.8b-mlx",
+  "model_name": "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU",
   "model_configurations": { "temperature": 0.7, "max_tokens": 2048, "system_prompt": "" },
   "timestamp": "2026-06-26T12:00:00.000Z"
 }
@@ -166,7 +168,7 @@ Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), ma
   "chosen": "Rust is a systems language focused on safety.",
   "rejected": "Rust is a programming language.",
   "model_provider": "ollama",
-  "model_name": "qwen3.5:0.8b-mlx",
+  "model_name": "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU",
   "model_configurations": { "temperature": 0.7, "max_tokens": 2048, "system_prompt": "" },
   "timestamp": "2026-06-26T12:00:00.000Z"
 }
@@ -180,7 +182,7 @@ Each model configuration gets its own subdirectory (e.g., `ollama_qwen3_8b`), ma
 
 3. **Portable and framework-ready**: The JSONL format matches the [DPO](https://huggingface.co/docs/trl/v1.8.0/en/dpo_trainer#expected-dataset-type-and-format) and [KTO](https://huggingface.co/docs/trl/v1.8.0/en/kto_trainer#expected-dataset-type-and-format) dataset schemas used by Hugging Face TRL (v1.8.0). Export your `.rlhf/` directory to TRL, Axolotl, or LLaMA Factory — no conversion needed.
 
-4. **Model-configuration aware**: Because data is partitioned by provider + model (e.g., `ollama_qwen3_8b` vs `openrouter_gpt-4o`), you can train separate adapters for different models or analyze which backends produce the most preferred responses. KTO and DPO data are stored independently, so you can use each method on its own or combine them sequentially.
+4. **Model-configuration aware**: Because data is partitioned by provider + model (e.g., `ollama_nemotron-nano-9b-v2` vs `openrouter_gpt-4o`), you can train separate adapters for different models or analyze which backends produce the most preferred responses. KTO and DPO data are stored independently, so you can use each method on its own or combine them sequentially.
 
 5. **Aligned with nolock's philosophy**: nolock is designed to keep you in the driver's seat. RLHF isn't about automating away your judgement — it's about amplifying it. The AI learns from *your* preferences, not from generic alignment data collected by a corporation.
 
@@ -268,9 +270,7 @@ Field reference:
 nolock would not exist without the following open-source projects and communities:
 
 - **[Hugging Face TRL](https://huggingface.co/docs/trl)** — The Transformer Reinforcement Learning library that provides state-of-the-art implementations of alignment methods (DPO, KTO, PPO, and more). nolock's RLHF dataset formats are designed to be directly compatible with TRL's [DPOTrainer](https://huggingface.co/docs/trl/v1.8.0/en/dpo_trainer) and [KTOTrainer](https://huggingface.co/docs/trl/v1.8.0/en/kto_trainer).
-- **[OpenCode Zen](https://opencode.ai)** — For providing an AI inference service with a generous free tier that made autonomous development workflows possible without any API costs. This project was built primarily using the **Big Pickle** model (`opencode/big-pickle`).
-
-  > **Cost Tracker:** This project has incurred **$0.00 USD** in AI API costs to date. All development was powered entirely by OpenCode Zen's free Big Pickle model.
+- **[OpenCode Zen](https://opencode.ai)** — For providing an AI inference service with a generous free tier that made autonomous development workflows possible without any API costs.
 - **[OpenRouter](https://openrouter.ai)** — For building a unified API that makes dozens of AI models accessible from a single endpoint.
 - **[Ollama](https://ollama.com)** — For making local LLM deployment as simple as a single command, enabling private and offline AI-powered development.
 - **[llama.cpp](https://github.com/ggerganov/llama.cpp)** — For the incredible engineering achievement of running state-of-the-art LLMs efficiently on consumer hardware.
@@ -539,21 +539,22 @@ For the best experience with nolock, here are the recommended Ollama models for 
 
 | Feature | Recommended Model | Size | Notes |
 |---|---|---|---|
-| **Code Completions (FITM)** | `qwen2.5-coder:0.5b` | 0.5B params | Fast, lightweight fill-in-the-middle completions. Runs on CPU or low-end GPU. |
-| **Agent Chat (Tool Calling)** | `qwen3.5:0.8b-mlx` | 0.8B params | Reliable tool-calling with strong reasoning. Good for web search, file read, directory listing, and multi-step agent tasks. |
+| **Agent Chat (Tool Calling)** | `oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU` | 9B params | The main planning/orchestration model — reliable tool-calling with strong reasoning. Good for web search, file read, directory listing, and multi-step agent tasks. |
+| **Sub-agents** | `oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU` | 8B params | Domain tasks, intent classification / routing. Runs on the local executor tier. |
+| **Micro-agents** | `gemma4:e2b` | sub-1B params | Small, fast, reliable tool-calling for mechanical fixes + deterministic validation. |
 
 **Installation:**
 
 ```bash
-ollama pull qwen2.5-coder:0.5b
-ollama pull qwen3.5:0.8b-mlx
+ollama pull oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU
+ollama pull oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU
+ollama pull gemma4:e2b
 ```
 
 Then in nolock's AI Settings (`Ctrl+A, I`):
-- Set **Completion Model** to `qwen2.5-coder:0.5b`
-- Set **Chat Model** to `qwen3.5:0.8b-mlx`
+- Set **Chat Model** to `oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU`
 
-> **Note:** For agent chat with tool calling, the model must support the `tools` parameter in Ollama's `/api/chat` endpoint. The `qwen3.5:0.8b-mlx` model provides a good balance of capability and resource usage. Larger models will provide better results at the cost of higher resource usage.
+> **Note:** For agent chat with tool calling, the model must support the `tools` parameter in Ollama's `/api/chat` endpoint. The `nemotron-nano-9b-v2` model provides a good balance of capability and resource usage. Larger models will provide better results at the cost of higher resource usage.
 
 ### Micro-Agent Model Strategy
 

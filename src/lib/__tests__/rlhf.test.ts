@@ -7,6 +7,7 @@ import {
   getModelContext,
   getModelConfigurations,
   readRlhfSettings,
+  resolveFeedbackModelName,
   saveKtoFeedback,
   saveDpoFeedback,
   saveRlhfFeedback,
@@ -64,6 +65,34 @@ describe("getModelContext", () => {
     const ctx = getModelContext();
     expect(ctx.model).toBe("oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU");
     expect(ctx.model.endsWith(" ")).toBe(false);
+  });
+});
+
+describe("resolveFeedbackModelName", () => {
+  it("prefers the actual (Switchyard-routed) model over the configured one", () => {
+    // Regression: when Switchyard routes a request to a different model than
+    // the configured chat model, RLHF/KTO/DPO feedback must be attributed to
+    // the ACTUAL model that produced the response.
+    expect(
+      resolveFeedbackModelName(
+        "nvidia/nemotron-3-super-120b-a12b",
+        "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU",
+      ),
+    ).toBe("nvidia/nemotron-3-super-120b-a12b");
+  });
+
+  it("falls back to the configured model when no routed model is recorded", () => {
+    expect(resolveFeedbackModelName(undefined, "qwen3:8b")).toBe("qwen3:8b");
+  });
+
+  it("trims whitespace from the resolved model name", () => {
+    expect(resolveFeedbackModelName("  nvidia/nemotron-3.5-lightning  ", "qwen3:8b")).toBe(
+      "nvidia/nemotron-3.5-lightning",
+    );
+  });
+
+  it("returns empty string when neither model is available", () => {
+    expect(resolveFeedbackModelName(undefined, "")).toBe("");
   });
 });
 

@@ -221,6 +221,22 @@ export function getModelContext(): { provider: string; model: string } {
 }
 
 /**
+ * Resolve the model name to attribute RLHF/KTO/DPO feedback to.
+ *
+ * Prefers the ACTUAL model that produced the response (e.g. the Switchyard
+ * routed target like `nvidia/nemotron-3-super-120b-a12b`) over the
+ * user-configured chat model. When Switchyard routing is active, the configured
+ * model is only the *default* — the response may have been served by a
+ * different model, and training data must be attributed to the real one.
+ */
+export function resolveFeedbackModelName(
+  actualModel: string | undefined,
+  configuredModel: string,
+): string {
+  return (actualModel || configuredModel || "").trim();
+}
+
+/**
  * Serialize a list of tool calls into XML-tagged text for inclusion in
  * KTO/DPO training data. Format:
  *

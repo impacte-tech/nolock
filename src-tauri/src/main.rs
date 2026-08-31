@@ -6920,6 +6920,34 @@ fn normalize_tool_args(raw: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Convert tool calls back to the OpenAI wire format for the assistant message.
+///
+/// `stream.tool_calls` are normalized to objects (via `normalize_ollama_tool_call`)
+/// so `execute_tool` can read them, but the OpenAI API requires
+/// `tool_calls[].function.arguments` to be a JSON-encoded *string*. Sending an
+/// object makes DigitalOcean fail with "failed to convert request" (HTTP 400).
+/// This re-serializes object arguments to strings; string arguments pass through.
+fn tool_calls_for_api(calls: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    calls
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            match c["function"]["arguments"].clone() {
+                serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                    c["function"]["arguments"] = serde_json::json!(
+                        serde_json::to_string(&c["function"]["arguments"]).unwrap_or_default()
+                    );
+                }
+                serde_json::Value::String(_) => {} // already a string — pass through
+                _ => {
+                    c["function"]["arguments"] = serde_json::json!("{}");
+                }
+            }
+            c
+        })
+        .collect()
+}
+
 /// Run an OpenAI-compatible tool-calling loop (DigitalOcean, OpenRouter, etc.).
 async fn run_openai_tool_loop(
     client: &reqwest::Client,
@@ -7111,6 +7139,15 @@ async fn run_openai_tool_loop(
                 status,
                 &text[..text.len().min(300)]
             );
+            // Debug: dump the request messages that triggered a non-rate-limit
+            // error so a provider "failed to convert request" can be reproduced
+            // exactly. Skip 429s (transient rate limits — the body is irrelevant).
+            if status.as_u16() != 429 {
+                eprintln!(
+                    "[nolock] openai-tool-loop FAILED REQUEST messages={}",
+                    serde_json::to_string(&openai_msgs).unwrap_or_default()
+                );
+            }
             let error_detail = serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
                 .and_then(|v| v["error"].as_str().map(String::from))
@@ -7167,11 +7204,13 @@ async fn run_openai_tool_loop(
                 continue;
             }
 
-            // Push assistant message with tool calls
+            // Push assistant message with tool calls. `complete_calls` carry
+            // object arguments (for execute_tool); the API requires string
+            // arguments, so re-serialize before sending back.
             let assistant_msg = serde_json::json!({
                 "role": "assistant",
                 "content": stream.iter_content,
-                "tool_calls": complete_calls
+                "tool_calls": tool_calls_for_api(&complete_calls)
             });
             openai_msgs.push(assistant_msg);
 
@@ -9018,6 +9057,42 @@ mod tests {
         let args = normalize_tool_args(&raw);
         assert!(args.is_object());
         assert_eq!(args["query"], "Rust docs");
+    }
+
+    #[test]
+    fn test_tool_calls_for_api_serializes_object_arguments_to_string() {
+        // Regression guard for the DigitalOcean "failed to convert request" bug:
+        // the assistant message sent back to the API must carry `arguments` as a
+        // JSON string, not an object.
+        let calls = vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "arguments": { "query": "AWS Kinesis documentation" }
+            }
+        })];
+        let api_calls = tool_calls_for_api(&calls);
+        let args = api_calls[0]["function"]["arguments"].as_str().expect("arguments must be a string");
+        let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["query"], "AWS Kinesis documentation");
+    }
+
+    #[test]
+    fn test_tool_calls_for_api_passes_string_arguments_through() {
+        let calls = vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": "{\"path\": \"a.rs\"}"
+            }
+        })];
+        let api_calls = tool_calls_for_api(&calls);
+        assert_eq!(
+            api_calls[0]["function"]["arguments"].as_str().unwrap(),
+            "{\"path\": \"a.rs\"}"
+        );
     }
 
     #[test]

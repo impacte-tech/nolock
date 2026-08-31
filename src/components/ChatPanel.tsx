@@ -29,6 +29,7 @@ import {
   readRlhfSettings,
   getModelConfigurations,
   getModelContext,
+  resolveFeedbackModelName,
   serializeToolCalls,
 } from "../lib/rlhf";
 import {
@@ -127,6 +128,12 @@ interface Message {
   /** Text to display in the chat UI (user sees this instead of the full API content) */
   displayContent?: string;
   toolCalls?: ToolCallLog[];
+  /** The model that actually produced this response. When Switchyard routing is
+   *  active this is the routed target (e.g. nvidia/nemotron-3-super-120b-a12b),
+   *  NOT the user-configured chat model — RLHF/KTO/DPO feedback must attribute
+   *  the response to the real model. Falls back to the configured model when no
+   *  routing event fired. */
+  model?: string;
   /** File, directory, agent, skill, and tool mentions referenced in this message (for context badges). */
   contextRefs?: { type: "file" | "directory" | "agent" | "skill" | "tool"; name: string }[];
   /** RLHF feedback: "good" (thumbs up), "bad" (thumbs down), or undefined (not rated). */
@@ -959,12 +966,19 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
    *  x-model-router-selected-model header), surfaced so reasoning models can
    *  be identified when they "overthink". */
   const [routedModel, setRoutedModel] = useState<string | null>(null);
+  /** Synchronous mirror of `routedModel` so the response-finalization callback
+   *  (which runs in a stale closure) can read the actual routed model and attach
+   *  it to the assistant message for RLHF/KTO/DPO attribution. */
+  const routedModelRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     listen<string>("model-routed", (event) => {
-      if (event.payload) setRoutedModel(event.payload);
+      if (event.payload) {
+        setRoutedModel(event.payload);
+        routedModelRef.current = event.payload;
+      }
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -1465,6 +1479,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setAccumulatedContextTokens(0);
     setThinkingText("");
     setRoutedModel(null);
+    routedModelRef.current = null;
     setSubAgents([]);
     // A fresh session resets each sub-agent's conversation memory on the
     // backend so the next @agent trigger starts with clean context.
@@ -1483,6 +1498,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       setAccumulatedContextTokens(0);
       setThinkingText("");
       setRoutedModel(null);
+      routedModelRef.current = null;
     }
     try { setSessions(await listSessions(rootPath)); } catch {}
   }, [rootPath, sessionId]);
@@ -1762,7 +1778,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     const data: RlhfData = {
       feedback_type: "good",
       model_provider: modelCtx.provider,
-      model_name: modelCtx.model,
+      // Attribute to the ACTUAL model that produced the response (Switchyard
+      // may have routed to a different model than the configured one).
+      model_name: resolveFeedbackModelName(msg.model, modelCtx.model),
       model_configurations: configs,
       timestamp: new Date().toISOString(),
       question,
@@ -1824,7 +1842,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     const data: RlhfData = {
       feedback_type: "bad",
       model_provider: modelCtx.provider,
-      model_name: modelCtx.model,
+      // Attribute to the ACTUAL model that produced the response.
+      model_name: resolveFeedbackModelName(msg.model, modelCtx.model),
       model_configurations: configs,
       timestamp: new Date().toISOString(),
       question,
@@ -1896,7 +1915,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       chosen,
       rejected,
       model_provider: modelCtx.provider,
-      model_name: modelCtx.model,
+      // Attribute to the ACTUAL model that produced the response.
+      model_name: resolveFeedbackModelName(msg.model, modelCtx.model),
       model_configurations: configs,
       timestamp: new Date().toISOString(),
     };
@@ -2460,6 +2480,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
               ...last,
               content: responseText || "(no response)",
               toolCalls: result.tool_calls?.length > 0 ? result.tool_calls : undefined,
+              // Capture the actual model that produced this response (Switchyard
+              // routing may have redirected to a different model than the
+              // configured one) so RLHF/KTO/DPO feedback is attributed correctly.
+              model: routedModelRef.current || undefined,
             };
           }
           return msgs;
