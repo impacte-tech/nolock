@@ -502,20 +502,27 @@ main chat across OpenRouter's Nemotron Ultra / Super / 3.5 Lightning behind the
 
 ##### E2E: routing against OpenRouter
 
-The e2e harness can exercise the Switchyard route against a real OpenRouter key:
+The e2e harness validates the Switchyard route against a real OpenRouter key. The key
+**must** be stored in the OS keychain — the same storage the UI writes to — and the
+tests **fail completely** (no silent skip) if it's missing:
 
 ```bash
-# Key resolution order: OS keychain (service com.nolock.app, account apiKey.openrouter)
-# → opencode's shared auth store (~/.local/share/opencode/auth.json, provider "openrouter")
-# → NOLOCK_OPENROUTER_API_KEY env var.
+# 1. Store the key via the UI: Model Providers panel → OpenRouter → API key.
+#    This writes to the OS keychain (service com.nolock.app, account apiKey.openrouter).
+# 2. Run the validation:
 ./e2e/run.sh switchyard-e2e
 ```
 
-This runs `switchyard_routes_chat_to_nemotron_family_on_openrouter`, which sends a
-plain chat request with `backend=ollama` and asserts that Switchyard redirects it to
-one of the Nemotron-family models on OpenRouter. The headless CLI can also read keys
-with `--keychain` (keys `apiKey.<backend>`), mirroring the GUI's `Model Providers`
-panel.
+This runs three tests against real OpenRouter:
+- `switchyard_routes_chat_to_nemotron_family_on_openrouter` — the repo's `random`
+  route picks a Nemotron-family model; a "Hi" greeting concludes without a tool spree.
+- `switchyard_passthrough_routes_to_exact_model` — a `passthrough` route selects
+  exactly the configured target.
+- `switchyard_subagent_route_redirects_sub_agent` — a `subagent`-purpose route
+  redirects sub-agent requests to the configured target.
+
+The headless CLI can also read keys from the keychain with `--keychain` (keys
+`apiKey.<backend>`), mirroring the GUI's `Model Providers` panel.
 
 ### Recommended Ollama Models
 

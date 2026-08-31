@@ -2220,7 +2220,7 @@ pub struct ProviderConfig {
     pub api_key: String,
 }
 
-#[derive(serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatRequest {
     pub backend: String,
@@ -2715,6 +2715,13 @@ const SUBAGENT_MAX_ITERATIONS: usize = 6;
 /// call without hanging forever.
 const THINKING_ONLY_MAX_RETRIES: usize = 8;
 
+/// After this many consecutive reasoning-only turns (no visible content, no
+/// tool call), the tool loop drops the tools from the request and forces a
+/// plain-text answer. A model that can't even emit a tool call after several
+/// tries is stuck (e.g. a simple greeting with tools enabled) — removing the
+/// tools makes it answer directly instead of looping forever.
+const TOOLS_DROP_RETRY_THRESHOLD: usize = 3;
+
 /// Resolved provider (backend + model + url + api_key) for a sub-agent.
 /// A sub-agent uses its OWN backend/model when configured, otherwise it falls
 /// back to the main agent's. Its endpoint/credential come from the `providers`
@@ -2799,11 +2806,19 @@ pub async fn run_subagent(
             .collect();
         let judge_transport: switchyard::JudgeTransport = {
             let client = runner.client.clone();
-            Arc::new(move |backend, model, url, api_key, prompt| {
+            Arc::new(move |backend, model, url, api_key, system_prompt, user_task| {
                 let client = client.clone();
                 Box::pin(async move {
-                    switchyard_judge_completion(&client, &backend, &model, &url, &api_key, &prompt)
-                        .await
+                    switchyard_judge_completion(
+                        &client,
+                        &backend,
+                        &model,
+                        &url,
+                        &api_key,
+                        &system_prompt,
+                        &user_task,
+                    )
+                    .await
                 })
             })
         };
@@ -3836,44 +3851,63 @@ fn find_subsequence(haystack: &[char], needle: &[char], start: usize) -> Option<
 const MIN_COMPLETE_ANSWER_CHARS: usize = 12;
 
 /// Detect a "premature conclusion" — a response that stops the loop but does
-/// not actually complete the task: a question, a clarification request, or a
-/// suspiciously short reply. This is what keeps the main agent from "closing
+/// not actually complete the task: a pure question, a clarification request, or
+/// a suspiciously short reply. This is what keeps the main agent from "closing
 /// the iteration with a question too quickly" instead of doing the work.
+///
+/// IMPORTANT: a response that contains a substantive statement before a
+/// question (e.g. "Yes, I'm here! How can I help you today?") is a COMPLETE
+/// answer — the model answered and then offered help. Only a *pure* question
+/// (no statement part) is premature. Without this, a simple greeting loops
+/// through retries → repetition → micro-agent summarization → tool spree.
 /// Pure — unit-testable.
 fn is_premature_answer(content: &str) -> bool {
     let trimmed = content.trim();
     if trimmed.is_empty() {
         return true;
     }
-    // A question (ends with '?') is the agent asking for input instead of
-    // doing the work — treat as premature so the loop pushes it to answer.
-    if trimmed.ends_with('?') {
-        return true;
-    }
+    let len = trimmed.chars().count();
     // Suspiciously short: not enough substance to be a real answer.
-    if trimmed.chars().count() < MIN_COMPLETE_ANSWER_CHARS {
+    if len < MIN_COMPLETE_ANSWER_CHARS {
         return true;
     }
-    // Clarification / hand-back phrases.
-    let lower = trimmed.to_lowercase();
-    const CLARIFY: &[&str] = &[
-        "could you clarify",
-        "what do you mean",
-        "can you provide",
-        "what would you like",
-        "please clarify",
-        "could you please",
-        "how can i help",
-        "is there anything",
-        "what can i do",
-        "please let me know",
-        "what information",
-        "could you tell me",
-        "what exactly",
-        "can you be more specific",
-    ];
-    CLARIFY.iter().any(|p| lower.contains(p))
+    // A response that ends with '?' is the agent asking for input instead of
+    // doing the work — BUT only when it's a *pure* question. A response that
+    // contains a statement before the question (e.g. "Yes, I'm here! How can I
+    // help you today?") is a complete answer.
+    if trimmed.ends_with('?') {
+        // Strip the trailing '?' (1 byte) and look for a statement terminator.
+        let before = &trimmed[..trimmed.len() - 1];
+        let has_statement = before.contains('.') || before.contains('!');
+        if !has_statement {
+            return true;
+        }
+    }
+    // Clarification / hand-back phrases — only for short responses. A long
+    // answer that happens to mention "how can I help" is a real answer.
+    if len <= PREMATURE_ANSWER_MAX_CHARS {
+        let lower = trimmed.to_lowercase();
+        const CLARIFY: &[&str] = &[
+            "could you clarify",
+            "what do you mean",
+            "please clarify",
+            "can you be more specific",
+            "what exactly",
+            "could you tell me",
+            "please let me know",
+            "what information",
+        ];
+        if CLARIFY.iter().any(|p| lower.contains(p)) {
+            return true;
+        }
+    }
+    false
 }
+
+/// Maximum length (chars) of a response that can be considered a premature
+/// clarification/hand-back. Longer responses are treated as real answers even
+/// if they mention a clarification phrase.
+const PREMATURE_ANSWER_MAX_CHARS: usize = 80;
 
 /// Extract a best-effort answer from a thinking-only trace when the model
 /// stalled and never produced a visible answer. Takes the last substantive
@@ -4020,6 +4054,36 @@ pub fn build_retrigger_messages(
             )
         }),
     ]
+}
+
+/// Escalating nudge message for a reasoning-only retry. Each retry gets firmer
+/// so a stuck thinking model (nemotron/qwen3/deepseek-r1) is pushed to finally
+/// emit visible content or a structured tool call. Pure — unit-testable.
+fn thinking_retry_prompt(retry: usize) -> String {
+    if retry >= 5 {
+        format!(
+            "This is attempt {} — you MUST now answer. Stop reasoning aloud. Output \
+             the final answer as visible text, or (if you intended a tool call) emit \
+             the structured tool_calls block immediately.",
+            retry
+        )
+    } else if retry >= 3 {
+        "You have reasoned again without answering. Do NOT output further reasoning — \
+         write the final answer as plain visible text now. If a tool is required, \
+         call it (tool_calls) instead of describing it."
+            .to_string()
+    } else {
+        "You have just finished your reasoning without producing a visible answer or \
+         a tool call. Now provide the final answer as plain, visible text (no reasoning \
+         trace). If you need to call a tool to answer, call it in the next response."
+            .to_string()
+    }
+}
+
+/// Nudge used after tools are dropped to force a plain-text answer.
+fn tools_dropped_prompt() -> &'static str {
+    "Tools are no longer available. Answer the user's request directly with plain visible \
+     text now — no reasoning, no tool calls."
 }
 
 /// Derive a simple to-do list from the last message / current state. In a real
@@ -6185,12 +6249,20 @@ async fn ollama_chat_with_tools(
     pre_spawned: &std::collections::HashSet<String>,
 ) -> Result<ChatResult, String> {
     let mut ollama_msgs = build_initial_messages(messages, tools);
+    // Tools may be dropped mid-loop when the model gets stuck reasoning-only
+    // (see TOOLS_DROP_RETRY_THRESHOLD). Keep a mutable copy so the body reflects
+    // the current tool set.
+    let mut effective_tools = tools.to_vec();
     let mut all_tool_calls: Vec<ToolCallLog> = Vec::new();
     let mut full_content = String::new();
     // Running total of hidden reasoning/thinking tokens across all iterations
     // (main agent + any sub-agents it spawned). Folded into context_tokens so
     // the session meter/limit reflects thinking, not just visible content.
     let mut thinking_tokens: u64 = 0;
+    // Accumulated reasoning text across iterations — used as a last-resort
+    // answer source when the model stalls on thinking-only (mirrors the
+    // non-tool `ai_complete` path).
+    let mut total_thinking = String::new();
     // De-duplicate spawn_subagent calls (same agent + task) within this run.
     let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Bounded retries when a thinking model ends a turn with ONLY reasoning
@@ -6211,7 +6283,7 @@ async fn ollama_chat_with_tools(
 
     for iteration in 0..max_iterations {
         // --- Build and send request ---
-        let body = build_ollama_chat_body(ctx.model, &ollama_msgs, tools, temperature, max_tokens);
+        let body = build_ollama_chat_body(ctx.model, &ollama_msgs, &effective_tools, temperature, max_tokens);
 
         eprintln!(
             "[nolock] ollama tool loop iteration={}, POST {}/api/chat (streaming)",
@@ -6259,6 +6331,7 @@ async fn ollama_chat_with_tools(
         // visible content).
         if !stream.iter_thinking.is_empty() {
             accumulate_thinking(&mut thinking_tokens, &stream.iter_thinking);
+            total_thinking.push_str(&stream.iter_thinking);
         }
 
         // --- Handle tool calls or return final response ---
@@ -6568,31 +6641,27 @@ async fn ollama_chat_with_tools(
                         "[nolock] ollama tool loop iteration={} reasoning-only, retry {}/{}",
                         iteration, thinking_only_retries, thinking_only_max_retries
                     );
-                    // Escalating nudge: each retry gets firmer so a stuck
-                    // thinking model (nemotron/qwen3/deepseek-r1) is pushed to
-                    // finally emit visible content or a structured tool call.
-                    let last = thinking_only_max_retries;
-                    let press = if thinking_only_retries >= last.saturating_sub(2) {
-                        format!(
-                            "This is attempt {} — you MUST now answer. Stop reasoning aloud. Output \
-                             the final answer as visible text, or (if you intended a tool call) emit \
-                             the structured tool_calls block immediately.",
-                            thinking_only_retries
-                        )
-                    } else if thinking_only_retries >= last / 2 {
-                        "You have reasoned again without answering. Do NOT output further reasoning — \
-                         write the final answer as plain visible text now. If a tool is required, \
-                         call it (tool_calls) instead of describing it."
-                            .to_string()
-                    } else {
-                        "You have just finished your reasoning without producing a visible answer or \
-                         a tool call. Now provide the final answer as plain, visible text (no reasoning \
-                         trace). If you need to call a tool to answer, call it in the next response."
-                            .to_string()
-                    };
+                    // A model that keeps reasoning without producing content or a
+                    // tool call is stuck. Drop the tools so it is forced to answer
+                    // plainly, and give it a fresh retry budget to do so.
+                    if thinking_only_retries >= TOOLS_DROP_RETRY_THRESHOLD
+                        && !effective_tools.is_empty()
+                    {
+                        eprintln!(
+                            "[nolock] ollama tool loop iteration={} dropping tools to force a plain answer",
+                            iteration
+                        );
+                        effective_tools.clear();
+                        recent_iterations.clear();
+                        ollama_msgs.push(serde_json::json!({
+                            "role": "system",
+                            "content": tools_dropped_prompt()
+                        }));
+                        continue;
+                    }
                     ollama_msgs.push(serde_json::json!({
                         "role": "system",
-                        "content": press
+                        "content": thinking_retry_prompt(thinking_only_retries)
                     }));
                     continue;
                 }
@@ -6612,11 +6681,20 @@ async fn ollama_chat_with_tools(
             let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
             // If we gave up on a "still planning" JSON, surface the readable
             // analysis rather than the raw structured-JSON dump.
-            let final_content = if is_planning_json(&full_content) {
+            let mut final_content = if is_planning_json(&full_content) {
                 unwrap_structured_answer(&full_content)
             } else {
                 full_content.clone()
             };
+            // Last resort: if the model stalled on thinking-only and never
+            // produced visible content, surface a best-effort answer extracted
+            // from the accumulated reasoning instead of "(no response)".
+            if final_content.trim().is_empty() && !total_thinking.trim().is_empty() {
+                let fallback = extract_answer_from_thinking(&total_thinking);
+                if !fallback.is_empty() {
+                    final_content = fallback;
+                }
+            }
             return Ok(ChatResult {
                 content: if final_content.is_empty() {
                     "(no response)".to_string()
@@ -6638,11 +6716,18 @@ async fn ollama_chat_with_tools(
         all_tool_calls.len()
     );
     let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
+    let mut final_content = full_content.clone();
+    if final_content.trim().is_empty() && !total_thinking.trim().is_empty() {
+        let fallback = extract_answer_from_thinking(&total_thinking);
+        if !fallback.is_empty() {
+            final_content = fallback;
+        }
+    }
     Ok(ChatResult {
-        content: if full_content.is_empty() {
+        content: if final_content.is_empty() {
             "(max tool iterations reached, no response)".to_string()
         } else {
-            full_content
+            final_content
         },
         tool_calls: all_tool_calls,
         context_tokens,
@@ -6862,6 +6947,11 @@ async fn run_openai_tool_loop(
         .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
         .collect();
 
+    // Tools may be dropped mid-loop when the model gets stuck reasoning-only
+    // (see TOOLS_DROP_RETRY_THRESHOLD below). Keep a mutable copy so the body
+    // reflects the current tool set.
+    let mut effective_tools = tools.to_vec();
+
     // Add a system message instructing the model on tool usage, including each
     // tool's own description so the model knows when to call which one.
     if !tools.is_empty() {
@@ -6922,6 +7012,9 @@ async fn run_openai_tool_loop(
     // Running total of hidden reasoning/thinking tokens across all iterations
     // (main agent + any sub-agents it spawned). Folded into context_tokens.
     let mut thinking_tokens: u64 = 0;
+    // Accumulated reasoning text across iterations — used as a last-resort
+    // answer source when the model stalls on thinking-only.
+    let mut total_thinking = String::new();
     // De-duplicate spawn_subagent calls (same agent + task) within this run.
     let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -6962,8 +7055,8 @@ async fn run_openai_tool_loop(
         if let Some(mt) = max_tokens {
             body["max_completion_tokens"] = serde_json::json!(mt);
         }
-        if !tools.is_empty() {
-            body["tools"] = serde_json::json!(tools);
+        if !effective_tools.is_empty() {
+            body["tools"] = serde_json::json!(effective_tools);
             body["tool_choice"] = serde_json::json!("auto");
         }
 
@@ -7044,6 +7137,7 @@ async fn run_openai_tool_loop(
         // visible content).
         if !stream.iter_thinking.is_empty() {
             accumulate_thinking(&mut thinking_tokens, &stream.iter_thinking);
+            total_thinking.push_str(&stream.iter_thinking);
         }
 
         // Handle tool calls or return final response
@@ -7299,12 +7393,28 @@ let result = match runner {
                         "[nolock] openai-tool-loop iteration={} reasoning-only, retry {}/{}",
                         iteration, thinking_only_retries, thinking_only_max_retries
                     );
+                    // A model that keeps reasoning without producing content or a
+                    // tool call is stuck. Drop the tools so it is forced to answer
+                    // plainly (e.g. a simple greeting with tools enabled), and give
+                    // it a fresh retry budget to do so.
+                    if thinking_only_retries >= TOOLS_DROP_RETRY_THRESHOLD
+                        && !effective_tools.is_empty()
+                    {
+                        eprintln!(
+                            "[nolock] openai-tool-loop iteration={} dropping tools to force a plain answer",
+                            iteration
+                        );
+                        effective_tools.clear();
+                        recent_iterations.clear();
+                        openai_msgs.push(serde_json::json!({
+                            "role": "system",
+                            "content": tools_dropped_prompt()
+                        }));
+                        continue;
+                    }
                     openai_msgs.push(serde_json::json!({
                         "role": "system",
-                        "content": "You have just finished your reasoning without producing a visible \
-                                    answer or a tool call. Now provide the final answer as plain, visible \
-                                    text (no reasoning trace). If you need to call a tool to answer, call it \
-                                    in the next response."
+                        "content": thinking_retry_prompt(thinking_only_retries)
                     }));
                     continue;
                 }
@@ -7320,11 +7430,21 @@ let result = match runner {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
             let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
+            let mut final_content = full_content.clone();
+            // Last resort: if the model stalled on thinking-only and never
+            // produced visible content, surface a best-effort answer extracted
+            // from the accumulated reasoning instead of "(no response)".
+            if final_content.trim().is_empty() && !total_thinking.trim().is_empty() {
+                let fallback = extract_answer_from_thinking(&total_thinking);
+                if !fallback.is_empty() {
+                    final_content = fallback;
+                }
+            }
             return Ok(ChatResult {
-                content: if full_content.is_empty() {
+                content: if final_content.is_empty() {
                     "(no response)".to_string()
                 } else {
-                    full_content
+                    final_content
                 },
                 tool_calls: all_tool_calls,
                 context_tokens,
@@ -7341,11 +7461,18 @@ let result = match runner {
         all_tool_calls.len()
     );
     let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
+    let mut final_content = full_content.clone();
+    if final_content.trim().is_empty() && !total_thinking.trim().is_empty() {
+        let fallback = extract_answer_from_thinking(&total_thinking);
+        if !fallback.is_empty() {
+            final_content = fallback;
+        }
+    }
     Ok(ChatResult {
-        content: if full_content.is_empty() {
+        content: if final_content.is_empty() {
             "(max tool iterations reached, no response)".to_string()
         } else {
-            full_content
+            final_content
         },
         tool_calls: all_tool_calls,
         context_tokens,
@@ -7697,12 +7824,50 @@ async fn switchyard_judge_completion(
     model: &str,
     url: &str,
     api_key: &str,
-    prompt: &str,
+    system_prompt: &str,
+    user_task: &str,
 ) -> Result<String, String> {
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    if !system_prompt.trim().is_empty() {
+        messages.push(serde_json::json!({ "role": "system", "content": system_prompt }));
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": user_task }));
     let body = serde_json::json!({
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "stream": false,
+        // The classifier judge must return a structured JSON verdict
+        // (crux / primary_rule / capability_boundary / p_solve). Enforce the
+        // exact response schema so the model emits all required fields — a
+        // bare {"type":"json_object"} lets it return a partial verdict that
+        // libsy's SerdeDecoder rejects as invalid.
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "CapabilityClassifierDecision",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["crux", "primary_rule", "capability_boundary", "p_solve"],
+                    "properties": {
+                        "crux": {"type": "string", "minLength": 1},
+                        "primary_rule": {
+                            "type": "string",
+                            "enum": [
+                                "SUP-1", "SUP-2", "SUP-3", "SUP-4", "SUP-5",
+                                "UNC-1", "UNC-2", "LIM-1", "LIM-2", "none"
+                            ]
+                        },
+                        "capability_boundary": {
+                            "type": "string",
+                            "enum": ["supported", "uncertain", "unsupported", "unmatched"]
+                        },
+                        "p_solve": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+                    }
+                }
+            }
+        }
     });
     let endpoint = if backend == "ollama" {
         format!("{}/api/chat", url)
@@ -7881,11 +8046,19 @@ pub async fn run_chat(
             .collect();
         let judge_transport: switchyard::JudgeTransport = {
             let client = client.clone();
-            Arc::new(move |backend, model, url, api_key, prompt| {
+            Arc::new(move |backend, model, url, api_key, system_prompt, user_task| {
                 let client = client.clone();
                 Box::pin(async move {
-                    switchyard_judge_completion(&client, &backend, &model, &url, &api_key, &prompt)
-                        .await
+                    switchyard_judge_completion(
+                        &client,
+                        &backend,
+                        &model,
+                        &url,
+                        &api_key,
+                        &system_prompt,
+                        &user_task,
+                    )
+                    .await
                 })
             })
         };
@@ -10823,6 +10996,24 @@ Fix the errors."#;
     }
 
     #[test]
+    fn thinking_retry_prompt_escalates_with_retry_count() {
+        let mild = thinking_retry_prompt(1);
+        let medium = thinking_retry_prompt(3);
+        let strong = thinking_retry_prompt(5);
+        assert!(mild.contains("plain, visible text"));
+        assert!(medium.contains("Do NOT output further reasoning"));
+        assert!(strong.contains("MUST now answer"));
+        assert!(strong.contains("attempt 5"));
+    }
+
+    #[test]
+    fn tools_dropped_prompt_forces_plain_answer() {
+        let p = tools_dropped_prompt();
+        assert!(p.contains("Tools are no longer available"));
+        assert!(p.contains("plain visible text"));
+    }
+
+    #[test]
     fn is_complete_answer_requires_content_and_no_tool_calls() {
         assert!(is_complete_answer("The answer is 42.", false));
         assert!(!is_complete_answer("", false));
@@ -10833,11 +11024,23 @@ Fix the errors."#;
 
     #[test]
     fn is_complete_answer_rejects_premature_questions() {
-        // A question / clarification is a premature conclusion — not done.
+        // A pure question / clarification is a premature conclusion — not done.
         assert!(!is_complete_answer("What would you like me to do?", false));
         assert!(!is_complete_answer("Could you clarify what you mean?", false));
         assert!(!is_complete_answer("How can I help you today?", false));
         assert!(!is_complete_answer("Can you provide more details?", false));
+    }
+
+    #[test]
+    fn is_complete_answer_accepts_statement_plus_question() {
+        // A response with a substantive statement before the question is a
+        // complete answer (e.g. a greeting reply) — NOT premature. This is the
+        // regression guard for the "Hi" loop bug.
+        assert!(is_complete_answer("Yes, I'm here! How can I help you today?", false));
+        assert!(is_complete_answer("I'm ready. What would you like me to do?", false));
+        assert!(is_complete_answer("Sure, I can do that. Which file should I edit?", false));
+        // A pure question is still premature.
+        assert!(!is_complete_answer("How can I help you today?", false));
     }
 
     #[test]

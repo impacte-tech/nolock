@@ -69,13 +69,13 @@ pub struct SwitchyardRoute {
     /// The candidate targets the router may pick from.
     pub targets: Vec<SwitchyardTarget>,
     /// Optional relative weights for `random` routing (same order as targets).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights: Option<Vec<f64>>,
     /// Judge model config for `llm-classifier` routes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge: Option<SwitchyardJudge>,
     /// Target `id` to fall back to when the router produces no usable decision.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
 }
 
@@ -123,11 +123,17 @@ pub struct SwitchyardTarget {
     /// Provider model id.
     pub model: String,
     /// For `llm-classifier`: `"efficient"` or `"capable"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
     /// For `random`: per-target weight (relative).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<f64>,
+    /// Cost in USD per 1K input tokens. Used for cost-aware routing: when the
+    /// router picks a tier (efficient/capable), the cheapest target in that
+    /// tier is selected. Optional — when absent, the router keeps the exact
+    /// target the algorithm chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_per_1k: Option<f64>,
 }
 
 /// Judge model config for `llm-classifier` routes.
@@ -139,11 +145,11 @@ pub struct SwitchyardJudge {
     /// Judge model id.
     pub model: String,
     /// Optional override for the packaged capability-classifier prompt.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Solve-probability threshold that routes a supported task to the
     /// efficient target. Defaults to 0.5.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_threshold: Option<f64>,
 }
 
@@ -168,10 +174,19 @@ pub struct SelectedTarget {
 }
 
 /// Transport callback the host provides to serve classifier/judge model calls.
-/// Params: `(backend, model, url, api_key, prompt)` → judge completion text.
-/// nolock implements this over its own reqwest transport; tests mock it.
+/// Params: `(backend, model, url, api_key, system_prompt, user_task)` → judge
+/// completion text. The system prompt carries the classifier contract; the task
+/// is the user request being classified. nolock implements this over its own
+/// reqwest transport; tests mock it.
 pub type JudgeTransport = Arc<
-    dyn Fn(String, String, String, String, String) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+    dyn Fn(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -292,19 +307,9 @@ pub async fn resolve_route(
         }
     };
 
-    // Map the router's selected semantic name (a target id) back to a target.
-    let target = route
-        .targets
-        .iter()
-        .find(|t| t.id == decision.selected)
-        .or_else(|| route.targets.iter().find(|t| t.model == decision.selected))
-        .or_else(|| {
-            route
-                .fallback
-                .as_deref()
-                .and_then(|fb| route.targets.iter().find(|t| t.id == fb))
-        })
-        .or_else(|| route.targets.first());
+    // Map the router's selected semantic name (a target id) back to a target,
+    // preferring the cheapest model in the chosen tier (cost-aware routing).
+    let target = select_target_for_decision(route, &decision.selected);
     let Some(target) = target else {
         return Ok(None);
     };
@@ -326,6 +331,75 @@ pub async fn resolve_route(
         api_key,
         reasoning: decision.reasoning,
     }))
+}
+
+/// Select the target for a routing decision.
+///
+/// For `llm-classifier` routes the decision names a *tier* (the efficient or
+/// capable target the algorithm chose). Among the targets in that tier we pick
+/// the **cheapest** (by `cost_per_1k`) so the router is cost-aware — e.g. a
+/// capable tier holding both Super and Ultra will prefer Super. For other
+/// algorithms the decision names a specific target id, which is matched exactly.
+fn select_target_for_decision<'a>(
+    route: &'a SwitchyardRoute,
+    selected: &str,
+) -> Option<&'a SwitchyardTarget> {
+    // Determine the tier implied by the decision (the selected target's tier).
+    let tier = route
+        .targets
+        .iter()
+        .find(|t| t.id == selected || t.model == selected)
+        .and_then(|t| t.tier.clone());
+    if let Some(tier) = tier {
+        // Cost-aware: pick the cheapest target in the chosen tier.
+        let mut in_tier: Vec<&SwitchyardTarget> = route
+            .targets
+            .iter()
+            .filter(|t| t.tier.as_deref() == Some(tier.as_str()))
+            .collect();
+        if !in_tier.is_empty() {
+            in_tier.sort_by(|a, b| {
+                a.cost_per_1k
+                    .unwrap_or(f64::MAX)
+                    .partial_cmp(&b.cost_per_1k.unwrap_or(f64::MAX))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            return in_tier.first().copied();
+        }
+    }
+    // Fall back to exact id/model match, then fallback, then first.
+    route
+        .targets
+        .iter()
+        .find(|t| t.id == selected)
+        .or_else(|| route.targets.iter().find(|t| t.model == selected))
+        .or_else(|| {
+            route
+                .fallback
+                .as_deref()
+                .and_then(|fb| route.targets.iter().find(|t| t.id == fb))
+        })
+        .or_else(|| route.targets.first())
+}
+
+/// Derive cost-based weights for a `random` route: each target's weight is the
+/// inverse of its `cost_per_1k`, so cheaper models are picked more often. Returns
+/// `None` when no target has a cost (falls back to uniform random).
+fn cost_weights(route: &SwitchyardRoute) -> Option<Vec<f64>> {
+    let costs: Vec<f64> = route
+        .targets
+        .iter()
+        .map(|t| t.cost_per_1k.unwrap_or(f64::MAX))
+        .collect();
+    if costs.iter().all(|c| *c == f64::MAX) {
+        return None;
+    }
+    // Inverse cost; guard against zero/negative costs.
+    let inv: Vec<f64> = costs
+        .iter()
+        .map(|c| if *c > 0.0 { 1.0 / c } else { 1.0 })
+        .collect();
+    Some(inv)
 }
 
 /// Build the libsy algorithm for a route. Targets carry no default client —
@@ -351,7 +425,11 @@ fn build_algorithm(route: &SwitchyardRoute) -> Result<Arc<dyn Algorithm>, String
             Ok(Arc::new(Passthrough::new(target)))
         }
         RouteAlgorithm::Random => {
-            let weights = route.weights.clone();
+            // Cost-aware random: when no explicit weights are given but targets
+            // carry a `cost_per_1k`, weight each target by the inverse of its
+            // cost so cheaper models are selected more often. This is the robust
+            // "ideal" routing — cost-aware without depending on a judge model.
+            let weights = route.weights.clone().or_else(|| cost_weights(route));
             Random::new(target_set, weights, None)
                 .map(|r| Arc::new(r) as Arc<dyn Algorithm>)
                 .map_err(|e| e.to_string())
@@ -458,7 +536,7 @@ async fn drive_algorithm(
                     .map_err(|e| e.to_string())?;
                 } else {
                     // Judge/classifier call — serve it with a real completion.
-                    let prompt = judge_prompt(call.get_request());
+                    let (system_prompt, user_task) = judge_prompt(call.get_request());
                     let (backend, model, url, api_key) = match judge {
                         Some(j) => {
                             let ep = providers.get(&j.backend);
@@ -490,7 +568,20 @@ async fn drive_algorithm(
                             default_api_key.to_string(),
                         ),
                     };
-                    let judge_text = judge_transport(backend, model, url, api_key, prompt).await?;
+                    let judge_text = judge_transport(
+                        backend,
+                        model.clone(),
+                        url,
+                        api_key,
+                        system_prompt,
+                        user_task,
+                    )
+                    .await?;
+                    eprintln!(
+                        "[switchyard] judge '{}' reply: {}",
+                        model,
+                        judge_text.chars().take(300).collect::<String>()
+                    );
                     call.respond(Ok(Response {
                         llm_response: LlmResponse::Agg(text_response(None, judge_text)),
                         metadata: None,
@@ -505,22 +596,24 @@ async fn drive_algorithm(
     Ok(selected.map(|selected| RoutingDecision { selected, reasoning }))
 }
 
-/// Build the prompt sent to a classifier judge: the classifier instructions
-/// (if any) followed by the user task text.
-fn judge_prompt(request: &Request) -> String {
-    let mut parts: Vec<String> = Vec::new();
+/// Split a classifier judge request into its system prompt (the classifier
+/// contract) and the user task text. These are sent as separate messages so the
+/// judge model honors the structured-output contract instead of echoing the
+/// whole prompt back as prose.
+fn judge_prompt(request: &Request) -> (String, String) {
+    let mut system = String::new();
     for instruction in &request.llm_request.instructions {
         for block in &instruction.content {
             if let switchyard_protocol::ContentBlock::Text { text } = block {
-                parts.push(text.clone());
+                if !system.is_empty() {
+                    system.push('\n');
+                }
+                system.push_str(text);
             }
         }
     }
     let user_text = switchyard_protocol::prompt_text(&request.llm_request);
-    if !user_text.is_empty() {
-        parts.push(user_text);
-    }
-    parts.join("\n\n")
+    (system, user_text)
 }
 
 #[cfg(test)]
@@ -541,7 +634,7 @@ mod tests {
     }
 
     fn noop_judge() -> JudgeTransport {
-        Arc::new(|_b, _m, _u, _k, _p| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        Arc::new(|_b, _m, _u, _k, _s, _t| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
             Box::pin(async move { Ok(String::new()) })
         })
     }
@@ -570,6 +663,7 @@ mod tests {
                         model: "m1".to_string(),
                         tier: None,
                         weight: None,
+                cost_per_1k: None,
                     }],
                     weights: None,
                     judge: None,
@@ -614,6 +708,7 @@ mod tests {
                         model: "nvidia/nemotron-ultra".to_string(),
                         tier: None,
                         weight: None,
+                cost_per_1k: None,
                     }],
                     weights: None,
                     judge: None,
@@ -658,6 +753,7 @@ mod tests {
                 model: m.to_string(),
                 tier: None,
                 weight: None,
+                cost_per_1k: None,
             })
             .collect();
         write_config(
@@ -719,6 +815,7 @@ mod tests {
                             model: "nvidia/nemotron-3.5-lightning".to_string(),
                             tier: Some("efficient".to_string()),
                             weight: None,
+                            cost_per_1k: None,
                         },
                         SwitchyardTarget {
                             id: "capable".to_string(),
@@ -727,6 +824,7 @@ mod tests {
                             model: "nvidia/nemotron-ultra".to_string(),
                             tier: Some("capable".to_string()),
                             weight: None,
+                            cost_per_1k: None,
                         },
                     ],
                     weights: None,
@@ -741,7 +839,7 @@ mod tests {
             },
         );
         // Judge verdict: supported, p_solve 0.9 >= 0.5 → efficient.
-        let judge = Arc::new(|_b, _m, _u, _k, _p| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        let judge = Arc::new(|_b, _m, _u, _k, _s, _t| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
             Box::pin(async move {
                 Ok(r#"{"crux":"bounded task","primary_rule":"SUP-1","capability_boundary":"supported","p_solve":0.9}"#
                     .to_string())
@@ -786,6 +884,7 @@ mod tests {
                             model: "nvidia/nemotron-3.5-lightning".to_string(),
                             tier: Some("efficient".to_string()),
                             weight: None,
+                            cost_per_1k: None,
                         },
                         SwitchyardTarget {
                             id: "capable".to_string(),
@@ -794,6 +893,7 @@ mod tests {
                             model: "nvidia/nemotron-ultra".to_string(),
                             tier: Some("capable".to_string()),
                             weight: None,
+                            cost_per_1k: None,
                         },
                     ],
                     weights: None,
@@ -808,7 +908,7 @@ mod tests {
             },
         );
         // Judge verdict: unsupported → capable.
-        let judge = Arc::new(|_b, _m, _u, _k, _p| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        let judge = Arc::new(|_b, _m, _u, _k, _s, _t| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
             Box::pin(async move {
                 Ok(r#"{"crux":"hard task","primary_rule":"LIM-1","capability_boundary":"unsupported","p_solve":0.1}"#
                     .to_string())
@@ -833,6 +933,66 @@ mod tests {
     }
 
     #[test]
+    fn cost_aware_selection_picks_cheapest_in_tier() {
+        // A capable tier holding Super (cheaper) + Ultra: when the classifier
+        // routes to the capable tier, the router must pick Super (cheapest).
+        let route = SwitchyardRoute {
+            name: "capability".to_string(),
+            purpose: RoutePurpose::Chat,
+            algorithm: RouteAlgorithm::LlmClassifier,
+            targets: vec![
+                SwitchyardTarget {
+                    id: "lightning".to_string(),
+                    label: "Lightning".to_string(),
+                    backend: "openrouter".to_string(),
+                    model: "nvidia/nemotron-3.5-lightning".to_string(),
+                    tier: Some("efficient".to_string()),
+                    weight: None,
+                    cost_per_1k: Some(0.00008),
+                },
+                SwitchyardTarget {
+                    id: "super".to_string(),
+                    label: "Super".to_string(),
+                    backend: "openrouter".to_string(),
+                    model: "nvidia/nemotron-3-super-120b-a12b".to_string(),
+                    tier: Some("capable".to_string()),
+                    weight: None,
+                    cost_per_1k: Some(0.000085),
+                },
+                SwitchyardTarget {
+                    id: "ultra".to_string(),
+                    label: "Ultra".to_string(),
+                    backend: "openrouter".to_string(),
+                    model: "nvidia/nemotron-3-ultra-550b-a55b".to_string(),
+                    tier: Some("capable".to_string()),
+                    weight: None,
+                    cost_per_1k: Some(0.0005),
+                },
+            ],
+            weights: None,
+            judge: Some(SwitchyardJudge {
+                backend: "openrouter".to_string(),
+                model: "nvidia/nemotron-3.5-lightning".to_string(),
+                prompt: None,
+                base_threshold: Some(0.5),
+            }),
+            fallback: None,
+        };
+
+        // Decision names the capable tier (via the classifier's capable target).
+        let t = select_target_for_decision(&route, "super").expect("target");
+        assert_eq!(t.id, "super", "cheapest capable target must be selected");
+
+        // Decision names the efficient tier → lightning.
+        let t = select_target_for_decision(&route, "lightning").expect("target");
+        assert_eq!(t.id, "lightning");
+
+        // Unknown decision falls back to exact match / first.
+        let t = select_target_for_decision(&route, "nope").expect("target");
+        assert_eq!(t.id, "lightning");
+    }
+
+    #[test]
     fn validation_rejects_bad_config() {
         let bad = SwitchyardConfig {
             enabled: true,
@@ -847,6 +1007,7 @@ mod tests {
                     model: "m".to_string(),
                     tier: None,
                     weight: None,
+                cost_per_1k: None,
                 }],
                 weights: None,
                 judge: None, // missing judge for llm-classifier
@@ -875,6 +1036,7 @@ mod tests {
                     model: "m".to_string(),
                     tier: None,
                     weight: None,
+                cost_per_1k: None,
                 }],
                 weights: None,
                 judge: None,
@@ -890,9 +1052,46 @@ mod tests {
     }
 
     #[test]
+    fn serialization_omits_none_fields() {
+        // Writing a config with unset optional fields must NOT emit `null`
+        // entries — keeps `.routers/switchyard.json` clean and stable.
+        let root = std::env::temp_dir().join(format!("nolock_sy_ser_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg = SwitchyardConfig {
+            enabled: true,
+            routes: vec![SwitchyardRoute {
+                name: "r".to_string(),
+                purpose: RoutePurpose::Chat,
+                algorithm: RouteAlgorithm::Random,
+                targets: vec![SwitchyardTarget {
+                    id: "t".to_string(),
+                    label: "T".to_string(),
+                    backend: "openrouter".to_string(),
+                    model: "m".to_string(),
+                    tier: None,
+                    weight: None,
+                cost_per_1k: None,
+                }],
+                weights: None,
+                judge: None,
+                fallback: None,
+            }],
+        };
+        write_config(root.to_str().unwrap(), &cfg);
+        let content = std::fs::read_to_string(root.join(".routers/switchyard.json")).unwrap();
+        assert!(
+            !content.contains("null"),
+            "serialized config must not contain null fields:\n{}",
+            content
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn repo_config_is_valid() {
         // Regression guard: the checked-in `.routers/switchyard.json` (the
-        // nemotron-family route) must parse + validate against the schema.
+        // nemotron-capability route) must parse + validate against the schema.
         // Cargo runs tests from the `src-tauri` dir, so the repo root is `..`.
         let content =
             std::fs::read_to_string("../.routers/switchyard.json").expect("config file exists");
@@ -903,10 +1102,16 @@ mod tests {
         let route = config
             .routes
             .iter()
-            .find(|r| r.name == "nemotron-family")
-            .expect("nemotron-family route present");
+            .find(|r| r.name == "nemotron-capability")
+            .expect("nemotron-capability route present");
         assert_eq!(route.purpose, RoutePurpose::Chat);
-        assert_eq!(route.algorithm, RouteAlgorithm::Random);
+        assert_eq!(route.algorithm, RouteAlgorithm::LlmClassifier);
         assert_eq!(route.targets.len(), 3);
+        // Cost-aware: the capable tier holds Super (cheaper) + Ultra, and the
+        // judge is configured.
+        assert!(route.judge.is_some());
+        let super_t = route.targets.iter().find(|t| t.id == "super").unwrap();
+        let ultra_t = route.targets.iter().find(|t| t.id == "ultra").unwrap();
+        assert!(super_t.cost_per_1k.unwrap() < ultra_t.cost_per_1k.unwrap());
     }
 }

@@ -19,6 +19,8 @@ export interface SwitchyardTarget {
   tier?: string;
   /** For `random`: relative weight. */
   weight?: number;
+  /** Cost in USD per 1K input tokens — used for cost-aware routing. */
+  costPer1k?: number;
 }
 
 export interface SwitchyardJudge {
@@ -115,6 +117,7 @@ export function normalizeConfig(config: SwitchyardConfig): SwitchyardConfig {
           model: t.model,
           ...(t.tier ? { tier: t.tier } : {}),
           ...(t.weight !== undefined && t.weight !== null ? { weight: t.weight } : {}),
+          ...(t.costPer1k !== undefined && t.costPer1k !== null ? { costPer1k: t.costPer1k } : {}),
         })),
         ...(weights ? { weights } : {}),
         ...(route.judge ? { judge: route.judge } : {}),

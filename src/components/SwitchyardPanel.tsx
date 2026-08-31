@@ -144,15 +144,30 @@ export default function SwitchyardPanel({ visible, onClose, rootPath }: Props) {
               </label>
 
               {config.routes.map((route, ri) => (
-                <div key={ri} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12, margin: "12px 0" }}>
+                <div
+                  key={ri}
+                  style={{
+                    border: "1px solid var(--border)",
+                    borderRadius: 8,
+                    padding: 12,
+                    margin: "12px 0",
+                  }}
+                >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <strong>{route.name || "(unnamed route)"}</strong>
-                    <button onClick={() => removeRoute(ri)} title="Delete route">Delete</button>
+                    <button
+                      className="agent-action-btn agent-action-btn-danger"
+                      onClick={() => removeRoute(ri)}
+                      title="Delete route"
+                    >
+                      Delete
+                    </button>
                   </div>
 
                   <label className="field-label">Name</label>
                   <input
                     className="field-input"
+                    style={{ width: "100%" }}
                     value={route.name}
                     onChange={(e) => updateRoute(ri, { name: e.target.value })}
                     placeholder="e.g. nemotron-family"
@@ -174,7 +189,15 @@ export default function SwitchyardPanel({ visible, onClose, rootPath }: Props) {
 
                   <label className="field-label">Targets</label>
                   {route.targets.map((target, ti) => (
-                    <div key={ti} style={{ border: "1px dashed var(--border)", borderRadius: 6, padding: 8, margin: "6px 0" }}>
+                    <div
+                      key={ti}
+                      style={{
+                        border: "1px dashed var(--border)",
+                        borderRadius: 6,
+                        padding: 8,
+                        margin: "6px 0",
+                      }}
+                    >
                       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                         <input
                           className="field-input"
@@ -183,7 +206,13 @@ export default function SwitchyardPanel({ visible, onClose, rootPath }: Props) {
                           onChange={(e) => updateTarget(ri, ti, { label: e.target.value })}
                           placeholder="Label"
                         />
-                        <button onClick={() => removeTarget(ri, ti)} title="Remove target">&times;</button>
+                        <button
+                          className="agent-action-btn agent-action-btn-danger"
+                          onClick={() => removeTarget(ri, ti)}
+                          title="Remove target"
+                        >
+                          &times;
+                        </button>
                       </div>
                       <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
                         <Select
@@ -229,9 +258,29 @@ export default function SwitchyardPanel({ visible, onClose, rootPath }: Props) {
                           />
                         </div>
                       )}
+                      {route.algorithm === "llm-classifier" && (
+                        <div style={{ marginTop: 6 }}>
+                          <input
+                            className="field-input"
+                            type="number"
+                            step="0.00001"
+                            min="0"
+                            value={target.costPer1k ?? ""}
+                            onChange={(e) =>
+                              updateTarget(ri, ti, {
+                                costPer1k:
+                                  e.target.value === "" ? undefined : parseFloat(e.target.value),
+                              })
+                            }
+                            placeholder="Cost $/1K input (optional, for cost-aware routing)"
+                          />
+                        </div>
+                      )}
                     </div>
                   ))}
-                  <button onClick={() => addTarget(ri)}>+ Add target</button>
+                  <button className="agent-action-btn" onClick={() => addTarget(ri)}>
+                    + Add target
+                  </button>
 
                   {route.algorithm === "llm-classifier" && (
                     <div style={{ marginTop: 10 }}>
@@ -292,15 +341,24 @@ export default function SwitchyardPanel({ visible, onClose, rootPath }: Props) {
                 </div>
               ))}
 
-              <button onClick={addRoute}>+ Add route</button>
+              <button className="agent-action-btn" onClick={addRoute}>
+                + Add route
+              </button>
 
               <div style={{ display: "flex", gap: 8, marginTop: 16, alignItems: "center" }}>
-                <button onClick={save} disabled={saving}>
+                <button className="btn-primary" onClick={save} disabled={saving}>
                   {saving ? "Saving…" : "Save"}
                 </button>
-                {saved && <span style={{ fontSize: 12, color: "var(--text-muted)" }}>Saved to .routers/switchyard.json</span>}
+                <button className="btn-secondary" onClick={onClose}>
+                  Cancel
+                </button>
+                {saved && (
+                  <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    Saved to .routers/switchyard.json
+                  </span>
+                )}
               </div>
-              {error && <p style={{ color: "var(--error, #e5484d)", fontSize: 12 }}>{error}</p>}
+              {error && <div className="agent-error">{error}</div>}
             </>
           )}
         </div>

@@ -65,11 +65,13 @@ cmd_e2e() {
   (cd "$TAURI" && cargo test --test agent_cascade -- --ignored --nocapture "$@")
 }
 
-# Switchyard routing e2e: routes the main chat to OpenRouter's Nemotron family
-# via the project's .routers/switchyard.json. Requires network + an OpenRouter
-# API key (read from the OS keychain, or NOLOCK_OPENROUTER_API_KEY env var).
+# Switchyard routing e2e: validates the project's .routers/switchyard.json
+# against real OpenRouter — the nemotron-family random route, a passthrough
+# route, and a subagent-purpose route. The OpenRouter key MUST be stored in the
+# OS keychain (via the UI Model Providers panel → OpenRouter → API key); the
+# tests FAIL completely if it's missing (no env-var/opencode fallback).
 cmd_switchyard_e2e() {
-  (cd "$TAURI" && cargo test --test agent_cascade switchyard_routes_chat_to_nemotron_family_on_openrouter -- --ignored --nocapture)
+  (cd "$TAURI" && cargo test --test agent_cascade switchyard -- --ignored --nocapture)
 }
 
 cmd_cli() {

@@ -1224,7 +1224,7 @@ export default function App() {
         )}
       </div>
 
-      <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} />
+      <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} rootPath={rootPath} />
 
       <ModelProvidersPanel visible={showModelProviders} onClose={() => setShowModelProviders(false)} />
       <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />

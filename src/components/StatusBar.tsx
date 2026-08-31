@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getChatBackend, getFitmBackend, formatModelLabel } from "../lib/backends";
+import { type SwitchyardConfig } from "../lib/switchyard";
 
 interface Props {
   showChat: boolean;
   onToggleChat: () => void;
+  rootPath: string;
 }
 
 interface BackendStatus {
@@ -14,8 +16,12 @@ interface BackendStatus {
   chatModel: string;
 }
 
-export default function StatusBar({ showChat, onToggleChat }: Props) {
+export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
   const [backend, setBackend] = useState<BackendStatus | null>(null);
+  // When the project's Switchyard router is enabled with a `chat` route, the
+  // bottom bar shows "switchyard - on" + the route name instead of the raw
+  // provider/model.
+  const [switchyardRoute, setSwitchyardRoute] = useState<string | null>(null);
 
   useEffect(() => {
     const check = async () => {
@@ -25,6 +31,22 @@ export default function StatusBar({ showChat, onToggleChat }: Props) {
       const fitmBackend = getFitmBackend();
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
+
+      // Read the per-project Switchyard policy. When enabled with a `chat`
+      // route, surface the route name instead of the provider/model.
+      let activeRoute: string | null = null;
+      if (rootPath) {
+        try {
+          const cfg = await invoke<SwitchyardConfig>("read_switchyard_config", { rootPath });
+          if (cfg.enabled) {
+            const chatRoute = cfg.routes.find((r) => r.purpose === "chat");
+            if (chatRoute) activeRoute = chatRoute.name;
+          }
+        } catch {
+          // Config unreadable — fall through to the normal provider display.
+        }
+      }
+      setSwitchyardRoute(activeRoute);
 
       try {
         let ok = false;
@@ -80,30 +102,46 @@ export default function StatusBar({ showChat, onToggleChat }: Props) {
       window.removeEventListener("nolock:settings-changed", onSettingsChanged);
       window.removeEventListener("storage", onStorage);
     };
-  }, []);
+  }, [rootPath]);
 
   return (
     <div className="statusbar">
       <div className="statusbar-left">
-        <span className={`status-item ${backend?.ok ? "status-ok" : "status-warn"}`}>
-          {backend?.ok ? "\u25CF" : "\u25CB"} {backend?.name || "no backend"}
-        </span>
-        {backend?.completionModel && (
-          <span className="status-item">
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="16 18 22 12 16 6" />
-              <polyline points="8 6 2 12 8 18" />
-            </svg>
-            {backend.completionModel}
-          </span>
-        )}
-        {backend?.chatModel && (
-          <span className="status-item">
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-            </svg>
-            {backend.chatModel}
-          </span>
+        {switchyardRoute ? (
+          <>
+            <span className="status-item status-ok">
+              {"\u25CF"} switchyard - on
+            </span>
+            <span className="status-item">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+              </svg>
+              {switchyardRoute}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className={`status-item ${backend?.ok ? "status-ok" : "status-warn"}`}>
+              {backend?.ok ? "\u25CF" : "\u25CB"} {backend?.name || "no backend"}
+            </span>
+            {backend?.completionModel && (
+              <span className="status-item">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="16 18 22 12 16 6" />
+                  <polyline points="8 6 2 12 8 18" />
+                </svg>
+                {backend.completionModel}
+              </span>
+            )}
+            {backend?.chatModel && (
+              <span className="status-item">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                </svg>
+                {backend.chatModel}
+              </span>
+            )}
+          </>
         )}
       </div>
       <div className="statusbar-right">
