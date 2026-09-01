@@ -29,8 +29,9 @@ use std::sync::Arc;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use switchyard_libsy::{
-    Algorithm, ClassifierContractConfig, LlmClassifierConfig, LlmTarget, LlmTargetSet,
-    LlmTaskClassifier, Passthrough, Random, Step, TaskClassifierConfig,
+    Algorithm, ClassifierContractConfig, CustomClassifierConfig, CustomClassifierPolicy,
+    LlmClassifierConfig, LlmTarget, LlmTargetSet, LlmTaskClassifier, Passthrough, Random,
+    Step, TaskClassifierConfig,
 };
 use switchyard_protocol::{
     Context, LlmResponse, Request, Response, text_request, text_response,
@@ -107,6 +108,10 @@ pub enum RouteAlgorithm {
     Passthrough,
     Random,
     LlmClassifier,
+    /// Judge-backed routing among N named targets (e.g. lightning / super /
+    /// ultra). The judge's verdict carries a label field (see `judge.selector`)
+    /// that selects one target exactly — no "cheapest in tier" override.
+    Custom,
 }
 
 /// One candidate routing destination.
@@ -151,6 +156,14 @@ pub struct SwitchyardJudge {
     /// efficient target. Defaults to 0.5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_threshold: Option<f64>,
+    /// Inner JSON Schema (the `schema` object, not the `json_schema` wrapper)
+    /// the judge's verdict must satisfy. Required for `custom` routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<serde_json::Value>,
+    /// JSON Pointer (e.g. `/route`) to the verdict field holding the target label
+    /// the judge selected. Required for `custom` routes; defaults to `/route`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
 }
 
 /// A resolved provider endpoint (url + api key) for a backend, mirroring
@@ -174,10 +187,12 @@ pub struct SelectedTarget {
 }
 
 /// Transport callback the host provides to serve classifier/judge model calls.
-/// Params: `(backend, model, url, api_key, system_prompt, user_task)` → judge
-/// completion text. The system prompt carries the classifier contract; the task
-/// is the user request being classified. nolock implements this over its own
-/// reqwest transport; tests mock it.
+/// Params: `(backend, model, url, api_key, system_prompt, user_task, response_format)` →
+/// judge completion text. The system prompt carries the classifier contract;the task
+/// is the user request being classified;`response_format` is the provider structured-output
+/// config libsy attached to the judge request (the `json_schema` wrapper with the inner
+/// schema), so the host can enforce the exact verdict shape for ANY classifier mode.
+/// nolock implements this over its own reqwest transport; tests mock it.
 pub type JudgeTransport = Arc<
     dyn Fn(
             String,
@@ -186,6 +201,7 @@ pub type JudgeTransport = Arc<
             String,
             String,
             String,
+            Option<serde_json::Value>,
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
         + Send
         + Sync,
@@ -234,11 +250,34 @@ pub fn validate_switchyard_config(config: &SwitchyardConfig) -> Result<(), Strin
                 ));
             }
         }
-        if route.algorithm == RouteAlgorithm::LlmClassifier && route.judge.is_none() {
+if route.algorithm == RouteAlgorithm::LlmClassifier && route.judge.is_none() {
             return Err(format!(
                 "route '{}' uses llm-classifier but has no judge",
                 route.name
             ));
+        }
+        if route.algorithm == RouteAlgorithm::Custom {
+            let judge = route.judge.as_ref().ok_or_else(|| {
+                format!("route '{}' uses custom but has no judge", route.name)
+            })?;
+            if judge.prompt.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                return Err(format!("route '{}' uses custom but has no judge.prompt", route.name));
+            }
+            if judge.response_schema.is_none() {
+                return Err(format!(
+                    "route '{}' uses custom but has no judge.responseSchema",
+                    route.name
+                ));
+            }
+            let fallback = route.fallback.as_deref().ok_or_else(|| {
+                format!("route '{}' uses custom but has no fallback", route.name)
+            })?;
+            if !route.targets.iter().any(|t| t.id == fallback) {
+                return Err(format!(
+                    "route '{}' fallback '{}' must be one of the target ids",
+                    route.name, fallback
+                ));
+            }
         }
         if let Some(weights) = &route.weights {
             if weights.len() != route.targets.len() {
@@ -345,11 +384,17 @@ fn select_target_for_decision<'a>(
     selected: &str,
 ) -> Option<&'a SwitchyardTarget> {
     // Determine the tier implied by the decision (the selected target's tier).
-    let tier = route
-        .targets
-        .iter()
-        .find(|t| t.id == selected || t.model == selected)
-        .and_then(|t| t.tier.clone());
+    // Only `llm-classifier` decisions name a *tier*; `custom` decisions name a
+    // specific target id, which must be matched exactly (no tier override).
+    let tier = if route.algorithm == RouteAlgorithm::LlmClassifier {
+        route
+            .targets
+            .iter()
+            .find(|t| t.id == selected || t.model == selected)
+            .and_then(|t| t.tier.clone())
+    } else {
+        None
+    };
     if let Some(tier) = tier {
         // Cost-aware: pick the cheapest target in the chosen tier.
         let mut in_tier: Vec<&SwitchyardTarget> = route
@@ -481,6 +526,59 @@ fn build_algorithm(route: &SwitchyardRoute) -> Result<Arc<dyn Algorithm>, String
             .map(|r| Arc::new(r) as Arc<dyn Algorithm>)
             .map_err(|e| e.to_string())
         }
+        RouteAlgorithm::Custom => {
+            // Judge-backed routing among N named targets: the judge's verdict
+            // carries a label field (via `judge.selector`, a JSON Pointer) that
+            // selects one target exactly. No "cheapest in tier" override — the
+            // judge decides which capable tier (e.g. Super vs Ultra) is needed.
+            let judge = route
+                .judge
+                .as_ref()
+                .ok_or_else(|| "custom route requires a judge".to_string())?;
+            let judge_target = LlmTarget {
+                semantic_name: format!("judge:{}", judge.model),
+                llm_client: None,
+            };
+            let prompt = judge
+                .prompt
+                .clone()
+                .ok_or_else(|| "custom route requires judge.prompt".to_string())?;
+            let response_schema = judge
+                .response_schema
+                .clone()
+                .ok_or_else(|| "custom route requires judge.responseSchema".to_string())?;
+            let selector = judge.selector.clone().unwrap_or_else(|| "/route".to_string());
+            let default_target = route
+                .fallback
+                .clone()
+                .ok_or_else(|| "custom route requires fallback".to_string())?;
+            let targets: Vec<(String, LlmTarget)> = route
+                .targets
+                .iter()
+                .map(|t| {
+                    (
+                        t.id.clone(),
+                        LlmTarget {
+                            semantic_name: t.id.clone(),
+                            llm_client: None,
+                        },
+                    )
+                })
+                .collect();
+            let config = CustomClassifierConfig::new(
+                prompt,
+                response_schema,
+                CustomClassifierPolicy::target_selector(selector),
+            );
+            LlmTaskClassifier::new(LlmClassifierConfig::Custom {
+                judge_target,
+                targets,
+                default_target,
+                config,
+            })
+            .map(|r| Arc::new(r) as Arc<dyn Algorithm>)
+            .map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -575,6 +673,7 @@ async fn drive_algorithm(
                         api_key,
                         system_prompt,
                         user_task,
+                        call.get_request().llm_request.output.response_format.clone(),
                     )
                     .await?;
                     eprintln!(
@@ -634,7 +733,7 @@ mod tests {
     }
 
     fn noop_judge() -> JudgeTransport {
-        Arc::new(|_b, _m, _u, _k, _s, _t| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        Arc::new(|_b, _m, _u, _k, _s, _t, _rf| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
             Box::pin(async move { Ok(String::new()) })
         })
     }
@@ -833,13 +932,15 @@ mod tests {
                         model: "nvidia/nemotron-3.5-lightning".to_string(),
                         prompt: None,
                         base_threshold: Some(0.5),
+                        response_schema: None,
+                        selector: None,
                     }),
                     fallback: None,
                 }],
             },
         );
         // Judge verdict: supported, p_solve 0.9 >= 0.5 → efficient.
-        let judge = Arc::new(|_b, _m, _u, _k, _s, _t| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        let judge = Arc::new(|_b, _m, _u, _k, _s, _t, _rf| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
             Box::pin(async move {
                 Ok(r#"{"crux":"bounded task","primary_rule":"SUP-1","capability_boundary":"supported","p_solve":0.9}"#
                     .to_string())
@@ -902,13 +1003,15 @@ mod tests {
                         model: "nvidia/nemotron-3.5-lightning".to_string(),
                         prompt: None,
                         base_threshold: Some(0.5),
+                        response_schema: None,
+                        selector: None,
                     }),
                     fallback: None,
                 }],
             },
         );
         // Judge verdict: unsupported → capable.
-        let judge = Arc::new(|_b, _m, _u, _k, _s, _t| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+        let judge = Arc::new(|_b, _m, _u, _k, _s, _t, _rf| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
             Box::pin(async move {
                 Ok(r#"{"crux":"hard task","primary_rule":"LIM-1","capability_boundary":"unsupported","p_solve":0.1}"#
                     .to_string())
@@ -975,6 +1078,8 @@ mod tests {
                 model: "nvidia/nemotron-3.5-lightning".to_string(),
                 prompt: None,
                 base_threshold: Some(0.5),
+                response_schema: None,
+                selector: None,
             }),
             fallback: None,
         };
@@ -987,9 +1092,266 @@ mod tests {
         let t = select_target_for_decision(&route, "lightning").expect("target");
         assert_eq!(t.id, "lightning");
 
-        // Unknown decision falls back to exact match / first.
+// Unknown decision falls back to exact match / first.
         let t = select_target_for_decision(&route, "nope").expect("target");
         assert_eq!(t.id, "lightning");
+    }
+
+    #[tokio::test]
+    async fn custom_classifier_routes_to_the_named_target() {
+        let root = std::env::temp_dir().join(format!("nolock_sy_custom_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        write_config(
+            root.to_str().unwrap(),
+            &SwitchyardConfig {
+                enabled: true,
+                routes: vec![SwitchyardRoute {
+                    name: "three-tier".to_string(),
+                    purpose: RoutePurpose::Chat,
+                    algorithm: RouteAlgorithm::Custom,
+                    targets: vec![
+                        SwitchyardTarget {
+                            id: "lightning".to_string(),
+                            label: "Lightning".to_string(),
+                            backend: "openrouter".to_string(),
+                            model: "nvidia/nemotron-3.5-lightning".to_string(),
+                            tier: None,
+                            weight: None,
+                            cost_per_1k: Some(0.00008),
+                        },
+                        SwitchyardTarget {
+                            id: "super".to_string(),
+                            label: "Super".to_string(),
+                            backend: "openrouter".to_string(),
+                            model: "nvidia/nemotron-3-super-120b-a12b".to_string(),
+                            tier: None,
+                            weight: None,
+                            cost_per_1k: Some(0.000085),
+                        },
+                        SwitchyardTarget {
+                            id: "ultra".to_string(),
+                            label: "Ultra".to_string(),
+                            backend: "openrouter".to_string(),
+                            model: "nvidia/nemotron-3-ultra-550b-a55b".to_string(),
+                            tier: None,
+                            weight: None,
+                            cost_per_1k: Some(0.0005),
+                        },
+                    ],
+                    weights: None,
+                    judge: Some(SwitchyardJudge {
+                        backend: "ollama".to_string(),
+                        model: "nemotron-nano-9b".to_string(),
+                        prompt: Some("You are a model router. Output a route label.".to_string()),
+                        base_threshold: None,
+                        response_schema: Some(serde_json::json!({
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["route"],
+                            "properties": {
+                                "route": { "type": "string", "enum": ["lightning", "super", "ultra"] }
+                            }
+                        })),
+                        selector: Some("/route".to_string()),
+                    }),
+                    fallback: Some("super".to_string()),
+                }],
+            },
+        );
+        // Judge verdict names "ultra" → must route to Ultra exactly (no tier override).
+        let judge = Arc::new(|_b, _m, _u, _k, _s, _t, _rf| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+            Box::pin(async move { Ok(r#"{"route":"ultra"}"#.to_string()) })
+        });
+        let out = resolve_route(
+            root.to_str().unwrap(),
+            RoutePurpose::Chat,
+            "migrate the legacy COBOL batch system",
+            &providers(),
+            "ollama",
+            "default",
+            "http://localhost:11434",
+            "",
+            judge,
+        )
+        .await
+        .unwrap()
+        .expect("custom classifier should route");
+        assert_eq!(out.model, "nvidia/nemotron-3-ultra-550b-a55b");
+        assert_eq!(out.algorithm, RouteAlgorithm::Custom);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn custom_classifier_falls_back_when_judge_abstains() {
+        let root = std::env::temp_dir().join(format!("nolock_sy_custom2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        write_config(
+            root.to_str().unwrap(),
+            &SwitchyardConfig {
+                enabled: true,
+                routes: vec![SwitchyardRoute {
+                    name: "three-tier".to_string(),
+                    purpose: RoutePurpose::Chat,
+                    algorithm: RouteAlgorithm::Custom,
+                    targets: vec![
+                        SwitchyardTarget {
+                            id: "lightning".to_string(),
+                            label: "Lightning".to_string(),
+                            backend: "openrouter".to_string(),
+                            model: "nvidia/nemotron-3.5-lightning".to_string(),
+                            tier: None,
+                            weight: None,
+                            cost_per_1k: None,
+                        },
+                        SwitchyardTarget {
+                            id: "super".to_string(),
+                            label: "Super".to_string(),
+                            backend: "openrouter".to_string(),
+                            model: "nvidia/nemotron-3-super-120b-a12b".to_string(),
+                            tier: None,
+                            weight: None,
+                            cost_per_1k: None,
+                        },
+                    ],
+                    weights: None,
+                    judge: Some(SwitchyardJudge {
+                        backend: "ollama".to_string(),
+                        model: "nemotron-nano-9b".to_string(),
+                        prompt: Some("You are a model router. Output a route label.".to_string()),
+                        base_threshold: None,
+                        response_schema: Some(serde_json::json!({
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["route"],
+                            "properties": {
+                                "route": { "type": "string", "enum": ["lightning", "super"] }
+                            }
+                        })),
+                        selector: Some("/route".to_string()),
+                    }),
+                    fallback: Some("super".to_string()),
+                }],
+            },
+        );
+        // Judge verdict names an unknown label → policy abstains → fallback.
+
+        let judge = Arc::new(|_b, _m, _u, _k, _s, _t, _rf| -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> {
+            Box::pin(async move { Ok(r#"{"route":"unknown"}"#.to_string()) })
+        });
+        let out = resolve_route(
+            root.to_str().unwrap(),
+            RoutePurpose::Chat,
+            "some task",
+            &providers(),
+            "ollama",
+            "default",
+            "http://localhost:11434",
+            "",
+            judge,
+        )
+        .await
+        .unwrap()
+        .expect("custom classifier should fall back");
+        assert_eq!(out.model, "nvidia/nemotron-3-super-120b-a12b");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn validation_rejects_bad_custom_config() {
+        // Custom routes need judge.prompt, judge.responseSchema, and a fallback
+        // that names one of the targets.
+
+        let missing_prompt = SwitchyardConfig {
+            enabled: true,
+            routes: vec![SwitchyardRoute {
+                name: "c".to_string(),
+                purpose: RoutePurpose::Chat,
+                algorithm: RouteAlgorithm::Custom,
+                targets: vec![SwitchyardTarget {
+                    id: "t".to_string(),
+                    label: "T".to_string(),
+                    backend: "openrouter".to_string(),
+                    model: "m".to_string(),
+                    tier: None,
+                    weight: None,
+                    cost_per_1k: None,
+                }],
+                weights: None,
+                judge: Some(SwitchyardJudge {
+                    backend: "ollama".to_string(),
+                    model: "m".to_string(),
+                    prompt: None,
+                    base_threshold: None,
+                    response_schema: Some(serde_json::json!({ "type": "object" })),
+                    selector: None,
+                }),
+                fallback: Some("t".to_string()),
+            }],
+        };
+        let err = validate_switchyard_config(&missing_prompt).unwrap_err();
+        assert!(err.contains("judge.prompt"), "{err}");
+
+        let missing_schema = SwitchyardConfig {
+            enabled: true,
+            routes: vec![SwitchyardRoute {
+                name: "c".to_string(),
+                purpose: RoutePurpose::Chat,
+                algorithm: RouteAlgorithm::Custom,
+                targets: vec![SwitchyardTarget {
+                    id: "t".to_string(),
+                    label: "T".to_string(),
+                    backend: "openrouter".to_string(),
+                    model: "m".to_string(),
+                    tier: None,
+                    weight: None,
+                    cost_per_1k: None,
+                }],
+                weights: None,
+                judge: Some(SwitchyardJudge {
+                    backend: "ollama".to_string(),
+                    model: "m".to_string(),
+                    prompt: Some("p".to_string()),
+                    base_threshold: None,
+                    response_schema: None,
+                    selector: None,
+                }),
+                fallback: Some("t".to_string()),
+            }],
+        };
+        let err = validate_switchyard_config(&missing_schema).unwrap_err();
+        assert!(err.contains("responseSchema"), "{err}");
+
+        let bad_fallback = SwitchyardConfig {
+            enabled: true,
+            routes: vec![SwitchyardRoute {
+                name: "c".to_string(),
+                purpose: RoutePurpose::Chat,
+                algorithm: RouteAlgorithm::Custom,
+                targets: vec![SwitchyardTarget {
+                    id: "t".to_string(),
+                    label: "T".to_string(),
+                    backend: "openrouter".to_string(),
+                    model: "m".to_string(),
+                    tier: None,
+                    weight: None,
+                    cost_per_1k: None,
+                }],
+                weights: None,
+                judge: Some(SwitchyardJudge {
+                    backend:"ollama".to_string(),
+                    model: "m".to_string(),
+                    prompt: Some("p".to_string()),
+                    base_threshold: None,
+                    response_schema: Some(serde_json::json!({ "type": "object" })),
+                    selector: None,
+                }),
+                fallback: Some("nope".to_string()),
+            }],
+        };
+        let err = validate_switchyard_config(&bad_fallback).unwrap_err();
+        assert!(err.contains("fallback"), "{err}");
     }
 
     #[test]
@@ -1088,10 +1450,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
+#[test]
     fn repo_config_is_valid() {
-        // Regression guard: the checked-in `.routers/switchyard.json` (the
-        // nemotron-capability route) must parse + validate against the schema.
+        // Regression guard:the checked-in `.routers/switchyard.json` (the
+        // nemotron-3-tier custom route) must parse + validate against the schema.
+
         // Cargo runs tests from the `src-tauri` dir, so the repo root is `..`.
         let content =
             std::fs::read_to_string("../.routers/switchyard.json").expect("config file exists");
@@ -1102,14 +1465,18 @@ mod tests {
         let route = config
             .routes
             .iter()
-            .find(|r| r.name == "nemotron-capability")
-            .expect("nemotron-capability route present");
+            .find(|r| r.name == "nemotron-3-tier")
+            .expect("nemotron-3-tier route present");
         assert_eq!(route.purpose, RoutePurpose::Chat);
-        assert_eq!(route.algorithm, RouteAlgorithm::LlmClassifier);
+        assert_eq!(route.algorithm, RouteAlgorithm::Custom);
         assert_eq!(route.targets.len(), 3);
-        // Cost-aware: the capable tier holds Super (cheaper) + Ultra, and the
-        // judge is configured.
+        // Three tiers: efficient (lightning) + two capable layers (super, ultra).
+        // The judge picks the exact target via `selector` — no tier override.
         assert!(route.judge.is_some());
+        let judge = route.judge.as_ref().unwrap();
+        assert!(judge.response_schema.is_some());
+        assert_eq!(judge.selector.as_deref(), Some("/route"));
+        assert_eq!(route.fallback.as_deref(), Some("super"));
         let super_t = route.targets.iter().find(|t| t.id == "super").unwrap();
         let ultra_t = route.targets.iter().find(|t| t.id == "ultra").unwrap();
         assert!(super_t.cost_per_1k.unwrap() < ultra_t.cost_per_1k.unwrap());
