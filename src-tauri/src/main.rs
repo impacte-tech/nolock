@@ -2806,21 +2806,24 @@ pub async fn run_subagent(
             .collect();
         let judge_transport: switchyard::JudgeTransport = {
             let client = runner.client.clone();
-            Arc::new(move |backend, model, url, api_key, system_prompt, user_task| {
-                let client = client.clone();
-                Box::pin(async move {
-                    switchyard_judge_completion(
-                        &client,
-                        &backend,
-                        &model,
-                        &url,
-                        &api_key,
-                        &system_prompt,
-                        &user_task,
-                    )
-                    .await
-                })
-            })
+            Arc::new(
+                move |backend, model, url, api_key, system_prompt, user_task, response_format| {
+                    let client = client.clone();
+                    Box::pin(async move {
+                        switchyard_judge_completion(
+                            &client,
+                            &backend,
+                            &model,
+                            &url,
+                            &api_key,
+                            &system_prompt,
+                            &user_task,
+                            response_format,
+                        )
+                        .await
+                    })
+                },
+            )
         };
         match switchyard::resolve_route(
             root,
@@ -7865,49 +7868,46 @@ async fn switchyard_judge_completion(
     api_key: &str,
     system_prompt: &str,
     user_task: &str,
+    response_format: Option<serde_json::Value>,
 ) -> Result<String, String> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if !system_prompt.trim().is_empty() {
         messages.push(serde_json::json!({ "role": "system", "content": system_prompt }));
     }
     messages.push(serde_json::json!({ "role": "user", "content": user_task }));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": false,
-        // The classifier judge must return a structured JSON verdict
-        // (crux / primary_rule / capability_boundary / p_solve). Enforce the
-        // exact response schema so the model emits all required fields — a
-        // bare {"type":"json_object"} lets it return a partial verdict that
-        // libsy's SerdeDecoder rejects as invalid.
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "CapabilityClassifierDecision",
-                "strict": true,
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": ["crux", "primary_rule", "capability_boundary", "p_solve"],
-                    "properties": {
-                        "crux": {"type": "string", "minLength": 1},
-                        "primary_rule": {
-                            "type": "string",
-                            "enum": [
-                                "SUP-1", "SUP-2", "SUP-3", "SUP-4", "SUP-5",
-                                "UNC-1", "UNC-2", "LIM-1", "LIM-2", "none"
-                            ]
-                        },
-                        "capability_boundary": {
-                            "type": "string",
-                            "enum": ["supported", "uncertain", "unsupported", "unmatched"]
-                        },
-                        "p_solve": {"type": "number", "minimum": 0.0, "maximum": 1.0}
-                    }
-                }
-            }
-        }
     });
+    // The judge must return a structured JSON verdict matching the schema libsy
+    // attached to the classifier request (`output.response_format`). For the
+    // capability classifier that is the crux/primary_rule/capability_boundary/
+    // p_solve verdict;for a custom classifier it is the user-supplied schema.
+    // Ollama enforces structured output via its `format` field (which takes the
+    // inner JSON Schema directly);OpenAI-compatible backends use
+    // `response_format` with a `json_schema` wrapper.
+    if let Some(response_format) = response_format {
+        // libsy gives us the provider wrapper: { "type": "json_schema",
+        // "json_schema": { "name": ..., "strict": true, "schema": {...} } }.
+        let inner_schema = response_format
+            .pointer("/json_schema/schema")
+            .cloned()
+            .unwrap_or_else(|| response_format.clone());
+        if backend == "ollama" {
+            body["format"] = inner_schema;
+        } else {
+            body["response_format"] = response_format;
+        }
+    } else {
+        // No schema from libsy — fall back to a generic JSON object so the
+        // judge still returns parseable JSON.
+        if backend == "ollama" {
+            body["format"] = serde_json::json!({ "type": "object" });
+        } else {
+            body["response_format"] = serde_json::json!({ "type": "json_object" });
+        }
+    }
     let endpoint = if backend == "ollama" {
         format!("{}/api/chat", url)
     } else {
@@ -8085,21 +8085,24 @@ pub async fn run_chat(
             .collect();
         let judge_transport: switchyard::JudgeTransport = {
             let client = client.clone();
-            Arc::new(move |backend, model, url, api_key, system_prompt, user_task| {
-                let client = client.clone();
-                Box::pin(async move {
-                    switchyard_judge_completion(
-                        &client,
-                        &backend,
-                        &model,
-                        &url,
-                        &api_key,
-                        &system_prompt,
-                        &user_task,
-                    )
-                    .await
-                })
-            })
+            Arc::new(
+                move |backend, model, url, api_key, system_prompt, user_task, response_format| {
+                    let client = client.clone();
+                    Box::pin(async move {
+                        switchyard_judge_completion(
+                            &client,
+                            &backend,
+                            &model,
+                            &url,
+                            &api_key,
+                            &system_prompt,
+                            &user_task,
+                            response_format,
+                        )
+                        .await
+                    })
+                },
+            )
         };
         let default_api_key = req.api_key.clone().unwrap_or_default();
         match switchyard::resolve_route(
