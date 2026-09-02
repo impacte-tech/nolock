@@ -1852,6 +1852,16 @@ struct ModelListItem {
     name: String,
     is_free: bool,
     zero_data_retention: bool,
+    /// Per-1M-token pricing (USD) when the provider reports it. Lets the
+    /// frontend compute approximate session costs per model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pricing: Option<ModelPricing>,
+}
+
+#[derive(serde::Serialize)]
+struct ModelPricing {
+    prompt: f64,
+    completion: f64,
 }
 
 #[tauri::command]
@@ -1906,6 +1916,7 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                     name: name.to_string(),
                     is_free,
                     zero_data_retention: req.zdr,
+                    pricing: Some(ModelPricing { prompt: prompt_price, completion: completion_price }),
                 }
             }).collect())
         }
@@ -1947,6 +1958,7 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                         name: id.to_string(),
                         is_free,
                         zero_data_retention: has_zdr,
+                        pricing: None,
                     }
                 }).collect())
             } else {
@@ -1980,6 +1992,7 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                         name: name.to_string(),
                         is_free,
                         zero_data_retention: has_zdr,
+                        pricing: None,
                     }
                 }).collect())
             }
@@ -2011,6 +2024,7 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                     name: name.to_string(),
                     is_free: true, // local models are always free
                     zero_data_retention: true, // local = fully private
+                    pricing: None,
                 }
             }).collect())
         }
@@ -2049,6 +2063,7 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                     name: name.to_string(),
                     is_free: true, // local models are always free
                     zero_data_retention: true, // local = fully private
+                    pricing: None,
                 }
             }).collect())
         }
@@ -2207,6 +2222,64 @@ struct SessionRecord {
     /// The model's context window (denominator for the context meter).
     #[serde(default)]
     context_window: u64,
+    /// Full conversation log — every user prompt and every assistant tool call
+    /// (no exceptions). This turns `.sessions/` files into an audit trail rather
+    /// than metadata-only records.
+    #[serde(default)]
+    messages: Vec<SessionLogMessage>,
+    /// Per-request/per-iteration token usage split by provider + model with an
+    /// optional unit price and computed cost.
+    #[serde(default)]
+    usage: Vec<SessionUsageRecord>,
+    /// Computed session cost (USD) when pricing is known for the models used.
+    #[serde(default)]
+    total_cost: Option<f64>,
+}
+
+/// A single logged conversation entry persisted in a session file. Captures the
+/// full user prompt (both what the user typed and the expanded API content) and
+/// any tool calls made by the assistant on that turn.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionLogMessage {
+    role: String,
+    content: String,
+    #[serde(default)]
+    display_content: String,
+    /// Unix timestamp (seconds) when this message was created.
+    #[serde(default)]
+    created_at: u64,
+    /// Model that produced this message (assistant only).
+    #[serde(default)]
+    model: String,
+    /// Token count for this message (computed by the frontend).
+    #[serde(default)]
+    tokens: u64,
+    /// Tool calls made by the assistant on this turn (assistant only).
+    #[serde(default)]
+    tool_calls: Vec<ToolCallLog>,
+}
+
+/// Per-request/per-iteration token usage persisted in a session file, split by
+/// provider + model so the summary UI can show exactly what each model cost.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionUsageRecord {
+    provider: String,
+    model: String,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    #[serde(default)]
+    total_tokens: u64,
+    /// Price per 1M input tokens (USD), when available from the provider.
+    #[serde(default)]
+    prompt_price_per_m: Option<f64>,
+    /// Price per 1M output tokens (USD), when available from the provider.
+    #[serde(default)]
+    completion_price_per_m: Option<f64>,
+    /// Computed cost (USD) for this entry, when pricing is available.
+    #[serde(default)]
+    cost: Option<f64>,
 }
 
 /// Endpoint + credential for a single model provider, used to resolve the
@@ -2281,6 +2354,22 @@ fn default_max_iterations() -> usize {
     10
 }
 
+/// Token usage for a single model request/iteration, explicitly keyed by the
+/// provider and model that served it. The frontend's session log persists this
+/// as the per-iteration token breakdown (with optional price/cost enrichment).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageReport {
+    pub provider: String,
+    pub model: String,
+    /// Input / prompt tokens consumed by this request.
+    pub prompt_tokens: u64,
+    /// Output / completion tokens produced by this request.
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
 #[derive(serde::Serialize)]
 pub struct ChatResult {
     pub content: String,
@@ -2299,6 +2388,13 @@ pub struct ChatResult {
     /// `context_tokens` so the session meter/limit reflects thinking too.
     #[serde(default)]
     pub thinking_tokens: u64,
+    /// Per-request/per-iteration token usage split by provider + model.
+    /// Each tool-loop iteration that hit the streaming endpoint contributes
+    /// one entry (with the provider's reported usage when available, otherwise
+    /// an estimate). The frontend persists this in the session file so users
+    /// can see exactly what each iteration cost.
+    #[serde(default)]
+    pub usage: Vec<UsageReport>,
 }
 
 /// Rough token estimate for text (chars / 4, the same heuristic the rest of
@@ -2341,8 +2437,42 @@ fn estimate_json_messages_tokens(msgs: &[serde_json::Value]) -> u64 {
         .sum()
 }
 
+/// Build a token-usage report for a single model iteration, explicitly split by
+/// provider + model. Prefers the provider's reported usage (OpenAI: `usage`,
+/// Ollama: `prompt_eval_count`/`eval_count`); falls back to the same
+/// character-count heuristic the rest of the backend uses so the session cost
+/// log stays consistent even when a provider doesn't return a `usage` payload.
+/// Thinking tokens are intentionally NOT folded into the report (the session
+/// summary excludes them for now).
+fn usage_for(
+    provider: &str,
+    model: &str,
+    reported_prompt: u64,
+    reported_completion: u64,
+    est_prompt: u64,
+    est_completion: u64,
+) -> UsageReport {
+    let prompt_tokens = if reported_prompt > 0 {
+        reported_prompt
+    } else {
+        est_prompt.max(1)
+    };
+    let completion_tokens = if reported_completion > 0 {
+        reported_completion
+    } else {
+        est_completion
+    };
+    UsageReport {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
+    }
+}
+
 /// A single old/new text pair from an `edit` tool call.
-#[derive(Clone, serde::Serialize, Default)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
 struct FileChangeEdit {
     old_text: String,
     new_text: String,
@@ -2351,7 +2481,7 @@ struct FileChangeEdit {
 /// Structured metadata about a file that a tool call changed. Returned to the
 /// frontend so it can render an expandable before/after diff. Only populated
 /// for file-mutating tools (`write_file`, `edit`).
-#[derive(Clone, serde::Serialize, Default)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
 struct FileChange {
     path: String,
     /// "write" for new/overwritten files, "edit" for in-place edits.
@@ -2365,11 +2495,13 @@ struct FileChange {
     edits: Vec<FileChangeEdit>,
 }
 
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct ToolCallLog {
     pub name: String,
     pub arguments: String,
+    #[serde(default)]
     pub result_snippet: String,
+    #[serde(default)]
     pub result_full: String,
     #[serde(default)]
     file_changes: Vec<FileChange>,
@@ -2381,7 +2513,7 @@ pub struct ToolCallLog {
 
 /// Full trace of a sub-agent run, returned to the frontend so it can render an
 /// expandable window showing the sub-agent's work (tool calls + final answer).
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct SubAgentTrace {
     pub id: String,
     pub agent: String,
@@ -5857,6 +5989,10 @@ struct StreamResult {
     iter_thinking: String,
     /// Tool calls detected, if any.
     tool_calls: Option<Vec<serde_json::Value>>,
+    /// Prompt tokens reported by Ollama in the final "done" chunk (0 if absent).
+    prompt_tokens: u64,
+    /// Completion tokens reported by Ollama in the final "done" chunk (0 if absent).
+    completion_tokens: u64,
 }
 
 /// Build the initial messages array for the Ollama tool-calling loop.
@@ -6114,6 +6250,10 @@ async fn stream_ollama_response(
     let mut iter_thinking = String::new();
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
     let mut buf: Vec<u8> = Vec::new();
+    // Token usage reported by Ollama on the final "done" chunk
+    // (`prompt_eval_count` / `eval_count`). Falls back to 0 when absent.
+    let mut prompt_usage: u64 = 0;
+    let mut completion_usage: u64 = 0;
 
     // Process a single NDJSON line: the pure `apply_ollama_stream_line` does the
     // parsing; this helper only emits tokens and aggregates buffers. All
@@ -6125,7 +6265,20 @@ async fn stream_ollama_response(
                         iter_content: &mut String,
                         iter_thinking: &mut String,
                         tool_calls: &mut Option<Vec<serde_json::Value>>,
-                        full_content: &mut String| {
+                        full_content: &mut String,
+                        prompt_usage: &mut u64,
+                        completion_usage: &mut u64| {
+        // Capture Ollama-reported token usage from the final "done" line so the
+        // session log can break token counts down per iteration with real
+        // numbers (prompt_eval_count / eval_count) instead of only estimates.
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(n) = data["prompt_eval_count"].as_u64() {
+                *prompt_usage = n;
+            }
+            if let Some(n) = data["eval_count"].as_u64() {
+                *completion_usage = n;
+            }
+        }
         if apply_ollama_stream_line(line, acc, arch) {
             // Thinking-capable models (Qwen3, Nemotron, DeepSeek-R1, etc.) emit
             // a `thinking` field separate from `content`. Capture it for the
@@ -6157,7 +6310,7 @@ async fn stream_ollama_response(
                     if line.is_empty() {
                         continue;
                     }
-                    consume_line(&line, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content);
+                    consume_line(&line, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage);
                 }
             }
             Err(e) => {
@@ -6182,14 +6335,14 @@ async fn stream_ollama_response(
     while !buf.is_empty() {
         match take_next_line(&mut buf) {
             Some(line) if !line.is_empty() => {
-                consume_line(&line, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content);
+                consume_line(&line, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage);
             }
             _ => {
                 // Trailing fragment with no newline — try parsing the whole
                 // remaining buffer as one (final) line.
                 let tail = String::from_utf8_lossy(&buf).trim().to_string();
                 if !tail.is_empty() {
-                    consume_line(&tail, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content);
+                    consume_line(&tail, &mut acc, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage);
                 }
                 buf.clear();
             }
@@ -6216,6 +6369,8 @@ async fn stream_ollama_response(
         iter_content,
         iter_thinking,
         tool_calls,
+        prompt_tokens: prompt_usage,
+        completion_tokens: completion_usage,
     })
 }
 
@@ -6283,6 +6438,9 @@ async fn ollama_chat_with_tools(
     // Whether we've already summarized the context this run (avoid repeated
     // summarization loops).
     let mut context_summarized = false;
+    // Per-iteration token usage split by provider + model, reported back in
+    // `ChatResult.usage` so the frontend session log can attribute costs.
+    let mut usage: Vec<UsageReport> = Vec::new();
 
     for iteration in 0..max_iterations {
         // --- Build and send request ---
@@ -6336,6 +6494,17 @@ async fn ollama_chat_with_tools(
             accumulate_thinking(&mut thinking_tokens, &stream.iter_thinking);
             total_thinking.push_str(&stream.iter_thinking);
         }
+        // Record this iteration's token usage (provider-reported when available;
+        // otherwise estimate from the current message context + this iteration's
+        // output). Thinking tokens are intentionally NOT included for now.
+        usage.push(usage_for(
+            "ollama",
+            ctx.model,
+            stream.prompt_tokens,
+            stream.completion_tokens,
+            estimate_json_messages_tokens(&ollama_msgs),
+            estimate_chat_tokens(&stream.iter_content),
+        ));
 
         // --- Handle tool calls or return final response ---
         if let Some(calls) = stream.tool_calls {
@@ -6707,6 +6876,7 @@ async fn ollama_chat_with_tools(
                 tool_calls: all_tool_calls,
                 context_tokens,
                 thinking_tokens,
+                usage,
             });
         }
     }
@@ -6735,6 +6905,7 @@ async fn ollama_chat_with_tools(
         tool_calls: all_tool_calls,
         context_tokens,
         thinking_tokens,
+        usage,
     })
 }
 
@@ -6780,6 +6951,10 @@ struct OpenAIStreamResult {
     iter_thinking: String,
     /// Tool calls detected, if any.
     tool_calls: Option<Vec<serde_json::Value>>,
+    /// Prompt tokens reported in the stream's final `usage` chunk (0 if absent).
+    prompt_tokens: u64,
+    /// Completion tokens reported in the stream's final `usage` chunk (0 if absent).
+    completion_tokens: u64,
 }
 
 /// Stream an OpenAI-compatible SSE response, emitting tokens to the frontend
@@ -6795,14 +6970,31 @@ async fn stream_openai_response(
     let mut iter_thinking = String::new();
     let mut tool_calls: Option<Vec<serde_json::Value>> = None;
     let mut buf: Vec<u8> = Vec::new();
+    // Provider-reported token usage from the stream's final `usage` chunk
+    // (OpenAI-compatible APIs emit it once `choices` is empty). 0 when absent.
+    let mut prompt_usage: u64 = 0;
+    let mut completion_usage: u64 = 0;
 
     let process_sse_data = |data: &str,
                             iter_content: &mut String,
                             iter_thinking: &mut String,
                             tool_calls: &mut Option<Vec<serde_json::Value>>,
-                            full_content: &mut String|
+                            full_content: &mut String,
+                            prompt_usage: &mut u64,
+                            completion_usage: &mut u64|
      -> Result<(), String> {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+            // Capture provider-reported usage from the final stream chunk so the
+            // session log can break token counts down per iteration with real
+            // numbers instead of only estimates.
+            if let Some(usage) = json["usage"].as_object() {
+                if let Some(n) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                    *prompt_usage = n;
+                }
+                if let Some(n) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                    *completion_usage = n;
+                }
+            }
             // Reasoning trace (thinking-capable models) — stream with a
             // `thinking` flag so the frontend can display it transiently.
             if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
@@ -6862,7 +7054,7 @@ async fn stream_openai_response(
                     if let Some(data) = line.strip_prefix("data: ") {
                         let data = data.trim();
                         if data == "[DONE]" { continue; }
-                        process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
+                        process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage)?;
                     }
                 }
             }
@@ -6888,7 +7080,7 @@ async fn stream_openai_response(
         if let Some(data) = line.strip_prefix("data: ") {
             let data = data.trim();
             if data != "[DONE]" {
-                process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content)?;
+                process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage)?;
             }
         }
     }
@@ -6899,7 +7091,7 @@ async fn stream_openai_response(
         calls.iter().map(|c| normalize_ollama_tool_call(c, arch)).collect()
     });
 
-    Ok(OpenAIStreamResult { iter_content, iter_thinking, tool_calls })
+    Ok(OpenAIStreamResult { iter_content, iter_thinking, tool_calls, prompt_tokens: prompt_usage, completion_tokens: completion_usage })
 }
 
 /// Normalize tool-call arguments to a JSON object.
@@ -7069,6 +7261,9 @@ async fn run_openai_tool_loop(
     let mut recent_iterations: Vec<String> = Vec::new();
     // Whether we've already summarized the context this run.
     let mut context_summarized = false;
+    // Per-iteration token usage split by provider + model, reported back in
+    // `ChatResult.usage` so the frontend session log can attribute costs.
+    let mut usage: Vec<UsageReport> = Vec::new();
 
     for iteration in 0..max_iterations {
         // Build request body. DigitalOcean deprecates `max_tokens` in favor of
@@ -7179,6 +7374,17 @@ async fn run_openai_tool_loop(
             accumulate_thinking(&mut thinking_tokens, &stream.iter_thinking);
             total_thinking.push_str(&stream.iter_thinking);
         }
+        // Record this iteration's token usage (provider-reported when available;
+        // otherwise estimate from the current message context + this iteration's
+        // output). Thinking tokens are intentionally NOT included for now.
+        usage.push(usage_for(
+            backend,
+            model,
+            stream.prompt_tokens,
+            stream.completion_tokens,
+            estimate_json_messages_tokens(&openai_msgs),
+            estimate_chat_tokens(&stream.iter_content),
+        ));
 
         // Handle tool calls or return final response
         if let Some(calls) = stream.tool_calls {
@@ -7491,6 +7697,7 @@ let result = match runner {
                 tool_calls: all_tool_calls,
                 context_tokens,
                 thinking_tokens,
+                usage,
             });
         }
     }
@@ -7519,6 +7726,7 @@ let result = match runner {
         tool_calls: all_tool_calls,
         context_tokens,
         thinking_tokens,
+        usage,
     })
 }
 
@@ -8415,10 +8623,18 @@ pub async fn run_chat(
                     }
                 }
                 Ok(ChatResult {
-                    content: final_content,
+                    content: final_content.clone(),
                     tool_calls: vec![],
                     context_tokens: estimate_messages_tokens(&messages) + thinking_tokens,
                     thinking_tokens,
+                    usage: vec![usage_for(
+                        "ollama",
+                        &req.model,
+                        0,
+                        0,
+                        estimate_messages_tokens(&messages),
+                        estimate_chat_tokens(&final_content),
+                    )],
                 })
             }
         }
@@ -8500,10 +8716,18 @@ pub async fn run_chat(
             }
             let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
             Ok(ChatResult {
-                content: full_content,
+                content: full_content.clone(),
                 tool_calls: vec![],
                 context_tokens: ctx_tokens_estimate,
                 thinking_tokens: 0,
+                usage: vec![usage_for(
+                    "llamacpp",
+                    &req.model,
+                    0,
+                    0,
+                    estimate_messages_tokens(&messages),
+                    estimate_chat_tokens(&full_content),
+                )],
             })
         }
         "openrouter" => {
@@ -8649,10 +8873,18 @@ pub async fn run_chat(
                 let thinking_tokens = estimate_chat_tokens(&full_thinking);
                 let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&final_content) + thinking_tokens;
                 Ok(ChatResult {
-                    content: final_content,
+                    content: final_content.clone(),
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
                     thinking_tokens,
+                    usage: vec![usage_for(
+                        "openrouter",
+                        &req.model,
+                        0,
+                        0,
+                        estimate_messages_tokens(&messages),
+                        estimate_chat_tokens(&final_content),
+                    )],
                 })
             }
         }
@@ -8751,10 +8983,18 @@ pub async fn run_chat(
                 let thinking_tokens = estimate_chat_tokens(&full_thinking);
                 let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content) + thinking_tokens;
                 Ok(ChatResult {
-                    content: full_content,
+                    content: full_content.clone(),
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
                     thinking_tokens,
+                    usage: vec![usage_for(
+                        "opencode",
+                        &req.model,
+                        0,
+                        0,
+                        estimate_messages_tokens(&messages),
+                        estimate_chat_tokens(&full_content),
+                    )],
                 })
             } else {
                 // Local OpenCode Zen — Ollama-compatible NDJSON streaming
@@ -8829,10 +9069,18 @@ pub async fn run_chat(
                 }
                 let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
                 Ok(ChatResult {
-                    content: full_content,
+                    content: full_content.clone(),
                     tool_calls: vec![],
                     context_tokens: ctx_tokens_estimate,
                     thinking_tokens: 0,
+                    usage: vec![usage_for(
+                        "opencode",
+                        &req.model,
+                        0,
+                        0,
+                        estimate_messages_tokens(&messages),
+                        estimate_chat_tokens(&full_content),
+                    )],
                 })
             }
         }
@@ -11753,9 +12001,28 @@ Fix the errors."#;
             tool_calls: vec![],
             context_tokens: 123,
             thinking_tokens: 45,
+            usage: vec![],
         };
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["context_tokens"], 123);
         assert_eq!(json["thinking_tokens"], 45);
+    }
+
+    #[test]
+    fn usage_for_prefers_reported_over_estimate() {
+        let r = usage_for("openrouter", "openai/gpt-4o", 1000, 200, 500, 50);
+        assert_eq!(r.provider, "openrouter");
+        assert_eq!(r.model, "openai/gpt-4o");
+        assert_eq!(r.prompt_tokens, 1000);
+        assert_eq!(r.completion_tokens, 200);
+        assert_eq!(r.total_tokens, 1200);
+    }
+
+    #[test]
+    fn usage_for_falls_back_to_estimate_when_unreported() {
+        let r = usage_for("ollama", "qwen3", 0, 0, 400, 40);
+        assert_eq!(r.prompt_tokens, 400);
+        assert_eq!(r.completion_tokens, 40);
+        assert_eq!(r.total_tokens, 440);
     }
 }

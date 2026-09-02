@@ -246,7 +246,7 @@ async fn main() {
     );
 
     match main_impl::run_chat(&sink, &memory, req).await {
-        Ok(ChatResult { content, tool_calls, context_tokens, thinking_tokens }) => {
+        Ok(ChatResult { content, tool_calls, context_tokens, thinking_tokens, .. }) => {
             println!("\n\n{}", content);
             if !tool_calls.is_empty() {
                 eprintln!("\n[trace] {} tool call(s), context ~{} tokens (incl. ~{} thinking)",

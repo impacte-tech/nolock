@@ -1,15 +1,58 @@
 // ---------------------------------------------------------------------------
 // Sessions — project-local conversation persistence (`.sessions/` directory).
 //
-// Mirrors the Rust `SessionRecord` struct in `src-tauri/src/main.rs`. Only
-// *metadata* is persisted — the full message history is intentionally NOT
-// stored. The important summary fields are message count, tool-call count,
-// first/last message text, and total token usage.
+// Mirrors the Rust `SessionRecord` struct in `src-tauri/src/main.rs`. Besides
+// metadata, a session file now carries a FULL audit log: every user prompt,
+// every assistant response, every tool call (no exceptions), plus a per-request
+// token-usage breakdown split by provider/model with an optional price/cost.
 // ---------------------------------------------------------------------------
 
 import { invoke } from "@tauri-apps/api/core";
+import { countTokens } from "./tokenizer";
+import { calcCost, getModelPrice } from "./pricing";
 
 export type SessionStatus = "active" | "finished" | "archived";
+
+/** A tool call logged inside a session message (a trimmed ToolCallLog shape,
+ *  matching the Rust `ToolCallLog` JSON so session files round-trip). */
+export interface SessionToolCall {
+  name: string;
+  arguments: string;
+  result_snippet?: string;
+  result_full?: string;
+}
+
+/** A single logged conversation entry persisted in a session file. */
+export interface SessionLogMessage {
+  role: "user" | "assistant" | "system";
+  /** Full API content (may include injected context). */
+  content: string;
+  /** What the user actually typed (user messages only). */
+  displayContent?: string;
+  /** Unix timestamp (seconds). */
+  createdAt?: number;
+  /** Model that produced this message (assistant only). */
+  model?: string;
+  /** Estimated token count for this entry. */
+  tokens?: number;
+  /** Tool calls made on this assistant turn. */
+  toolCalls?: SessionToolCall[];
+}
+
+/** Per-request / per-iteration token usage persisted in a session file. */
+export interface SessionUsageEntry {
+  provider: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** Price per 1M input tokens (USD), when available. */
+  promptPricePerM?: number | null;
+  /** Price per 1M output tokens (USD), when available. */
+  completionPricePerM?: number | null;
+  /** Computed cost (USD), when pricing is available. */
+  cost?: number | null;
+}
 
 export interface SessionRecord {
   id: string;
@@ -23,6 +66,12 @@ export interface SessionRecord {
   lastMessage: string;
   tokenUsage: number;
   contextWindow: number;
+  /** Full conversation log — user prompts + assistant tool calls, no exceptions. */
+  messages?: SessionLogMessage[];
+  /** Per-request/per-iteration token usage split by provider + model. */
+  usage?: SessionUsageEntry[];
+  /** Computed session cost (USD) when pricing is known for the models used. */
+  totalCost?: number | null;
 }
 
 /** Generate a unique, filesystem-safe session id. */
@@ -68,6 +117,54 @@ export interface SessionMetaMessage {
   displayContent?: string;
   toolCalls?: unknown[] | null;
   hookResult?: unknown;
+  model?: string;
+}
+
+/** Serialize a raw tool call (either ChatPanel's or a plain object) to the
+ *  minimal shape we persist in the session log. Uses snake_case field names to
+ *  round-trip through the Rust `ToolCallLog` shape. */
+function serializeToolCall(tc: any): SessionToolCall {
+  return {
+    name: typeof tc?.name === "string" ? tc.name : "",
+    arguments: typeof tc?.arguments === "string" ? tc.arguments : "",
+    result_snippet: typeof tc?.result_snippet === "string" ? tc.result_snippet : tc?.resultSnippet,
+    result_full: typeof tc?.result_full === "string" ? tc.result_full : tc?.resultFull,
+  };
+}
+
+/**
+ * Build the full conversation audit log persisted in a session file — every
+ * user prompt (both what the user typed and the expanded API content) and every
+ * assistant turn including its tool calls. No messages are dropped.
+ *
+ * `baseStartSec` is the session's creation timestamp; message timestamps are
+ * derived from it (`base + index`) so they stay stable across saves instead of
+ * drifting as the conversation grows.
+ */
+export function buildSessionMessageLog(messages: SessionMetaMessage[], baseStartSec?: number): SessionLogMessage[] {
+  const now = Math.floor(Date.now() / 1000);
+  const base = baseStartSec ?? now;
+  return messages.map((m, i) => {
+    const content = m.content || "";
+    const displayContent = m.displayContent ?? undefined;
+    const role = (m.role === "user" || m.role === "assistant" || m.role === "system"
+      ? m.role
+      : "user") as SessionLogMessage["role"];
+    // Keep hook-result noise out of the visible log but still persist it as a
+    // system-style entry so nothing is lost.
+    const toolCalls = Array.isArray(m.toolCalls) && m.toolCalls.length > 0
+      ? m.toolCalls.map(serializeToolCall)
+      : undefined;
+    return {
+      role,
+      content: content || (toolCalls?.length ? "[tool calls]" : ""),
+      displayContent,
+      createdAt: base + i,
+      model: m.model,
+      tokens: countTokens(displayContent || content),
+      toolCalls,
+    };
+  });
 }
 
 /**
@@ -81,7 +178,7 @@ export function buildSessionMetadata(
 ): Omit<SessionRecord, "id" | "summary" | "status" | "createdAt" | "updatedAt"> {
   const real = messages.filter((m) => !m.hookResult);
   const toolCallCount = real.reduce(
-    (sum, m) => sum + (Array.isArray(m.toolCalls) ? m.toolCalls.length : 0),
+    (sum, m) => sum + (Array.isArray(m.toolCalls) ? (m.toolCalls as unknown[]).length : 0),
     0,
   );
   const first = real.find((m) => m.role === "user");
@@ -93,6 +190,88 @@ export function buildSessionMetadata(
     lastMessage: truncate(last?.displayContent || last?.content || ""),
     tokenUsage,
     contextWindow,
+  };
+}
+
+/**
+ * Enrich backend-reported per-iteration usage with pricing and compute the
+ * total session cost. Entries keep the provider/model split so the summary UI
+ * can show exactly what each model cost.
+ */
+export function enrichUsage(usage: SessionUsageEntry[]): SessionUsageEntry[] {
+  if (!Array.isArray(usage)) return [];
+  return usage.map((u) => {
+    const price = getModelPrice(u.model) ?? (u.promptPricePerM != null ? { prompt: u.promptPricePerM, completion: u.completionPricePerM ?? 0 } : null);
+    const cost = u.cost ?? calcCost(price, u.promptTokens, u.completionTokens);
+    return {
+      ...u,
+      promptPricePerM: price?.prompt ?? u.promptPricePerM ?? null,
+      completionPricePerM: price?.completion ?? u.completionPricePerM ?? null,
+      cost: cost ?? null,
+    };
+  });
+}
+
+export interface SessionUsageSummary {
+  /** Rows grouped by provider + model with summed tokens/cost. */
+  rows: {
+    provider: string;
+    model: string;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cost: number | null;
+    promptPricePerM: number | null;
+    completionPricePerM: number | null;
+  }[];
+  totalTokens: number;
+  /** Total cost, or null when no pricing is known for any model used. */
+  totalCost: number | null;
+}
+
+/** Aggregate per-request usage entries into a per provider/model summary. */
+export function summarizeUsage(usage: SessionUsageEntry[] | undefined): SessionUsageSummary {
+  const entries = Array.isArray(usage) ? enrichUsage(usage) : [];
+  const rows = new Map<string, SessionUsageSummary["rows"][number]>();
+  let totalTokens = 0;
+  let anyCost = false;
+  let totalCost = 0;
+
+  for (const u of entries) {
+    totalTokens += u.totalTokens || u.promptTokens + u.completionTokens;
+    const key = `${u.provider}\u0000${u.model}`;
+    const existing = rows.get(key);
+    if (existing) {
+      existing.promptTokens += u.promptTokens;
+      existing.completionTokens += u.completionTokens;
+      existing.totalTokens += u.totalTokens || u.promptTokens + u.completionTokens;
+      if (u.cost != null) {
+        existing.cost = (existing.cost ?? 0) + u.cost;
+        anyCost = true;
+        totalCost += u.cost;
+      }
+    } else {
+      rows.set(key, {
+        provider: u.provider,
+        model: u.model,
+        promptTokens: u.promptTokens,
+        completionTokens: u.completionTokens,
+        totalTokens: u.totalTokens || u.promptTokens + u.completionTokens,
+        cost: u.cost ?? null,
+        promptPricePerM: u.promptPricePerM ?? null,
+        completionPricePerM: u.completionPricePerM ?? null,
+      });
+      if (u.cost != null) {
+        anyCost = true;
+        totalCost += u.cost;
+      }
+    }
+  }
+
+  return {
+    rows: [...rows.values()].sort((a, b) => b.totalTokens - a.totalTokens),
+    totalTokens,
+    totalCost: anyCost ? totalCost : null,
   };
 }
 

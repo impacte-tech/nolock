@@ -7,6 +7,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { cacheModelPrices, type ModelPrice } from "./pricing";
 
 export interface ModelInfo {
   /** Unique model identifier used in API requests (e.g. "openai/gpt-4o") */
@@ -40,16 +41,20 @@ interface RustModelListItem {
   name: string;
   is_free: boolean;
   zero_data_retention: boolean;
+  /** Per-1M-token pricing (USD) when the provider reports it. */
+  pricing?: { prompt: number; completion: number } | null;
 }
 
 /**
  * Fetches available models via the Rust backend (avoids CORS).
  *
+ * Also populates the localStorage price cache so the session summary can
+ * estimate costs for whichever model the user actually chats with.
+ *
  * @param provider - The backend provider value ("openrouter" | "opencode" | …)
  * @param baseUrl  - Server URL
  * @param apiKey   - API key (required for OpenRouter)
  * @param filters  - Optional filters to apply server-side (if supported)
- * @returns        - Array of ModelInfo objects
  */
 export async function fetchModels(
   provider: string,
@@ -75,11 +80,30 @@ export async function fetchModels(
     },
   });
 
+  // Cache any provider-reported pricing for later cost estimation.
+  const priceMap: Record<string, ModelPrice> = {};
+  for (const m of items) {
+    if (m.pricing && m.pricing.prompt >= 0 && m.pricing.completion >= 0) {
+      priceMap[m.id] = { prompt: m.pricing.prompt, completion: m.pricing.completion };
+    }
+  }
+  cacheModelPrices(priceMap);
+
   return items.map((m) => ({
     id: m.id,
     name: m.name,
     isFree: m.is_free,
     zeroDataRetention: m.zero_data_retention,
+    ...(m.pricing
+      ? {
+          pricing: {
+            prompt: String(m.pricing.prompt),
+            completion: String(m.pricing.completion),
+            request: "0",
+            image: "0",
+          },
+        }
+      : {}),
   }));
 }
 
