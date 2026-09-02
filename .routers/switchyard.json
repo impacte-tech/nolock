@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "routes": [
     {
       "name": "nemotron-3-tier",
@@ -11,7 +11,7 @@
           "label": "Gemma 4 e2b",
           "backend": "ollama",
           "model": "gemma4:e2b",
-          "costPer1k": 0.00000
+          "costPer1k": 0.0
         },
         {
           "id": "super",
@@ -33,13 +33,26 @@
         "model": "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU",
         "prompt": "You are a model router for a coding agent. Classify the user's task and choose the LEAST powerful model that can still reliably complete it.\n\nReturn a JSON verdict with exactly these fields:\n- \"route\": one of \"lightning\", \"super\", \"ultra\"\n- \"reason\": a short justification (string)\n\nRules:\n- \"lightning\": simple, well-specified tasks — greetings, hello-world, single-file edits with a complete output contract or deterministic validator.\n- \"super\": moderately complex tasks needing stronger reasoning — multi-step refactors, debugging, feature work with clear requirements but no specialized capability.\n- \"ultra\":the hardest tasks — undocumented behavior, noisy media extraction, deep multi-step reasoning, ambiguous requirements with high stakes, or reproducing hidden state.\n\nChoose the LEAST powerful model that can still reliably complete the task. Do not output any other field.",
         "responseSchema": {
-          "type": "object",
           "additionalProperties": false,
-          "required": ["route", "reason"],
           "properties": {
-            "route": { "type": "string", "enum": ["lightning", "super", "ultra"] },
-            "reason": { "type": "string", "minLength": 1 }
-          }
+            "reason": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "route": {
+              "enum": [
+                "lightning",
+                "super",
+                "ultra"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "route",
+            "reason"
+          ],
+          "type": "object"
         },
         "selector": "/route"
       },
