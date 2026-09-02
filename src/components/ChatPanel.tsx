@@ -34,6 +34,7 @@ import {
 } from "../lib/rlhf";
 import {
   type SessionRecord,
+  type SessionUsageEntry,
   newSessionId,
   listSessions,
   saveSession,
@@ -41,9 +42,13 @@ import {
   archiveSession,
   summarizeMessages,
   buildSessionMetadata,
+  buildSessionMessageLog,
+  enrichUsage,
+  summarizeUsage,
   formatTokens,
   formatSessionTime,
 } from "../lib/sessions";
+import SessionSummary from "./SessionSummary";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -360,12 +365,14 @@ function SessionPicker({
   currentTitle,
   onNew,
   onDelete,
+  onSelect,
 }: {
   sessions: SessionRecord[];
   currentId: string;
   currentTitle: string;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onSelect: (s: SessionRecord) => void;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -405,7 +412,7 @@ function SessionPicker({
                 key={s.id}
                 className={`session-picker-item${s.id === currentId ? " current" : ""}`}
               >
-                <div className="session-picker-item-main">
+                <div className="session-picker-item-main" onClick={() => { onSelect(s); setOpen(false); }}>
                   <span className="session-picker-item-title">
                     {s.summary || s.firstMessage || s.id}
                   </span>
@@ -413,6 +420,9 @@ function SessionPicker({
                     {formatSessionTime(s.updatedAt)}
                     {" · "}{s.messageCount} msg{s.messageCount === 1 ? "" : "s"}
                     {" · "}{s.toolCallCount} tool{s.toolCallCount === 1 ? "" : "s"}
+                    {s.totalCost != null && s.totalCost >= 0.000001
+                      ? ` · ~$${s.totalCost.toFixed(4)}`
+                      : ""}
                   </span>
                   {s.contextWindow > 0 && (
                     <span className="session-picker-item-tokens">
@@ -422,7 +432,10 @@ function SessionPicker({
                 </div>
                 <button
                   className="session-picker-delete"
-                  onClick={() => onDelete(s.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(s.id);
+                  }}
                   title="Delete session"
                 >
                   &times;
@@ -951,6 +964,17 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const sendingRef = useRef(false); // guards against concurrent sendMessage calls
   const stopRequestedRef = useRef(false); // set to true when user clicks stop
   const unlistenRef = useRef<(() => void) | null>(null); // stored stream-token unlisten callback
+  /** Generation epoch — bumped on every new send AND whenever the session is
+   *  cleared/replaced. An in-flight request captures the epoch at its start and
+   *  must re-check it before touching any shared state (stream tokens, context
+   *  meter, usage log, message list). This is what makes "clear context" truly
+   *  cut the old context window: a request that outlives the clear can no
+   *  longer write its (old-conversation) results into the fresh session. */
+  const sendEpochRef = useRef(0);
+  /** Synchronous mirror of `sessionId` so the debounced auto-save (and any
+   *  in-flight persist) can detect that its session was archived/replaced and
+   *  skip the write instead of resurrecting the old session file. */
+  const sessionIdRef = useRef("");
 
   /** Live thinking text from thinking-capable models — shown transiently, never persisted. */
   const [thinkingText, setThinkingText] = useState("");
@@ -1430,23 +1454,60 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     fetchContextLength();
   }, []);
 
-  // ---- Sessions: project-local conversation persistence (metadata only) --
+  // ---- Sessions: project-local conversation persistence --------------------
   const [sessionId, setSessionId] = useState<string>("");
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const createdAtRef = useRef<Record<string, number>>({});
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The session summary overlay opened by clicking a session in the picker.
+  const [summarySession, setSummarySession] = useState<SessionRecord | null>(null);
+  // Per-request / per-iteration token usage accumulated for the current session
+  // (provider + model split). Persisted in the session file for cost accounting.
+  const usageLogRef = useRef<SessionUsageEntry[]>([]);
+  const [usageLog, setUsageLog] = useState<SessionUsageEntry[]>([]);
 
-  /** Persist session metadata (counts, first/last message, token usage) and refresh the list. */
+  /** Record a request's token usage (from the backend `usage` report) into the
+   *  current session's log. The backend reports one entry per tool-loop
+   *  iteration, so the session file ends up with a per-iteration breakdown. */
+  const recordUsage = useCallback((provider: string, model: string, report: unknown) => {
+    const rep = report as { usage?: Array<{ provider?: string; model?: string; promptTokens?: number; completionTokens?: number; totalTokens?: number }> } | null;
+    const raw: SessionUsageEntry[] = Array.isArray(rep?.usage)
+      ? rep.usage
+          .filter((u) => (Number(u.promptTokens) || 0) + (Number(u.completionTokens) || 0) > 0)
+          .map((u) => ({
+            provider: String(u.provider ?? provider),
+            model: String(u.model ?? model),
+            promptTokens: Number(u.promptTokens ?? 0),
+            completionTokens: Number(u.completionTokens ?? 0),
+            totalTokens: Number(u.totalTokens ?? (Number(u.promptTokens ?? 0) + Number(u.completionTokens ?? 0))),
+          }))
+      : [];
+    if (raw.length === 0) return;
+    const next = [...usageLogRef.current, ...raw];
+    usageLogRef.current = next;
+    setUsageLog(next);
+  }, []);
+
+  /** Persist session metadata + the full message log (user prompts + tool
+   *  calls) + per-request token usage, and refresh the session list. */
   const persistSession = useCallback(async (
     id: string,
     msgs: Message[],
     tokenUsage: number,
     contextWindow: number,
+    usage: SessionUsageEntry[],
   ) => {
     if (!rootPath || !id) return;
+    // Stale-write guard: if this session was archived/replaced while a debounced
+    // save was still pending, skip the write — otherwise the old conversation
+    // would be re-written as "active" AFTER its archive, resurrecting it in the
+    // session list and mixing old context into the new session's file.
+    if (id !== sessionIdRef.current) return;
     const now = Math.floor(Date.now() / 1000);
     const createdAt = createdAtRef.current[id] ?? now;
     createdAtRef.current[id] = createdAt;
+    const detailed = enrichUsage(usage);
+    const summary = summarizeUsage(detailed);
     try {
       await saveSession(rootPath, {
         id,
@@ -1455,6 +1516,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         createdAt,
         updatedAt: now,
         ...buildSessionMetadata(msgs, tokenUsage, contextWindow),
+        messages: buildSessionMessageLog(msgs, createdAt),
+        usage: detailed,
+        totalCost: summary.totalCost,
       });
       setSessions(await listSessions(rootPath));
     } catch (e) {
@@ -1462,12 +1526,42 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     }
   }, [rootPath]);
 
-  /** Archive the current session and start a fresh one (clears conversation context). */
+  /** Archive the current session and start a fresh one (clears conversation context).
+   *
+   *  This must produce a COMPLETELY new context window:
+   *  1. Any in-flight generation is invalidated (epoch bump) so its late stream
+   *     tokens, context-token report and usage entries can never bleed into the
+   *     new session.
+   *  2. The pending debounced auto-save is cancelled and the old session is
+   *     flushed + archived up-front, so a stale save can't resurrect it as
+   *     "active" after the switch.
+   *  3. All conversation state (messages, context meter, usage, sub-agent
+   *     windows, backend sub-agent memory) is reset.
+   */
   const startNewSession = useCallback(async () => {
-    if (sessionId && messages.length > 0) {
-      try { await archiveSession(rootPath, sessionId, summarizeMessages(messages)); } catch {}
+    // 1. Invalidate any in-flight request FIRST — its completion handlers check
+    //    the epoch and will discard their results instead of polluting the new
+    //    session (old request context tokens / usage / streamed tokens).
+    sendEpochRef.current += 1;
+    // Reset the stop flag: a previous Stop must not silence the next session.
+    stopRequestedRef.current = false;
+    if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+    // 2. Kill the pending debounced auto-save of the OLD session, then flush a
+    //    final synchronous save + archive while the id is still current. (The
+    //    stale-write guard in persistSession keeps working because sessionIdRef
+    //    still points at the old session until the switch below; the only
+    //    pending timer was cancelled above, so no double-write can resurrect
+    //    the archived file as "active".)
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+    const oldId = sessionId;
+    if (oldId && messages.length > 0) {
+      try { await persistSession(oldId, messages, accumulatedContextTokens, maxTokens, usageLogRef.current); } catch {}
+      try { await archiveSession(rootPath, oldId, summarizeMessages(messages)); } catch {}
     }
+    // 3. Switch to a brand-new session id and clear every piece of carried-over
+    //    conversation state.
     const newId = newSessionId();
+    sessionIdRef.current = newId;
     createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
     setSessionId(newId);
     setMessages([]);
@@ -1481,17 +1575,32 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     setRoutedModel(null);
     routedModelRef.current = null;
     setSubAgents([]);
+    setLiveToolCalls([]);
+    usageLogRef.current = [];
+    setUsageLog([]);
+    // Unblock the input immediately — the invalidated request's cleanup will
+    // skip these flags (stale epoch), so they must be reset here.
+    sendingRef.current = false;
+    setLoading(false);
+    setChatBusy(false);
     // A fresh session resets each sub-agent's conversation memory on the
     // backend so the next @agent trigger starts with clean context.
     try { await invoke("subagent_reset"); } catch {}
     try { setSessions(await listSessions(rootPath)); } catch {}
-  }, [rootPath, sessionId, messages]);
+  }, [rootPath, sessionId, messages, accumulatedContextTokens, maxTokens, persistSession]);
 
   /** Delete a session by id. If it's the current one, start a fresh session. */
   const deleteSessionById = useCallback(async (id: string) => {
     try { await deleteSession(rootPath, id); } catch (e) { console.error(e); }
     if (id === sessionId) {
+      // Invalidate in-flight requests for the deleted session and cancel any
+      // pending auto-save so the deleted conversation can't be re-persisted.
+      sendEpochRef.current += 1;
+      stopRequestedRef.current = false;
+      if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
       const newId = newSessionId();
+      sessionIdRef.current = newId;
       createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
       setSessionId(newId);
       setMessages([]);
@@ -1499,12 +1608,19 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       setThinkingText("");
       setRoutedModel(null);
       routedModelRef.current = null;
+      usageLogRef.current = [];
+      setUsageLog([]);
+      sendingRef.current = false;
+      setLoading(false);
+      setChatBusy(false);
+      try { await invoke("subagent_reset"); } catch {}
     }
     try { setSessions(await listSessions(rootPath)); } catch {}
   }, [rootPath, sessionId]);
 
   // Load the session history and start a fresh session on mount / when the
   // project folder changes. (Messages are not restored — only metadata.)
+  const mountedRootRef = useRef<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -1513,7 +1629,20 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         const list = await listSessions(rootPath);
         if (cancelled) return;
         setSessions(list);
+        // On a PROJECT SWITCH, invalidate anything in-flight from the previous
+        // project and start a completely fresh session — no context carries
+        // across. (On initial mount there is nothing in-flight to invalidate,
+        // and bumping the epoch here would race the first send.)
+        const isProjectSwitch = mountedRootRef.current !== null && mountedRootRef.current !== rootPath;
+        mountedRootRef.current = rootPath;
+        if (isProjectSwitch) {
+          sendEpochRef.current += 1;
+          stopRequestedRef.current = false;
+          if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+          if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+        }
         const newId = newSessionId();
+        sessionIdRef.current = newId;
         createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
         setSessionId(newId);
       } catch (e) {
@@ -1530,12 +1659,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     if (!rootPath || !sessionId || loading) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
-      void persistSession(sessionId, messages, accumulatedContextTokens, maxTokens);
+      void persistSession(sessionId, messages, accumulatedContextTokens, maxTokens, usageLogRef.current);
     }, 800);
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [messages, sessionId, rootPath, accumulatedContextTokens, maxTokens, loading, persistSession]);
+  }, [messages, sessionId, rootPath, accumulatedContextTokens, maxTokens, loading, usageLog, persistSession]);
 
   // ---- Tauri native event listeners for chat input (macOS) -------------
   useEffect(() => {
@@ -1621,6 +1750,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     const lastMsg = messages[messages.length - 1];
     if (!lastMsg || lastMsg.role !== "assistant") return;
 
+    // Claim the current generation epoch. If the session is cleared mid-request,
+    // every state write below is skipped (stale epoch) so the old conversation
+    // can't bleed into the new one.
+    const epoch = ++sendEpochRef.current;
+    // A previous Stop must not discard this generation.
+    stopRequestedRef.current = false;
     sendingRef.current = true;
     setLoading(true);
     setThinkingText("");
@@ -1685,7 +1820,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
       // Stream tokens — they get appended to the existing last assistant message
       unlisten = await listen<{ token: string; thinking: boolean }>("stream-token", (event) => {
-        if (stopRequestedRef.current) return;
+        if (stopRequestedRef.current || epoch !== sendEpochRef.current) return;
         const { token, thinking } = event.payload;
         if (thinking && showThinking) {
           setThinkingText((prev) => prev + token);
@@ -1704,7 +1839,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
       const result: { content: string; tool_calls: ToolCallLog[] } = await invoke("ai_chat", { req: reqBase });
 
-      if (stopRequestedRef.current) return;
+      if (stopRequestedRef.current || epoch !== sendEpochRef.current) return;
 
       // Use the backend's reported context tokens (full request context incl.
       // tool iterations) as the authoritative session count when available.
@@ -1713,6 +1848,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         if (reportedCtx > 0) {
           setAccumulatedContextTokens(reportedCtx);
         }
+        // Persist this request's per-iteration token usage (provider/model split).
+        recordUsage(backend, chatModel, result);
       }
 
       // Finalize — append the complete response to the existing assistant message
@@ -1744,12 +1881,17 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         unlistenRef.current();
         unlistenRef.current = null;
       }
-      sendingRef.current = false;
-      setLoading(false);
-      setThinkingText("");
-      setChatBusy(false);
+      // Only clean up the shared UI flags when this generation is still the
+      // current one — a stale (invalidated) request must not clobber a newer
+      // request's loading state.
+      if (epoch === sendEpochRef.current) {
+        sendingRef.current = false;
+        setLoading(false);
+        setThinkingText("");
+        setChatBusy(false);
+      }
     }
-  }, [loading, messages, rootPath, showThinking, hookBusy]);
+  }, [loading, messages, rootPath, showThinking, hookBusy, recordUsage]);
 
   /** Find the question (user message) that precedes an assistant message at a given index. */
   const findQuestionForAssistant = useCallback((assistantIndex: number): string => {
@@ -2035,6 +2177,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     // Prevent sending while a DPO response choice is pending
     if (messages.some((m) => m.dpoResponses !== undefined)) return;
 
+    // Claim the current generation epoch and clear any stale stop request: a
+    // previous Stop (or an invalidated request from a cleared session) must not
+    // discard THIS generation's stream/response.
+    const epoch = ++sendEpochRef.current;
+    stopRequestedRef.current = false;
     sendingRef.current = true;
 
     // ---- /clear command ----
@@ -2384,8 +2531,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         try {
           // First call: normal parameters
           const resultA: { content: string; tool_calls?: import("../lib/rlhf").ToolCallLog[] } = await invoke("ai_chat", { req: reqBase });
+          if (epoch !== sendEpochRef.current) return; // session cleared mid-request
           respA = resultA.content || "(no response)";
           toolCallsA = resultA.tool_calls || [];
+          recordUsage(backend, model, resultA);
 
           // Second call: slightly higher temperature for diversity
           const baseTemp = chatTemperature ? parseFloat(chatTemperature) : 0.7;
@@ -2393,9 +2542,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           const resultB: { content: string; tool_calls?: import("../lib/rlhf").ToolCallLog[] } = await invoke("ai_chat", {
             req: { ...reqBase, temperature: altTemp },
           });
+          if (epoch !== sendEpochRef.current) return; // session cleared mid-request
           respB = resultB.content || "(no response)";
           toolCallsB = resultB.tool_calls || [];
+          recordUsage(backend, model, resultB);
         } catch (e: any) {
+          if (epoch !== sendEpochRef.current) return; // session cleared mid-request
           // Fall back to a single error message
           setMessages((prev) => [
             ...prev,
@@ -2421,7 +2573,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       } else {
         // ---- Normal mode: stream a single response ----
         unlisten = await listen<{ token: string; thinking: boolean }>("stream-token", (event) => {
-          if (stopRequestedRef.current) return;
+          // Discard tokens from a stopped OR invalidated (session-cleared)
+          // generation — they belong to the old context window, not this one.
+          if (stopRequestedRef.current || epoch !== sendEpochRef.current) return;
           const { token, thinking } = event.payload;
           if (thinking && showThinking) {
             // Thinking tokens go into the transient thinking indicator
@@ -2448,10 +2602,16 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           req: reqBase,
         });
 
-        // If the user clicked Stop while waiting, discard
-        if (stopRequestedRef.current) {
+        // If the user clicked Stop — or the session was cleared while this
+        // request was in flight — discard the result entirely. Writing it back
+        // would attach the OLD conversation's response (and its reported
+        // context size / usage) to the NEW, empty session.
+        if (stopRequestedRef.current || epoch !== sendEpochRef.current) {
           return;
         }
+
+        // Persist this request's per-iteration token usage (provider/model split).
+        recordUsage(backend, model, result);
 
         // Accumulate assistant response tokens. When the backend reports the exact
         // context tokens it processed for this request (including ALL tool-loop
@@ -2491,6 +2651,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         scanAgentCommands(result.tool_calls as unknown as HookToolCallLog[]);
       }
     } catch (e: any) {
+      if (epoch !== sendEpochRef.current) return; // session cleared mid-request
       // On error, replace the placeholder/partial message with the error.
       // If streaming tokens already filled part of the message, replace it
       // instead of leaving an orphaned partial response.
@@ -2513,13 +2674,18 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         unlistenRef.current();
         unlistenRef.current = null;
       }
-      sendingRef.current = false;
-      setLoading(false);
-      setThinkingText("");
-      setLiveToolCalls([]);
-      setChatBusy(false);
+      // Only clean up the shared UI flags when this generation is still the
+      // current one — a stale (invalidated) request must not clobber a newer
+      // request's loading state or clear its live tool windows.
+      if (epoch === sendEpochRef.current) {
+        sendingRef.current = false;
+        setLoading(false);
+        setThinkingText("");
+        setLiveToolCalls([]);
+        setChatBusy(false);
+      }
     }
-  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy]);
+  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy, recordUsage]);
 
   return (
     <div className="chat-panel" style={style}>
@@ -2544,6 +2710,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
               }
               onNew={() => void startNewSession()}
               onDelete={(id) => void deleteSessionById(id)}
+              onSelect={(s) => setSummarySession(s)}
             />
           )}
           {rootPath && onOpenAgentManager && (
@@ -3059,6 +3226,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           {loading ? "Thinking..." : dpoPending ? "Choose response..." : hookBusy ? "Hook running..." : "Send"}
         </button>
       </div>
+      {summarySession && (
+        <SessionSummary
+          session={summarySession}
+          onClose={() => setSummarySession(null)}
+        />
+      )}
     </div>
   );
 }

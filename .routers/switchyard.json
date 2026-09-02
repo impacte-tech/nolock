@@ -8,24 +8,24 @@
       "targets": [
         {
           "id": "lightning",
-          "label": "Nemotron 3.5 Lightning",
-          "backend": "openrouter",
-          "model": "nvidia/nemotron-3.5-lightning",
-          "costPer1k": 0.00008
+          "label": "Gemma 4 e2b",
+          "backend": "ollama",
+          "model": "gemma4:e2b",
+          "costPer1k": 0.00000
         },
         {
           "id": "super",
-          "label": "Nemotron Super",
+          "label": "GLM 5.3 Flash",
           "backend": "openrouter",
-          "model": "nvidia/nemotron-3-super-120b-a12b",
-          "costPer1k": 0.000085
+          "model": "z-ai/glm-5.3-flash",
+          "costPer1k": 0.00075
         },
         {
           "id": "ultra",
-          "label": "Nemotron Ultra",
+          "label": "Claude Fable 5.1",
           "backend": "openrouter",
-          "model": "nvidia/nemotron-3-ultra-550b-a55b",
-          "costPer1k": 0.0005
+          "model": "anthropic/claude-fable-5.1",
+          "costPer1k": 0.1
         }
       ],
       "judge": {

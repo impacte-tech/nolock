@@ -1799,6 +1799,7 @@ html, body, #root {
   gap: 2px;
   min-width: 0;
   flex: 1;
+  cursor: pointer;
 }
 
 .session-picker-item-title {
@@ -4332,4 +4333,317 @@ select.field-input {
   background: rgba(100, 180, 255, 0.2);
   color: #64b4ff;
   border: 1px solid rgba(100, 180, 255, 0.3);
+}
+
+/* ---------------------------------------------------------------------------
+ * Session summary overlay (opened by clicking a session in the agent chat)
+ * ------------------------------------------------------------------------- */
+
+.session-summary-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 30px;
+}
+
+.session-summary {
+  background: var(--panel-bg, #1b1e26);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: min(820px, 100%);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.session-summary-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--panel-bg, #1b1e26);
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+.session-summary-title-block {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.session-summary-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #dcdcdc);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-summary-meta,
+.session-summary-stats {
+  font-size: 10.5px;
+  color: var(--text-muted, #8a8fa3);
+}
+
+.session-summary-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #8a8fa3);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.session-summary-close:hover {
+  color: #e06c75;
+  background: rgba(224, 108, 117, 0.12);
+}
+
+.session-summary-body-scroll {
+  overflow-y: auto;
+  padding: 0 16px;
+}
+
+.session-summary-section {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.session-summary-section:last-child {
+  border-bottom: none;
+}
+
+.session-summary-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-secondary, #aab);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.session-summary-section-sub {
+  text-transform: none;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-muted, #8a8fa3);
+  font-size: 10.5px;
+}
+
+.session-summary-empty {
+  font-size: 12px;
+  color: var(--text-muted, #8a8fa3);
+  padding: 6px 0;
+}
+
+.session-summary-total {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: var(--text-primary, #dcdcdc);
+  margin-bottom: 8px;
+}
+
+.session-summary-total-cost {
+  font-weight: 700;
+  color: #e5c07b;
+}
+
+.session-summary-total-cost.muted {
+  color: var(--text-muted, #8a8fa3);
+  font-weight: 400;
+}
+
+.session-summary-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.session-summary-usage-table th,
+.session-summary-usage-table td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary, #aab);
+}
+
+.session-summary-usage-table th {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-muted, #8a8fa3);
+}
+
+.session-summary-usage-table td.num,
+.session-summary-usage-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-summary-usage-table .session-summary-model-cell {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-summary-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-summary-msg {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.session-summary-msg-user {
+  border-left: 2px solid #61afef;
+}
+
+.session-summary-msg-assistant {
+  border-left: 2px solid #98c379;
+}
+
+.session-summary-msg-system {
+  border-left: 2px solid #d19a66;
+}
+
+.session-summary-msg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.session-summary-msg-role {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.session-summary-msg-role.user {
+  background: rgba(97, 175, 239, 0.18);
+  color: #61afef;
+}
+
+.session-summary-msg-role.assistant {
+  background: rgba(152, 195, 121, 0.18);
+  color: #98c379;
+}
+
+.session-summary-msg-role.system {
+  background: rgba(209, 154, 102, 0.18);
+  color: #d19a66;
+}
+
+.session-summary-msg-model {
+  font-size: 10px;
+  color: var(--text-muted, #8a8fa3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-summary-msg-tokens {
+  font-size: 10px;
+  color: var(--text-muted, #8a8fa3);
+  margin-left: auto;
+}
+
+.session-summary-msg-time {
+  font-size: 10px;
+  color: var(--text-muted, #8a8fa3);
+}
+
+.session-summary-msg-body {
+  cursor: pointer;
+}
+
+.session-summary-msg-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary, #dcdcdc);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.session-summary-msg-more {
+  color: var(--text-muted, #8a8fa3);
+  font-style: italic;
+}
+
+.session-summary-toolcalls {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.session-summary-toolcall {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary, #aab);
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.session-summary-toolcall-chevron {
+  color: var(--text-muted, #8a8fa3);
+  font-size: 10px;
+}
+
+.session-summary-toolcall-name {
+  font-weight: 600;
+  color: #c678dd;
+}
+
+.session-summary-toolcall-summary {
+  color: var(--text-muted, #8a8fa3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-summary-toolcall-args {
+  width: 100%;
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary, #aab);
 }
