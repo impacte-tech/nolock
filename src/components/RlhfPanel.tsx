@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import NumberField, { parseInt10 } from "./NumberField";
 import { readRlhfSettings, DEFAULT_KTO_DIR, DEFAULT_DPO_DIR, type RlhfSettings } from "../lib/rlhf";
 
 interface Props {
@@ -167,13 +168,13 @@ export default function RlhfPanel({ visible, onClose }: Props) {
 
           {/* DPO interval */}
           <label className="field-label">DPO prompt interval (messages)</label>
-          <input
-            className="field-input"
-            type="number"
+          <NumberField
+            value={dpoInterval}
+            onChange={(n) => setDpoInterval(n ?? DEFAULTS.dpoInterval)}
             min={1}
             max={100}
-            value={dpoInterval}
-            onChange={(e) => setDpoInterval(Math.max(1, parseInt(e.target.value, 10) || 1))}
+            emptyValue={DEFAULTS.dpoInterval}
+            parse={parseInt10}
             disabled={!dpoEnabled}
             style={{ width: 80 }}
           />

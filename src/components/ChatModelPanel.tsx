@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import ModelSelector from "./ModelSelector";
 import Select from "./Select";
+import NumberField, { parseInt10 } from "./NumberField";
 import { BACKENDS, resolveBackendUrl, getChatBackend, isCloudBackend } from "../lib/backends";
 
 interface Props {
@@ -136,13 +137,11 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           {isCloudBackend(backend) ? (
             <>
               <label className="field-label">Cloud Max Tokens</label>
-              <input
-                className="field-input"
-                type="number"
+              <NumberField
+                value={cloudMaxTokens}
+                onChange={(n) => setCloudMaxTokens(n == null ? "" : String(n))}
                 min={1}
                 step={64}
-                value={cloudMaxTokens}
-                onChange={(e) => setCloudMaxTokens(e.target.value)}
                 placeholder="256000 (default)"
                 style={{ width: 120 }}
               />
@@ -156,14 +155,14 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           ) : (
             <>
               <label className="field-label">Max Tokens</label>
-              <input
-                className="field-input"
-                type="number"
+              <NumberField
+                value={maxTokens}
+                onChange={(n) => setMaxTokens(n ?? 2048)}
                 min={64}
                 max={1000000}
                 step={64}
-                value={maxTokens}
-                onChange={(e) => setMaxTokens(Math.max(64, parseInt(e.target.value, 10) || 2048))}
+                emptyValue={2048}
+                parse={parseInt10}
                 style={{ width: 120 }}
               />
               <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
@@ -178,13 +177,13 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           )}
 
           <label className="field-label">Context Window</label>
-          <input
-            className="field-input"
-            type="number"
+          <NumberField
+            value={contextLength}
+            onChange={(n) => setContextLength(n ?? 128_000)}
             min={1024}
             step={1024}
-            value={contextLength}
-            onChange={(e) => setContextLength(Math.max(1024, parseInt(e.target.value, 10) || 128_000))}
+            emptyValue={128_000}
+            parse={parseInt10}
             style={{ width: 140 }}
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>
@@ -194,14 +193,14 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           </span>
 
           <label className="field-label">Reasoning-Only Retries</label>
-          <input
-            className="field-input"
-            type="number"
+          <NumberField
+            value={reasoningRetries}
+            onChange={(n) => setReasoningRetries(n ?? 8)}
             min={1}
             max={20}
             step={1}
-            value={reasoningRetries}
-            onChange={(e) => setReasoningRetries(Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 8)))}
+            emptyValue={8}
+            parse={parseInt10}
             style={{ width: 90 }}
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>

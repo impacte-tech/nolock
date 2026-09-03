@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import NumberField, { parseInt10 } from "./NumberField";
 import { setSecret } from "../lib/secrets";
 import { getChatBackend } from "../lib/backends";
 
@@ -281,13 +282,13 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
               <label style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)", display: "block", marginBottom: 4 }}>
                 Max Tool Iterations
               </label>
-              <input
-                className="field-input"
-                type="number"
+              <NumberField
+                value={maxIterations}
+                onChange={(n) => setMaxIterations(n ?? 10)}
                 min={1}
                 max={100}
-                value={maxIterations}
-                onChange={(e) => setMaxIterations(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                emptyValue={10}
+                parse={parseInt10}
                 style={{ fontSize: 12, padding: "6px 8px", width: 80 }}
               />
               <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>

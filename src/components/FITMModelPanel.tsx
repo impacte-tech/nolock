@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import ModelSelector from "./ModelSelector";
 import Select from "./Select";
+import NumberField, { parseInt10 } from "./NumberField";
 import { BACKENDS, resolveBackendUrl, getFitmBackend } from "../lib/backends";
 
 interface Props {
@@ -119,14 +120,14 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
           </div>
 
           <label className="field-label">Max Tokens</label>
-          <input
-            className="field-input"
-            type="number"
+          <NumberField
+            value={maxTokens}
+            onChange={(n) => setMaxTokens(n ?? 64)}
             min={16}
             max={4096}
             step={16}
-            value={maxTokens}
-            onChange={(e) => setMaxTokens(Math.max(16, parseInt(e.target.value, 10) || 64))}
+            emptyValue={64}
+            parse={parseInt10}
             style={{ width: 120 }}
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
