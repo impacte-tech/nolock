@@ -93,4 +93,75 @@ describe("summarizeMessages / summarizeUsage", () => {
     expect(enriched[0].completionPricePerM).toBe(10);
     expect(enriched[0].cost).toBeCloseTo(7.5);
   });
+
+  it("counts the model requests (iterations) behind each row", () => {
+    const s = summarizeUsage([
+      { provider: "openrouter", model: "a/b", promptTokens: 100, completionTokens: 10, totalTokens: 110 },
+      { provider: "openrouter", model: "a/b", promptTokens: 200, completionTokens: 20, totalTokens: 220 },
+      { provider: "openrouter", model: "a/b", promptTokens: 300, completionTokens: 30, totalTokens: 330 },
+    ]);
+    expect(s.rows).toHaveLength(1);
+    expect(s.rows[0].requests).toBe(3);
+    expect(s.rows[0].totalTokens).toBe(660);
+  });
+
+  it("refreshes row prices from later entries (price cache filled mid-session)", () => {
+    const s = summarizeUsage([
+      { provider: "openrouter", model: "a/b", promptTokens: 100, completionTokens: 10, totalTokens: 110 },
+      {
+        provider: "openrouter", model: "a/b", promptTokens: 100, completionTokens: 10, totalTokens: 110,
+        promptPricePerM: 2, completionPricePerM: 8, cost: 0.0008,
+      },
+    ]);
+    // The first entry had no pricing; the row must still surface the price
+    // discovered by the second request instead of showing "—".
+    expect(s.rows[0].promptPricePerM).toBe(2);
+    expect(s.rows[0].completionPricePerM).toBe(8);
+    expect(s.rows[0].cost).toBeCloseTo(0.0008);
+  });
+
+  it("flags the total as a lower bound when some models have no pricing", () => {
+    const s = summarizeUsage([
+      { provider: "openrouter", model: "a/b", promptTokens: 1_000_000, completionTokens: 0, totalTokens: 1_000_000, cost: 2.5 },
+      { provider: "ollama", model: "qwen3", promptTokens: 10, completionTokens: 0, totalTokens: 10, cost: null },
+    ]);
+    expect(s.totalCost).toBeCloseTo(2.5);
+    expect(s.partialCost).toBe(true);
+  });
+
+  it("does not flag partial cost when every model is priced", () => {
+    // Note: local providers (ollama/llamacpp) can never be priced — use two
+    // remote models with cached prices for the "fully priced" scenario.
+    localStorage.setItem(
+      "nolock.modelPrices",
+      JSON.stringify({ "a/b": { prompt: 1, completion: 1 }, "c/d": { prompt: 0.5, completion: 0.5 } }),
+    );
+    const s = summarizeUsage([
+      { provider: "openrouter", model: "a/b", promptTokens: 100, completionTokens: 0, totalTokens: 100 },
+      { provider: "openrouter", model: "c/d", promptTokens: 100, completionTokens: 0, totalTokens: 100 },
+    ]);
+    expect(s.partialCost).toBe(false);
+    expect(s.totalCost).not.toBeNull();
+  });
+
+  it("never prices local providers — cost stays unavailable, not $0", () => {
+    // Even with a stale zero price cached for the model id, Ollama / llama.cpp
+    // entries must report "cost unavailable" ("—"), never "$0".
+    localStorage.setItem(
+      "nolock.modelPrices",
+      JSON.stringify({ "qwen3": { prompt: 0, completion: 0 } }),
+    );
+    const enriched = enrichUsage([
+      { provider: "ollama", model: "qwen3", promptTokens: 400, completionTokens: 40, totalTokens: 440 },
+      { provider: "llamacpp", model: "mistral-7b", promptTokens: 400, completionTokens: 40, totalTokens: 440 },
+    ]);
+    for (const e of enriched) {
+      expect(e.promptPricePerM).toBeNull();
+      expect(e.completionPricePerM).toBeNull();
+      expect(e.cost).toBeNull();
+    }
+    const s = summarizeUsage(enriched);
+    expect(s.totalCost).toBeNull();
+    expect(s.partialCost).toBe(false);
+  });
 });

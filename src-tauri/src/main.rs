@@ -861,6 +861,382 @@ fn archive_session(root_path: String, id: String, summary: String) -> Result<(),
 }
 
 // ---------------------------------------------------------------------------
+// Git — per-session changed files + per-file diffs (session summary UI)
+// ---------------------------------------------------------------------------
+
+/// The well-known SHA-1 of git's empty tree. Used as the diff base when the
+/// session predates the repository's first commit (every tracked file then
+/// shows up as "added").
+const GIT_EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// A file changed during a session window, computed as the diff between the
+/// last commit at/before the session start and the current working tree
+/// (committed + staged + unstaged changes) plus untracked files.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitChangedFile {
+    /// Repo-root-relative path (the NEW path for renames).
+    path: String,
+    /// "added" | "modified" | "deleted" | "renamed"
+    status: String,
+    /// Previous path (renames only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_path: Option<String>,
+    /// Lines added (untracked files: total line count). Null for binary files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    insertions: Option<u64>,
+    /// Lines deleted. Null for binary files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deletions: Option<u64>,
+    /// True when the file is untracked (never committed).
+    untracked: bool,
+}
+
+/// The unified git diff of a single file for a session window.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitFileDiff {
+    path: String,
+    /// "added" | "modified" | "deleted" | "renamed"
+    status: String,
+    /// Previous path (renames only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    old_path: Option<String>,
+    /// Raw unified diff (`git diff --no-color`). Empty when there is nothing
+    /// to show (binary files still carry a header).
+    diff: String,
+}
+
+/// Run `git <args>` in `dir` and return stdout. Every arg is passed as a single
+/// process argument (never through a shell), so repo paths can never be
+/// re-interpreted as shell syntax.
+fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let hint = stderr.trim();
+        let hint = if hint.is_empty() {
+            format!("exit code {}", out.status)
+        } else {
+            hint.to_string()
+        };
+        return Err(format!("git failed: {}", hint));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Resolve the repository toplevel for `root_path` (which may itself be a
+/// subdirectory of the repo). Returns an error when the folder is not inside a
+/// git work tree.
+fn git_toplevel(root_path: &str) -> Result<std::path::PathBuf, String> {
+    let root = std::path::Path::new(root_path);
+    if !root.exists() {
+        return Err(format!("Project folder not found: {}", root_path));
+    }
+    // `--show-toplevel` fails outside a work tree (bare repo / no repo).
+    let out = run_git(root, &["rev-parse", "--show-toplevel"])?;
+    let top = out.trim();
+    if top.is_empty() {
+        return Err("Not a git repository".to_string());
+    }
+    Ok(std::path::PathBuf::from(top))
+}
+
+/// Resolve the diff base for a session window: the last commit whose commit
+/// date is at/before `since_ts`. Falls back to the empty tree when the session
+/// predates the first commit.
+fn git_base_ref(top: &std::path::Path, since_ts: u64) -> Result<String, String> {
+    let out = run_git(
+        top,
+        &["rev-list", "-1", &format!("--before=@{}", since_ts), "HEAD"],
+    )?;
+    let base = out.trim();
+    if base.is_empty() {
+        Ok(GIT_EMPTY_TREE.to_string())
+    } else {
+        Ok(base.to_string())
+    }
+}
+
+/// Reject path traversal / absolute paths before handing a repo-relative path
+/// to git (defence in depth — the value normally comes from our own list).
+fn sanitize_repo_path(path: &str) -> Result<String, String> {
+    let p = path.trim();
+    if p.is_empty() {
+        return Err("Empty file path".to_string());
+    }
+    if p.starts_with('/') || p.starts_with('\\') {
+        return Err(format!("Path must be repo-relative: {}", path));
+    }
+    for seg in p.split(['/', '\\']) {
+        if seg == ".." {
+            return Err(format!("Path must stay inside the repository: {}", path));
+        }
+    }
+    Ok(p.to_string())
+}
+
+/// Map a single-letter git status code to the label used by the session UI.
+fn git_status_label(code: char) -> &'static str {
+    match code {
+        'A' => "added",
+        'D' => "deleted",
+        'R' | 'C' => "renamed",
+        _ => "modified", // M, T (typechange), U, X …
+    }
+}
+
+/// One `git diff --numstat -z` entry: line counts per file. `None` counts mean
+/// binary files (git reports `-`).
+#[derive(Debug, PartialEq, Clone)]
+struct NumStatEntry {
+    added: Option<u64>,
+    deleted: Option<u64>,
+    /// Old path for renames (git -z emits old + new as separate NUL tokens).
+    old_path: Option<String>,
+    path: String,
+}
+
+/// Parse the NUL-delimited `git diff --numstat -z` output:
+///   plain:      `added\tdeleted\tpath\0`
+///   binary:     `-\t-\tpath\0`
+///   rename:     `added\tdeleted\t\0old\0new\0`
+fn parse_git_numstat_z(out: &str) -> Vec<NumStatEntry> {
+    let mut parts = out.split('\0');
+    let mut entries = Vec::new();
+    while let Some(tok) = parts.next() {
+        if tok.is_empty() {
+            continue; // trailing NUL / separators
+        }
+        let mut segs = tok.splitn(3, '\t');
+        let added_raw = segs.next().unwrap_or("");
+        let deleted_raw = segs.next().unwrap_or("");
+        let rest = segs.next().unwrap_or("");
+        // "-" (binary) fails to parse → None.
+        let counts = match (added_raw.parse::<u64>(), deleted_raw.parse::<u64>()) {
+            (Ok(a), Ok(d)) => (Some(a), Some(d)),
+            _ => (None, None),
+        };
+        if rest.is_empty() {
+            // Rename: the old and new paths follow as separate NUL tokens.
+            let old = parts.next().unwrap_or("");
+            let new = parts.next().unwrap_or("");
+            if !new.is_empty() {
+                entries.push(NumStatEntry {
+                    added: counts.0,
+                    deleted: counts.1,
+                    old_path: (!old.is_empty()).then(|| old.to_string()),
+                    path: new.to_string(),
+                });
+            }
+        } else {
+            entries.push(NumStatEntry {
+                added: counts.0,
+                deleted: counts.1,
+                old_path: None,
+                path: rest.to_string(),
+            });
+        }
+    }
+    entries
+}
+
+/// One `git diff --name-status -z` entry.
+#[derive(Debug, PartialEq, Clone)]
+struct NameStatusEntry {
+    /// Single-letter git status code (A/M/D/R/C/T/…).
+    code: char,
+    path: String,
+    old_path: Option<String>,
+}
+
+/// Parse the NUL-delimited `git diff --name-status -z` output:
+///   plain:  `X\0path\0`          (X = A/M/D/T/…)
+///   rename: `R100\0old\0new\0`   (also C for copies)
+fn parse_git_name_status_z(out: &str) -> Vec<NameStatusEntry> {
+    let mut parts = out.split('\0').filter(|s| !s.is_empty());
+    let mut entries = Vec::new();
+    while let Some(status) = parts.next() {
+        let code = status.chars().next().unwrap_or('M');
+        if code == 'R' || code == 'C' {
+            let old = parts.next().unwrap_or("");
+            let new = parts.next().unwrap_or("");
+            if !new.is_empty() {
+                entries.push(NameStatusEntry {
+                    code,
+                    path: new.to_string(),
+                    old_path: Some(old.to_string()),
+                });
+            }
+        } else {
+            let p = parts.next().unwrap_or("");
+            if !p.is_empty() {
+                entries.push(NameStatusEntry {
+                    code,
+                    path: p.to_string(),
+                    old_path: None,
+                });
+            }
+        }
+    }
+    entries
+}
+
+/// List the files changed during a session window (base commit .. working
+/// tree + untracked), for the session summary's "Changed files" section.
+#[tauri::command]
+fn git_session_files(root_path: String, since_ts: u64) -> Result<Vec<GitChangedFile>, String> {
+    if !root_path.trim().is_empty() {
+        let top = git_toplevel(&root_path)?;
+        let base = git_base_ref(&top, since_ts)?;
+
+        // Tracked changes (committed + staged + unstaged) vs the session base.
+        let name_status = run_git(
+            &top,
+            &["diff", "--name-status", "-z", "--find-renames", &base, "--"],
+        )?;
+        let numstat = run_git(
+            &top,
+            &["diff", "--numstat", "-z", "--find-renames", &base, "--"],
+        )?;
+
+        // Untracked files (respecting .gitignore) never appear in `git diff`.
+        let others = run_git(
+            &top,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+        )?;
+
+        let mut files: Vec<GitChangedFile> = parse_git_name_status_z(&name_status)
+            .into_iter()
+            .map(|e| GitChangedFile {
+                path: e.path.clone(),
+                status: git_status_label(e.code).to_string(),
+                old_path: e.old_path,
+                insertions: None,
+                deletions: None,
+                untracked: false,
+            })
+            .collect();
+        let mut by_path: std::collections::HashMap<String, &mut GitChangedFile> = files
+            .iter_mut()
+            .map(|f| (f.path.clone(), f))
+            .collect();
+        for st in parse_git_numstat_z(&numstat) {
+            if let Some(f) = by_path.get_mut(&st.path) {
+                f.insertions = st.added;
+                f.deletions = st.deleted;
+            }
+        }
+
+        for p in others.split('\0').filter(|s| !s.is_empty()) {
+            // Best-effort line count so the UI can show something for new files.
+            let lines = std::fs::read(top.join(p))
+                .map(|bytes| bytes.iter().filter(|&&b| b == b'\n').count() as u64)
+                .unwrap_or(0);
+            files.push(GitChangedFile {
+                path: p.to_string(),
+                status: "added".to_string(),
+                old_path: None,
+                insertions: Some(lines),
+                deletions: Some(0),
+                untracked: true,
+            });
+        }
+
+        // Group by status (added → modified → renamed → deleted), path asc —
+        // the same shape the file explorer uses for its listings.
+        files.sort_by(|a, b| {
+            let rank = |s: &str| match s {
+                "added" => 0,
+                "modified" => 1,
+                "renamed" => 2,
+                _ => 3,
+            };
+            rank(&a.status)
+                .cmp(&rank(&b.status))
+                .then_with(|| a.path.to_lowercase().cmp(&b.path.to_lowercase()))
+        });
+        return Ok(files);
+    }
+    Ok(Vec::new())
+}
+
+/// Return the unified git diff of ONE file for a session window.
+#[tauri::command]
+fn git_session_file_diff(
+    root_path: String,
+    path: String,
+    since_ts: u64,
+) -> Result<GitFileDiff, String> {
+    if root_path.trim().is_empty() {
+        return Err("No project folder open".to_string());
+    }
+    let path = sanitize_repo_path(&path)?;
+    let top = git_toplevel(&root_path)?;
+    let base = git_base_ref(&top, since_ts)?;
+
+    // Untracked files are invisible to `git diff` — show them as new files.
+    let others = run_git(
+        &top,
+        &["ls-files", "--others", "--exclude-standard", "-z", "--", &path],
+    )?;
+    if others.split('\0').any(|s| !s.is_empty()) {
+        // Exit code 1 means "differences found" for --no-index, not an error.
+        let out = std::process::Command::new("git")
+            .current_dir(&top)
+            .args(["diff", "--no-color", "--no-index", "--", "/dev/null", &path])
+            .output()
+            .map_err(|e| format!("Failed to run git: {}", e))?;
+        let diff = String::from_utf8_lossy(&out.stdout).into_owned();
+        return Ok(GitFileDiff {
+            path,
+            status: "added".to_string(),
+            old_path: None,
+            diff,
+        });
+    }
+
+    // Resolve the entry's status (rename detection needs the OLD path to keep
+    // the filepair together in the pathspec, otherwise git degrades the rename
+    // to a delete + add).
+    let ns = run_git(
+        &top,
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            &base,
+            "--",
+            &path,
+        ],
+    )?;
+    let entry = parse_git_name_status_z(&ns).into_iter().next();
+    let (status, old_path) = match entry {
+        Some(e) => (git_status_label(e.code).to_string(), e.old_path),
+        None => ("modified".to_string(), None),
+    };
+
+    let mut args: Vec<&str> = vec!["diff", "--no-color", "--find-renames", &base, "--"];
+    if let Some(old) = &old_path {
+        args.push(old);
+    }
+    args.push(&path);
+    let diff = run_git(&top, &args)?;
+
+    Ok(GitFileDiff {
+        path,
+        status,
+        old_path,
+        diff,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Custom tool management commands
 // ---------------------------------------------------------------------------
 
@@ -9186,6 +9562,8 @@ pub fn run() {
             save_session,
             delete_session,
             archive_session,
+            git_session_files,
+            git_session_file_diff,
             search_in_files,
             replace_in_files,
             create_directory,
@@ -10108,6 +10486,155 @@ mod tests {
     fn test_should_skip_git_dir() {
         let path = std::path::Path::new("/test/.git");
         assert!(should_skip_entry(path, true));
+    }
+
+    // ---- Git session parsers (session summary "Changed files") ------------
+
+    #[test]
+    fn test_parse_git_name_status_z_plain_entries() {
+        // A\0blob.bin\0 M\0f1.txt\0 M\0f3.txt\0
+        let out = "A\0blob.bin\0M\0f1.txt\0M\0d/sub/f3.txt\0";
+        let entries = parse_git_name_status_z(out);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].code, 'A');
+        assert_eq!(entries[0].path, "blob.bin");
+        assert_eq!(entries[0].old_path, None);
+        assert_eq!(entries[1].code, 'M');
+        assert_eq!(entries[2].path, "d/sub/f3.txt");
+    }
+
+    #[test]
+    fn test_parse_git_name_status_z_rename_pairs_two_paths() {
+        // R100\0old\0new\0 — renames carry the score in the status token and
+        // consume TWO path tokens.
+        let out = "R100\0f2.txt\0f2renamed.txt\0C75\0a\0b\0";
+        let entries = parse_git_name_status_z(out);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].code, 'R');
+        assert_eq!(entries[0].old_path.as_deref(), Some("f2.txt"));
+        assert_eq!(entries[0].path, "f2renamed.txt");
+        assert_eq!(entries[1].code, 'C');
+        assert_eq!(entries[1].path, "b");
+    }
+
+    #[test]
+    fn test_parse_git_numstat_z_plain_and_binary() {
+        // "-\t-\tpath" = binary; counts otherwise.
+        let out = "-\t-\tblob.bin\04\t0\tf1.txt\01\t2\tf3.txt\0";
+        let entries = parse_git_numstat_z(out);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].added, None); // binary → None counts
+        assert_eq!(entries[0].deleted, None);
+        assert_eq!(entries[0].path, "blob.bin");
+        assert_eq!(entries[1].added, Some(4));
+        assert_eq!(entries[1].deleted, Some(0));
+        assert_eq!(entries[2].added, Some(1));
+        assert_eq!(entries[2].deleted, Some(2));
+    }
+
+    #[test]
+    fn test_parse_git_numstat_z_rename_uses_two_nul_tokens() {
+        // Renames emit: counts\0old\0new\0 — the empty path segment after the
+        // TABs marks the two-token form.
+        let out = "0\t0\t\0f2.txt\0f2renamed.txt\03\t1\tother.txt\0";
+        let entries = parse_git_numstat_z(out);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].old_path.as_deref(), Some("f2.txt"));
+        assert_eq!(entries[0].path, "f2renamed.txt");
+        assert_eq!(entries[0].added, Some(0));
+        assert_eq!(entries[1].path, "other.txt");
+        assert_eq!(entries[1].old_path, None);
+    }
+
+    #[test]
+    fn test_git_status_label_mapping() {
+        assert_eq!(git_status_label('A'), "added");
+        assert_eq!(git_status_label('D'), "deleted");
+        assert_eq!(git_status_label('R'), "renamed");
+        assert_eq!(git_status_label('C'), "renamed");
+        assert_eq!(git_status_label('M'), "modified");
+        assert_eq!(git_status_label('T'), "modified"); // typechange
+        assert_eq!(git_status_label('U'), "modified");
+    }
+
+    #[test]
+    fn test_sanitize_repo_path_rejects_traversal_and_absolute() {
+        assert!(sanitize_repo_path("src/main.rs").is_ok());
+        assert!(sanitize_repo_path("a/../b.txt").is_err());
+        assert!(sanitize_repo_path("../etc/passwd").is_err());
+        assert!(sanitize_repo_path("/etc/passwd").is_err());
+        assert!(sanitize_repo_path("  ").is_err());
+        // ".." as a substring of a filename is fine — only whole segments count.
+        assert!(sanitize_repo_path("a..b/normal.txt").is_ok());
+    }
+
+    #[test]
+    fn test_git_session_files_and_diff_end_to_end() {
+        // Skip when git is unavailable (the feature degrades gracefully in the
+        // UI; the parsers above are covered without a git binary).
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("nolock_git_session_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        // Build a repo with one commit, then open a "session" (since_ts) and
+        // modify a tracked file + create an untracked one.
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t.t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "init"]);
+        std::thread::sleep(std::time::Duration::from_millis(1100)); // commit date strictly < since_ts
+        let since_ts = now_secs();
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "x\ny\n").unwrap();
+
+        let root = dir.to_string_lossy().into_owned();
+
+        // Changed-file list: modified tracked + untracked added.
+        let files = git_session_files(root.clone(), since_ts).unwrap();
+        let a = files.iter().find(|f| f.path == "a.txt").expect("a.txt listed");
+        assert_eq!(a.status, "modified");
+        assert_eq!(a.insertions, Some(1));
+        assert!(!a.untracked);
+        let b = files.iter().find(|f| f.path == "b.txt").expect("b.txt listed");
+        assert_eq!(b.status, "added");
+        assert!(b.untracked);
+        assert_eq!(b.insertions, Some(2));
+
+        // Per-file diff for the tracked file contains the added line.
+        let d = git_session_file_diff(root.clone(), "a.txt".into(), since_ts).unwrap();
+        assert_eq!(d.status, "modified");
+        assert!(d.diff.contains("+three"), "diff should show the added line, got: {}", d.diff);
+
+        // Untracked files diff as brand-new files.
+        let db = git_session_file_diff(root.clone(), "b.txt".into(), since_ts).unwrap();
+        assert_eq!(db.status, "added");
+        assert!(
+            db.diff.contains("--- /dev/null") || db.diff.contains("new file mode"),
+            "untracked file diff should be a new-file diff, got: {}",
+            db.diff
+        );
+
+        // Path traversal is rejected before reaching git.
+        assert!(git_session_file_diff(root, "../escape".into(), since_ts).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import NumberField, { parseInt10 } from "./NumberField";
 import { invoke } from "@tauri-apps/api/core";
 
 // ---------------------------------------------------------------------------
@@ -615,12 +616,13 @@ changes and verify your result with the configured validation commands.
               <div style={{ display: "flex", gap: 16, marginTop: 8, alignItems: "center" }}>
                 <label style={{ fontSize: 11 }} className="field-label">
                   Max retries:
-                  <input
-                    type="number"
-                    min="1"
-                    max="10"
+                  <NumberField
                     value={editing.validationMaxRetries}
-                    onChange={(e) => updateAgentField("validationMaxRetries", parseInt(e.target.value) || 3)}
+                    onChange={(n) => updateAgentField("validationMaxRetries", n ?? 3)}
+                    min={1}
+                    max={10}
+                    emptyValue={3}
+                    parse={parseInt10}
                     style={{ width: 52, marginLeft: 6 }}
                   />
                 </label>

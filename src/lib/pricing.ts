@@ -17,6 +17,16 @@ export interface ModelPrice {
 
 const PRICE_CACHE_KEY = "nolock.modelPrices";
 
+/**
+ * Providers that run models locally — per-token pricing does not apply, so
+ * their cost must be reported as unavailable ("—"), never as a misleading $0
+ * (a cached zero price or an absent one must not turn into "$0 est.").
+ */
+export function isLocalProvider(provider: string | null | undefined): boolean {
+  const p = (provider ?? "").trim().toLowerCase();
+  return p === "ollama" || p === "llamacpp" || p === "llama.cpp" || p === "local";
+}
+
 /** Read the persisted price cache. */
 export function loadModelPrices(): Record<string, ModelPrice> {
   try {

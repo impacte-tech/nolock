@@ -247,6 +247,7 @@ function ToolCallItem({ call }: { call: ToolCallLog }) {
         <div className="tool-call-window-body">
           {call.arguments && (
             <div className="tool-call-window-args">
+              <div className="tool-call-window-label">Input</div>
               <pre className="tool-call-window-pre">{prettyJson(call.arguments)}</pre>
             </div>
           )}
@@ -256,7 +257,10 @@ function ToolCallItem({ call }: { call: ToolCallLog }) {
             </div>
           ) : (
             <div className="tool-call-window-result">
-              <pre className="tool-call-window-pre">{call.result_full || call.result_snippet}</pre>
+              <div className="tool-call-window-label">Output</div>
+              <pre className="tool-call-window-pre">
+                {call.result_full || call.result_snippet || "(no output recorded)"}
+              </pre>
             </div>
           )}
           {call.file_changes && call.file_changes.length > 0 && (
@@ -3229,6 +3233,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       {summarySession && (
         <SessionSummary
           session={summarySession}
+          rootPath={rootPath}
           onClose={() => setSummarySession(null)}
         />
       )}

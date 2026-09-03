@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import Select from "./Select";
+import NumberField from "./NumberField";
 import { BACKENDS } from "../lib/backends";
 import {
   type SwitchyardConfig,
@@ -430,18 +431,13 @@ export default function SwitchyardPanel({ visible, onClose, rootPath }: Props) {
                       {route.algorithm === "random" && (
                         <div style={{ marginTop: 6, width: 180 }}>
                           <TargetFieldLabel>Weight</TargetFieldLabel>
-                          <input
-                            className="field-input"
-                            style={{ width: "100%" }}
-                            type="number"
+                          <NumberField
+                            value={target.weight}
+                            onChange={(n) =>
+                              updateTarget(ri, ti, { weight: n })
+                            }
                             step="0.1"
                             min="0"
-                            value={target.weight ?? ""}
-                            onChange={(e) =>
-                              updateTarget(ri, ti, {
-                                weight: e.target.value === "" ? undefined : parseFloat(e.target.value),
-                              })
-                            }
                             placeholder="optional (default 1)"
                             title="Relative routing weight — targets without a weight default to 1"
                           />
@@ -450,19 +446,13 @@ export default function SwitchyardPanel({ visible, onClose, rootPath }: Props) {
                       {route.algorithm !== "passthrough" && (
                         <div style={{ marginTop: 6, width: 180 }}>
                           <TargetFieldLabel>Cost $/1K input</TargetFieldLabel>
-                          <input
-                            className="field-input"
-                            style={{ width: "100%" }}
-                            type="number"
+                          <NumberField
+                            value={target.costPer1k}
+                            onChange={(n) =>
+                              updateTarget(ri, ti, { costPer1k: n })
+                            }
                             step="0.00001"
                             min="0"
-                            value={target.costPer1k ?? ""}
-                            onChange={(e) =>
-                              updateTarget(ri, ti, {
-                                costPer1k:
-                                  e.target.value === "" ? undefined : parseFloat(e.target.value),
-                              })
-                            }
                             placeholder="optional"
                             title="USD per 1K input tokens — enables cost-aware routing (cheapest target in a tier / inverse-cost weights) and cost accounting"
                           />
@@ -504,19 +494,16 @@ export default function SwitchyardPanel({ visible, onClose, rootPath }: Props) {
                             <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
                               <div style={{ width: 180 }}>
                                 <TargetFieldLabel>Base threshold</TargetFieldLabel>
-                                <input
-                                  className="field-input"
-                                  style={{ width: "100%" }}
-                                  type="number"
+                                <NumberField
+                                  value={judge.baseThreshold ?? 0.5}
+                                  onChange={(n) =>
+                                    updateRoute(ri, {
+                                      judge: { ...judge, baseThreshold: n ?? 0.5 },
+                                    })
+                                  }
                                   step="0.05"
                                   min="0"
                                   max="1"
-                                  value={judge.baseThreshold ?? 0.5}
-                                  onChange={(e) =>
-                                    updateRoute(ri, {
-                                      judge: { ...judge, baseThreshold: parseFloat(e.target.value) },
-                                    })
-                                  }
                                   placeholder="0.5"
                                   title="Solve-probability threshold that routes a supported task to the efficient target (default 0.5)"
                                 />

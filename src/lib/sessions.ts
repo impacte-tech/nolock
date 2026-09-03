@@ -9,7 +9,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { countTokens } from "./tokenizer";
-import { calcCost, getModelPrice } from "./pricing";
+import { calcCost, getModelPrice, isLocalProvider } from "./pricing";
 
 export type SessionStatus = "active" | "finished" | "archived";
 
@@ -201,6 +201,11 @@ export function buildSessionMetadata(
 export function enrichUsage(usage: SessionUsageEntry[]): SessionUsageEntry[] {
   if (!Array.isArray(usage)) return [];
   return usage.map((u) => {
+    // Local runtimes (Ollama, llama.cpp) have no per-token pricing at all —
+    // report cost as unavailable ("—") even if a stale zero price was cached.
+    if (isLocalProvider(u.provider)) {
+      return { ...u, promptPricePerM: null, completionPricePerM: null, cost: null };
+    }
     const price = getModelPrice(u.model) ?? (u.promptPricePerM != null ? { prompt: u.promptPricePerM, completion: u.completionPricePerM ?? 0 } : null);
     const cost = u.cost ?? calcCost(price, u.promptTokens, u.completionTokens);
     return {
@@ -223,10 +228,15 @@ export interface SessionUsageSummary {
     cost: number | null;
     promptPricePerM: number | null;
     completionPricePerM: number | null;
+    /** Number of model requests (tool-loop iterations) behind this row. */
+    requests: number;
   }[];
   totalTokens: number;
   /** Total cost, or null when no pricing is known for any model used. */
   totalCost: number | null;
+  /** True when at least one model had no pricing — the total is then a lower
+   *  bound rather than the full session cost. */
+  partialCost: boolean;
 }
 
 /** Aggregate per-request usage entries into a per provider/model summary. */
@@ -245,6 +255,11 @@ export function summarizeUsage(usage: SessionUsageEntry[] | undefined): SessionU
       existing.promptTokens += u.promptTokens;
       existing.completionTokens += u.completionTokens;
       existing.totalTokens += u.totalTokens || u.promptTokens + u.completionTokens;
+      existing.requests += 1;
+      // Prices may be discovered between requests (model list fetched later) —
+      // keep the most informative values instead of the first entry's.
+      existing.promptPricePerM = u.promptPricePerM ?? existing.promptPricePerM;
+      existing.completionPricePerM = u.completionPricePerM ?? existing.completionPricePerM;
       if (u.cost != null) {
         existing.cost = (existing.cost ?? 0) + u.cost;
         anyCost = true;
@@ -260,6 +275,7 @@ export function summarizeUsage(usage: SessionUsageEntry[] | undefined): SessionU
         cost: u.cost ?? null,
         promptPricePerM: u.promptPricePerM ?? null,
         completionPricePerM: u.completionPricePerM ?? null,
+        requests: 1,
       });
       if (u.cost != null) {
         anyCost = true;
@@ -268,10 +284,12 @@ export function summarizeUsage(usage: SessionUsageEntry[] | undefined): SessionU
     }
   }
 
+  const values = [...rows.values()].sort((a, b) => b.totalTokens - a.totalTokens);
   return {
-    rows: [...rows.values()].sort((a, b) => b.totalTokens - a.totalTokens),
+    rows: values,
     totalTokens,
     totalCost: anyCost ? totalCost : null,
+    partialCost: anyCost && values.some((r) => r.cost == null),
   };
 }
 
