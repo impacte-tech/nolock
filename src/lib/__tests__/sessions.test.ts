@@ -105,6 +105,23 @@ describe("summarizeMessages / summarizeUsage", () => {
     expect(s.rows[0].totalTokens).toBe(660);
   });
 
+  it("sums thinking tokens per row and session-wide without double counting", () => {
+    // Thinking tokens are an itemized breakdown ALREADY included in
+    // completion/total — the summary must surface them without inflating totals.
+    const s = summarizeUsage([
+      { provider: "openrouter", model: "deepseek/r1", promptTokens: 1000, completionTokens: 300, totalTokens: 1300, thinkingTokens: 120 },
+      { provider: "openrouter", model: "deepseek/r1", promptTokens: 1000, completionTokens: 200, totalTokens: 1200, thinkingTokens: 80 },
+      { provider: "ollama", model: "qwen3", promptTokens: 400, completionTokens: 40, totalTokens: 440 },
+    ]);
+    expect(s.totalTokens).toBe(2940);
+    expect(s.totalThinkingTokens).toBe(200);
+    const r1 = s.rows.find((r) => r.model === "deepseek/r1");
+    expect(r1!.thinkingTokens).toBe(200);
+    expect(r1!.totalTokens).toBe(2500);
+    const local = s.rows.find((r) => r.provider === "ollama");
+    expect(local!.thinkingTokens).toBe(0);
+  });
+
   it("refreshes row prices from later entries (price cache filled mid-session)", () => {
     const s = summarizeUsage([
       { provider: "openrouter", model: "a/b", promptTokens: 100, completionTokens: 10, totalTokens: 110 },

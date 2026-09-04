@@ -46,6 +46,9 @@ export interface SessionUsageEntry {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Hidden reasoning/thinking tokens for this request (itemized breakdown —
+   *  already included in completionTokens/totalTokens when provider-reported). */
+  thinkingTokens?: number;
   /** Price per 1M input tokens (USD), when available. */
   promptPricePerM?: number | null;
   /** Price per 1M output tokens (USD), when available. */
@@ -225,6 +228,8 @@ export interface SessionUsageSummary {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
+    /** Summed hidden reasoning/thinking tokens (itemized breakdown). */
+    thinkingTokens: number;
     cost: number | null;
     promptPricePerM: number | null;
     completionPricePerM: number | null;
@@ -232,6 +237,8 @@ export interface SessionUsageSummary {
     requests: number;
   }[];
   totalTokens: number;
+  /** Total hidden reasoning/thinking tokens across all requests. */
+  totalThinkingTokens: number;
   /** Total cost, or null when no pricing is known for any model used. */
   totalCost: number | null;
   /** True when at least one model had no pricing — the total is then a lower
@@ -244,17 +251,21 @@ export function summarizeUsage(usage: SessionUsageEntry[] | undefined): SessionU
   const entries = Array.isArray(usage) ? enrichUsage(usage) : [];
   const rows = new Map<string, SessionUsageSummary["rows"][number]>();
   let totalTokens = 0;
+  let totalThinkingTokens = 0;
   let anyCost = false;
   let totalCost = 0;
 
   for (const u of entries) {
+    const thinking = Number(u.thinkingTokens) || 0;
     totalTokens += u.totalTokens || u.promptTokens + u.completionTokens;
+    totalThinkingTokens += thinking;
     const key = `${u.provider}\u0000${u.model}`;
     const existing = rows.get(key);
     if (existing) {
       existing.promptTokens += u.promptTokens;
       existing.completionTokens += u.completionTokens;
       existing.totalTokens += u.totalTokens || u.promptTokens + u.completionTokens;
+      existing.thinkingTokens += thinking;
       existing.requests += 1;
       // Prices may be discovered between requests (model list fetched later) —
       // keep the most informative values instead of the first entry's.
@@ -272,6 +283,7 @@ export function summarizeUsage(usage: SessionUsageEntry[] | undefined): SessionU
         promptTokens: u.promptTokens,
         completionTokens: u.completionTokens,
         totalTokens: u.totalTokens || u.promptTokens + u.completionTokens,
+        thinkingTokens: thinking,
         cost: u.cost ?? null,
         promptPricePerM: u.promptPricePerM ?? null,
         completionPricePerM: u.completionPricePerM ?? null,
@@ -288,6 +300,7 @@ export function summarizeUsage(usage: SessionUsageEntry[] | undefined): SessionU
   return {
     rows: values,
     totalTokens,
+    totalThinkingTokens,
     totalCost: anyCost ? totalCost : null,
     partialCost: anyCost && values.some((r) => r.cost == null),
   };

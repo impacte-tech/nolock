@@ -38,6 +38,8 @@ impl EventSink for RecordingSink {
         _kind: &str,
         _name: &str,
         _path: Option<String>,
+        _arguments: Option<String>,
+        _result: Option<String>,
     ) {
     }
     fn emit_model_routed(&self, model: &str) {
@@ -45,6 +47,7 @@ impl EventSink for RecordingSink {
     }
     fn emit_subagent_start(&self, _id: &str, _agent: &str, _task: &str, _model: &str) {}
     fn emit_subagent_done(&self, _id: &str, _result: &str) {}
+    fn emit_iteration_usage(&self, _id: Option<&str>, _payload: &main_impl::IterationUsagePayload) {}
 }
 
 fn chat_request(root: &str, message: &str) -> ChatRequest {

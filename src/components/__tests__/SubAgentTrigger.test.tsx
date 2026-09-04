@@ -515,9 +515,12 @@ describe("ChatPanel — sub-agent trigger (@agent → spawn_subagent)", () => {
     await act(async () => {
       aiChatResolver?.({ content: "Here is the answer.", tool_calls: [], context_tokens: 1024 });
     });
-    // Live tool-call windows are cleared once the response completes.
+    // The live "done" window is cleared once the response completes — but the
+    // completed call is now part of the conversation log (persisted block), so
+    // it remains visible and is included in the next session save.
     await waitFor(() => {
-      expect(screen.queryByText("web_search")).not.toBeInTheDocument();
+      expect(screen.queryByText("done")).not.toBeInTheDocument();
     });
+    expect(screen.getAllByText("web_search").length).toBeGreaterThanOrEqual(1);
   }, 15000);
 });
