@@ -599,7 +599,17 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
           ) : (
             <>
               <div className="session-summary-total">
-                <span>{formatTokens(usageSummary.totalTokens)} tokens</span>
+                <span>
+                  {formatTokens(usageSummary.totalTokens)} tokens
+                  {usageSummary.totalThinkingTokens > 0 && (
+                    <span
+                      className="session-summary-total-thinking"
+                      title="Hidden reasoning/thinking tokens (included in the total)"
+                    >
+                      {" "}· {formatTokens(usageSummary.totalThinkingTokens)} thinking
+                    </span>
+                  )}
+                </span>
                 <span
                   className={
                     hasCost
@@ -627,6 +637,7 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
                     <th className="num">Reqs</th>
                     <th className="num">Prompt</th>
                     <th className="num">Completion</th>
+                    <th className="num">Thinking</th>
                     <th className="num">Total</th>
                     <th className="num">$/1M in/out</th>
                     <th className="num">Cost</th>
@@ -640,6 +651,9 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
                       <td className="num">{row.requests}</td>
                       <td className="num">{formatTokens(row.promptTokens)}</td>
                       <td className="num">{formatTokens(row.completionTokens)}</td>
+                      <td className="num" title="Hidden reasoning/thinking tokens (already included in Completion/Total)">
+                        {row.thinkingTokens > 0 ? formatTokens(row.thinkingTokens) : "—"}
+                      </td>
                       <td className="num">{formatTokens(row.totalTokens)}</td>
                       <td className="num" title={row.promptPricePerM != null || row.completionPricePerM != null
                         ? `In: ${row.promptPricePerM ?? "?"} / Out: ${row.completionPricePerM ?? "?"} USD per 1M tokens`

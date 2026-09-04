@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Marked } from "marked";
@@ -306,6 +306,53 @@ export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
           >
             Results from {providerLabel}
           </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A live tool call reported by `tool-progress` while the main agent streams.
+ *  Expandable exactly like the persisted ToolCallItem: the header toggles a body
+ *  that clearly separates the tool call INPUT (arguments) from its OUTPUT
+ *  (result) as soon as the backend reports them. */
+export function LiveToolCallItem({
+  call,
+}: {
+  call: { name: string; status: "start" | "done" | "error"; path?: string; arguments?: string; result?: string };
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const running = call.status === "start";
+  const summary = call.path
+    || (call.arguments
+      ? summarizeToolArgs({ name: call.name, arguments: call.arguments } as ToolCallLog)
+      : "");
+  return (
+    <div className={`tool-call-window${running ? " tool-call-running" : ""}`}>
+      <div className="tool-call-window-header" onClick={() => setExpanded((e) => !e)}>
+        <span className="tool-call-window-chevron">{expanded ? "\u25BC" : "\u25B6"}</span>
+        <span className="tool-call-window-name">{call.name}</span>
+        {summary && <span className="tool-call-window-summary" title={summary}>{summary}</span>}
+        <span className="tool-call-window-status">
+          {running ? "running\u2026" : call.status === "error" ? "error" : "done"}
+        </span>
+      </div>
+      {expanded && (
+        <div className="tool-call-window-body">
+          {call.arguments && (
+            <div className="tool-call-window-args">
+              <div className="tool-call-window-label">Input</div>
+              <pre className="tool-call-window-pre">{prettyJson(call.arguments)}</pre>
+            </div>
+          )}
+          {running ? (
+            <div className="tool-call-window-note">{"Running\u2026 output appears when the tool finishes."}</div>
+          ) : (
+            <div className="tool-call-window-result">
+              <div className="tool-call-window-label">Output</div>
+              <pre className="tool-call-window-pre">{call.result || "(no output recorded)"}</pre>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -986,9 +1033,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   /** Live tool-call progress for the MAIN agent while it streams (OpenRouter /
    *  Ollama tool loops emit `tool-progress` events). Rendered as running
-   *  tool-call windows so the user sees what the model is doing in real time.
+   *  tool-call windows so the user sees what the model is doing in real time —
+   *  each window is expandable and shows the tool input + output as reported.
    *  Cleared when the response completes. */
-  const [liveToolCalls, setLiveToolCalls] = useState<{ name: string; status: "start" | "done" | "error"; path?: string }[]>([]);
+  const [liveToolCalls, setLiveToolCalls] = useState<
+    { name: string; status: "start" | "done" | "error"; path?: string; arguments?: string; result?: string }[]
+  >([]);
 
   /** The model the DigitalOcean Inference Router selected (from the
    *  x-model-router-selected-model header), surfaced so reasoning models can
@@ -1102,21 +1152,48 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     // Live tool-call progress for the MAIN agent (OpenRouter / Ollama tool
     // loops). Shows running tool-call windows while the model works so the user
     // gets visual feedback even when the model runs many tool calls before
-    // writing its final answer.
-    track(listen<{ type: string; name: string; path?: string }>("tool-progress", (e) => {
+    // writing its final answer. Each window carries the tool's input (arguments)
+    // and output (result) so it can be expanded for inspection mid-run.
+    track(listen<{ type: string; name: string; path?: string; arguments?: string; result?: string }>("tool-progress", (e) => {
       setLiveToolCalls((prev) => {
         if (e.payload.type === "start") {
-          return [...prev, { name: e.payload.name, status: "start", path: e.payload.path }];
+          return [...prev, { name: e.payload.name, status: "start", path: e.payload.path, arguments: e.payload.arguments }];
         }
         const next = [...prev];
         for (let i = next.length - 1; i >= 0; i--) {
           if (next[i].name === e.payload.name && next[i].status === "start") {
-            next[i] = { ...next[i], status: e.payload.type as "done" | "error" };
+            next[i] = {
+              ...next[i],
+              status: e.payload.type as "done" | "error",
+              arguments: e.payload.arguments ?? next[i].arguments,
+              result: e.payload.result,
+            };
             break;
           }
         }
         return next;
       });
+      // Persist each COMPLETED tool call into the conversation log immediately —
+      // not only when the whole agent turn finishes — so mid-turn session saves
+      // (and therefore the session summary) show every tool call as it happens.
+      // Guarded against stopped/invalidated generations so a stale request's
+      // late events can't pollute the current conversation.
+      if (e.payload.type !== "start" && !stopRequestedRef.current && sendingRef.current) {
+        setMessages((prev) => {
+          const msgs = [...prev];
+          const last = msgs[msgs.length - 1];
+          if (!last || last.role !== "assistant") return prev;
+          const result = e.payload.result ?? "";
+          const call: ToolCallLog = {
+            name: e.payload.name,
+            arguments: e.payload.arguments ?? "{}",
+            result_snippet: result.length > 200 ? `${result.slice(0, 200)}...` : result,
+            result_full: result,
+          };
+          msgs[msgs.length - 1] = { ...last, toolCalls: [...(last.toolCalls ?? []), call] };
+          return msgs;
+        });
+      }
     }));
 
     track(listen<{ id: string; result: string }>("subagent-done", (e) => {
@@ -1429,13 +1506,23 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     return stored ? Number(stored) : 128_000;
   });
 
-  // Fetch the model's actual context length from the backend on mount. Only
-  // local backends (Ollama) expose this via /api/show; cloud backends use the
-  // user-configured "Context Window" value (nolock.contextLength) instead.
+  // Resolve the context-window denominator for the context % meter. Cloud
+  // backends use the user-configured "Context Window" value
+  // (nolock.contextLength); local backends (Ollama) auto-detect the model's
+  // real context length via /api/show. Re-runs on mount AND whenever chat
+  // settings are saved (`nolock:settings-changed`), so changing the Context
+  // Window — or switching model/provider — mid-session immediately updates the
+  // context limit counter instead of only applying to the next session.
   useEffect(() => {
     const fetchContextLength = async () => {
       const backend = getChatBackend();
-      if (isCloudBackend(backend)) return; // respect the configured context window
+      if (isCloudBackend(backend)) {
+        // Cloud: respect the user-configured context window (which may have
+        // just been changed in the Chat Model panel).
+        const stored = localStorage.getItem("nolock.contextLength") || localStorage.getItem("nolock.maxContextTokens");
+        setMaxTokens(stored ? Number(stored) : 128_000);
+        return;
+      }
       const url = resolveBackendUrl(backend);
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
       if (!chatModel) return;
@@ -1451,11 +1538,18 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           localStorage.setItem("nolock.maxContextTokens", String(ctxLen));
         }
       } catch (e) {
-        // Silently fall back to stored value or default
+        // Auto-detect failed (e.g. local server down) — fall back to the
+        // user-configured context window so the meter still tracks the setting.
         console.error("[nolock] Failed to fetch model context length:", e);
+        const stored = localStorage.getItem("nolock.contextLength") || localStorage.getItem("nolock.maxContextTokens");
+        if (stored) setMaxTokens(Number(stored));
       }
     };
     fetchContextLength();
+    // The `storage` event doesn't fire in the same window in Tauri, so the
+    // settings panels dispatch `nolock:settings-changed` after saving.
+    window.addEventListener("nolock:settings-changed", fetchContextLength);
+    return () => window.removeEventListener("nolock:settings-changed", fetchContextLength);
   }, []);
 
   // ---- Sessions: project-local conversation persistence --------------------
@@ -1463,8 +1557,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const createdAtRef = useRef<Record<string, number>>({});
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The session summary overlay opened by clicking a session in the picker.
-  const [summarySession, setSummarySession] = useState<SessionRecord | null>(null);
+  // The session summary overlay shows the CURRENT persisted record — derived
+  // from the sessions list (which is refreshed after every save) instead of a
+  // snapshot taken at click time. This keeps an open summary live: tool calls
+  // and token usage persisted mid-turn appear without closing/re-opening.
+  const [summarySessionId, setSummarySessionId] = useState<string | null>(null);
+  const summarySession = useMemo(
+    () => (summarySessionId ? sessions.find((s) => s.id === summarySessionId) ?? null : null),
+    [summarySessionId, sessions],
+  );
   // Per-request / per-iteration token usage accumulated for the current session
   // (provider + model split). Persisted in the session file for cost accounting.
   const usageLogRef = useRef<SessionUsageEntry[]>([]);
@@ -1472,9 +1573,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   /** Record a request's token usage (from the backend `usage` report) into the
    *  current session's log. The backend reports one entry per tool-loop
-   *  iteration, so the session file ends up with a per-iteration breakdown. */
+   *  iteration, so the session file ends up with a per-iteration breakdown —
+   *  including the hidden reasoning/thinking tokens per iteration. */
   const recordUsage = useCallback((provider: string, model: string, report: unknown) => {
-    const rep = report as { usage?: Array<{ provider?: string; model?: string; promptTokens?: number; completionTokens?: number; totalTokens?: number }> } | null;
+    const rep = report as { usage?: Array<{ provider?: string; model?: string; promptTokens?: number; completionTokens?: number; totalTokens?: number; thinkingTokens?: number }> } | null;
     const raw: SessionUsageEntry[] = Array.isArray(rep?.usage)
       ? rep.usage
           .filter((u) => (Number(u.promptTokens) || 0) + (Number(u.completionTokens) || 0) > 0)
@@ -1484,6 +1586,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             promptTokens: Number(u.promptTokens ?? 0),
             completionTokens: Number(u.completionTokens ?? 0),
             totalTokens: Number(u.totalTokens ?? (Number(u.promptTokens ?? 0) + Number(u.completionTokens ?? 0))),
+            thinkingTokens: Number(u.thinkingTokens ?? 0) || undefined,
           }))
       : [];
     if (raw.length === 0) return;
@@ -1658,9 +1761,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   }, [rootPath]);
 
   // Auto-save the current session (debounced) whenever the conversation changes
-  // and we're not mid-stream.
+  // — including MID-TURN. Each human message and each agent tool-loop iteration
+  // (which appends to the usage log via `iteration-usage` events) schedules a
+  // save, so the session summary stays up to date after every iteration instead
+  // of only being written once the whole response finishes. During active
+  // streaming the debounce keeps resetting (tokens mutate `messages`), so the
+  // write lands at the first pause — e.g. while tools execute between
+  // iterations — rather than on every token.
   useEffect(() => {
-    if (!rootPath || !sessionId || loading) return;
+    if (!rootPath || !sessionId) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       void persistSession(sessionId, messages, accumulatedContextTokens, maxTokens, usageLogRef.current);
@@ -1823,6 +1932,19 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       };
 
       // Stream tokens — they get appended to the existing last assistant message
+      // Per-iteration usage events (see sendMessage) keep the context meter and
+      // the session summary in sync for continued responses too.
+      const unlistenIteration = await listen<{
+        contextTokens: number;
+        thinkingTokens: number;
+        iteration: number;
+        usage: { provider?: string; model?: string; promptTokens?: number; completionTokens?: number; totalTokens?: number; thinkingTokens?: number };
+      }>("iteration-usage", (event) => {
+        if (stopRequestedRef.current || epoch !== sendEpochRef.current) return;
+        const p = event.payload;
+        if (p.usage) recordUsage(backend, chatModel, { usage: [p.usage] });
+        if (p.contextTokens > 0) setAccumulatedContextTokens(p.contextTokens);
+      });
       unlisten = await listen<{ token: string; thinking: boolean }>("stream-token", (event) => {
         if (stopRequestedRef.current || epoch !== sendEpochRef.current) return;
         const { token, thinking } = event.payload;
@@ -1839,7 +1961,11 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           });
         }
       });
-      unlistenRef.current = unlisten;
+      const unlistenStream = unlisten;
+      unlistenRef.current = () => {
+        unlistenIteration();
+        unlistenStream();
+      };
 
       const result: { content: string; tool_calls: ToolCallLog[] } = await invoke("ai_chat", { req: reqBase });
 
@@ -2576,6 +2702,22 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         scanAgentCommands(toolCallsB as unknown as HookToolCallLog[]);
       } else {
         // ---- Normal mode: stream a single response ----
+        // Per-iteration usage events: the backend reports one entry after EVERY
+        // tool-loop iteration (tool call + thinking + response) with the running
+        // context total. Update the context meter and the session usage log per
+        // iteration so the meter climbs while the agent works and the session
+        // summary reflects each iteration as it happens (not only at the end).
+        const unlistenIteration = await listen<{
+          contextTokens: number;
+          thinkingTokens: number;
+          iteration: number;
+          usage: { provider?: string; model?: string; promptTokens?: number; completionTokens?: number; totalTokens?: number; thinkingTokens?: number };
+        }>("iteration-usage", (event) => {
+          if (stopRequestedRef.current || epoch !== sendEpochRef.current) return;
+          const p = event.payload;
+          if (p.usage) recordUsage(backend, model, { usage: [p.usage] });
+          if (p.contextTokens > 0) setAccumulatedContextTokens(p.contextTokens);
+        });
         unlisten = await listen<{ token: string; thinking: boolean }>("stream-token", (event) => {
           // Discard tokens from a stopped OR invalidated (session-cleared)
           // generation — they belong to the old context window, not this one.
@@ -2597,7 +2739,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           }
           // When thinking && !showThinking: silently discard (don't pollute chat)
         });
-        unlistenRef.current = unlisten;
+        const unlistenStream = unlisten;
+        // Clean up BOTH listeners (stream tokens + per-iteration usage) together.
+        unlistenRef.current = () => {
+          unlistenIteration();
+          unlistenStream();
+        };
 
         // Add a placeholder assistant message that streaming tokens will fill
         setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
@@ -2643,7 +2790,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             msgs[msgs.length - 1] = {
               ...last,
               content: responseText || "(no response)",
-              toolCalls: result.tool_calls?.length > 0 ? result.tool_calls : undefined,
+              // The backend's accumulated list is authoritative (it carries
+              // file_changes + sub-agent traces the live events don't have).
+              // If it came back empty but live calls were recorded mid-turn,
+              // keep those so the audit trail never loses a completed call.
+              toolCalls: result.tool_calls?.length
+                ? result.tool_calls
+                : (last.toolCalls?.length ? last.toolCalls : undefined),
               // Capture the actual model that produced this response (Switchyard
               // routing may have redirected to a different model than the
               // configured one) so RLHF/KTO/DPO feedback is attributed correctly.
@@ -2666,7 +2819,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           msgs[msgs.length - 1] = {
             ...last,
             content: `Error: ${e}`,
-            toolCalls: undefined,
+            // Keep any tool calls that completed before the failure — the
+            // session audit log must not lose them ("no exceptions").
+            toolCalls: last.toolCalls,
           };
         } else {
           msgs.push({ role: "assistant", content: `Error: ${e}` });
@@ -2714,7 +2869,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
               }
               onNew={() => void startNewSession()}
               onDelete={(id) => void deleteSessionById(id)}
-              onSelect={(s) => setSummarySession(s)}
+              onSelect={(s) => setSummarySessionId(s.id)}
             />
           )}
           {rootPath && onOpenAgentManager && (
@@ -2768,21 +2923,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                   <ToolCallBlock calls={m.toolCalls} />
                 )}
                 {/* Live tool-call progress for the main agent while it streams —
-                    running tool-call windows give the user real-time feedback
-                    even when the model runs many tools before answering. */}
+                    expandable windows (input + output clearly separated) give the
+                    user real-time feedback even when the model runs many tools
+                    before answering. */}
                 {i === messages.length - 1 && loading && liveToolCalls.length > 0 && (
                   <div className="tool-calls">
                     {liveToolCalls.map((tc, ti) => (
-                      <div key={ti} className={`tool-call-window ${tc.status === "start" ? "tool-call-running" : ""}`}>
-                        <div className="tool-call-window-header">
-                          <span className="tool-call-window-chevron">{"\u25B6"}</span>
-                          <span className="tool-call-window-name">{tc.name}</span>
-                          {tc.path && <span className="tool-call-window-summary" title={tc.path}>{tc.path}</span>}
-                          <span className="tool-call-window-status">
-                            {tc.status === "start" ? "running\u2026" : tc.status === "error" ? "error" : "done"}
-                          </span>
-                        </div>
-                      </div>
+                      <LiveToolCallItem key={ti} call={tc} />
                     ))}
                   </div>
                 )}
@@ -3234,7 +3381,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         <SessionSummary
           session={summarySession}
           rootPath={rootPath}
-          onClose={() => setSummarySession(null)}
+          onClose={() => setSummarySessionId(null)}
         />
       )}
     </div>

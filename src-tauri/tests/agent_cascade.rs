@@ -1132,6 +1132,8 @@ impl main_impl::EventSink for RecordingSink {
         _kind: &str,
         _name: &str,
         _path: Option<String>,
+        _arguments: Option<String>,
+        _result: Option<String>,
     ) {
     }
     fn emit_model_routed(&self, model: &str) {
@@ -1141,6 +1143,7 @@ impl main_impl::EventSink for RecordingSink {
         self.subagent_models.lock().unwrap().push(model.to_string());
     }
     fn emit_subagent_done(&self, _id: &str, _result: &str) {}
+    fn emit_iteration_usage(&self, _id: Option<&str>, _payload: &main_impl::IterationUsagePayload) {}
 }
 
 /// Resolve the OpenRouter API key from the OS keychain — the SAME storage the

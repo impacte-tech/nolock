@@ -4602,6 +4602,11 @@ select.field-input {
   margin-bottom: 8px;
 }
 
+.session-summary-total-thinking {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
 .session-summary-total-cost {
   font-weight: 700;
   color: var(--text-warning);
@@ -4838,6 +4843,20 @@ select.field-input {
   gap: 4px;
   /* Keep content clear of the scrollbar and the section edge. */
   padding-right: 8px;
+}
+
+/* Tool-call rows must keep their natural height inside this scroll container.
+   Flex children shrink by default, which squeezed dozens of calls into a few
+   pixels each (invisible / unclickable) instead of overflowing to a scrollbar
+   — the same guard `.session-summary-file` and `.session-summary-msg` have. */
+.session-summary-toollog .tool-call-window {
+  flex-shrink: 0;
+}
+
+/* Roomy, clearly clickable headers inside the summary — matches the
+   changed-files rows' min-height so every call is easy to see and hit. */
+.session-summary-toollog .tool-call-window-header {
+  min-height: 30px;
 }
 
 /* ---- Conversation log ---------------------------------------------------- */

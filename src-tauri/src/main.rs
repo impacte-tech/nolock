@@ -2740,10 +2740,19 @@ pub struct UsageReport {
     pub model: String,
     /// Input / prompt tokens consumed by this request.
     pub prompt_tokens: u64,
-    /// Output / completion tokens produced by this request.
+    /// Output / completion tokens produced by this request. When the provider
+    /// itemizes reasoning separately (`completion_tokens_details.reasoning_tokens`)
+    /// those tokens are ALREADY included here; otherwise (estimate fallback) the
+    /// estimated thinking tokens are folded in so the total reflects real output.
     pub completion_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
+    /// Hidden reasoning/thinking tokens produced by this request. Reported by
+    /// the provider when possible (`completion_tokens_details.reasoning_tokens`),
+    /// otherwise estimated from the streamed thinking trace. Already included in
+    /// `completion_tokens`/`total_tokens` — this is the itemized breakdown.
+    #[serde(default)]
+    pub thinking_tokens: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -2818,25 +2827,40 @@ fn estimate_json_messages_tokens(msgs: &[serde_json::Value]) -> u64 {
 /// Ollama: `prompt_eval_count`/`eval_count`); falls back to the same
 /// character-count heuristic the rest of the backend uses so the session cost
 /// log stays consistent even when a provider doesn't return a `usage` payload.
-/// Thinking tokens are intentionally NOT folded into the report (the session
-/// summary excludes them for now).
+///
+/// Thinking/reasoning tokens ARE accounted for: when the provider itemizes them
+/// (`reported_thinking`) they are surfaced as the `thinking_tokens` breakdown
+/// (already included in the reported completion count). When the provider does
+/// not report usage at all, the estimated thinking tokens are folded into the
+/// completion estimate so the session summary never under-counts reasoning.
 fn usage_for(
     provider: &str,
     model: &str,
     reported_prompt: u64,
     reported_completion: u64,
+    reported_thinking: u64,
     est_prompt: u64,
     est_completion: u64,
+    est_thinking: u64,
 ) -> UsageReport {
     let prompt_tokens = if reported_prompt > 0 {
         reported_prompt
     } else {
         est_prompt.max(1)
     };
+    let thinking_tokens = if reported_thinking > 0 {
+        reported_thinking
+    } else {
+        est_thinking
+    };
     let completion_tokens = if reported_completion > 0 {
+        // Provider-reported completions already include the reasoning tokens it
+        // itemized in `completion_tokens_details` — don't double count.
         reported_completion
     } else {
-        est_completion
+        // Estimate fallback: the chars/4 estimate only covers visible content,
+        // so the hidden reasoning must be added explicitly.
+        est_completion + est_thinking
     };
     UsageReport {
         provider: provider.to_string(),
@@ -2844,6 +2868,7 @@ fn usage_for(
         prompt_tokens,
         completion_tokens,
         total_tokens: prompt_tokens + completion_tokens,
+        thinking_tokens,
     }
 }
 
@@ -2911,7 +2936,8 @@ struct StreamPayload {
 }
 
 /// Emitted as `tool-progress` while the agent tool loop runs, so the frontend
-/// can show a live "editing <file>…" status line.
+/// can show a live "editing <file>…" status line — and expand it to inspect the
+/// tool call's input (arguments) and output (result) while the agent works.
 #[derive(Clone, serde::Serialize)]
 struct ToolProgressPayload {
     /// "start" | "done" | "error"
@@ -2920,6 +2946,12 @@ struct ToolProgressPayload {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    /// Serialized tool-call arguments (input) — sent on "start" and "done".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arguments: Option<String>,
+    /// Tool result (output) — sent on "done"/"error".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
 }
 
 // ---- Sub-agent streaming event payloads ------------------------------------
@@ -2951,6 +2983,30 @@ struct SubAgentToolProgressPayload {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    /// Serialized tool-call arguments (input) — sent on "start" and "done".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arguments: Option<String>,
+    /// Tool result (output) — sent on "done"/"error".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+}
+
+/// Emitted as `iteration-usage` (main agent) / `subagent-iteration-usage`
+/// (sub-agents) after EVERY tool-loop iteration — tool call + thinking +
+/// response — so the frontend can increment the context-limit meter and the
+/// session summary live, per iteration, instead of only once at the very end.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IterationUsagePayload {
+    /// Running total context tokens the model has processed so far this request
+    /// (all messages + tool results + iteration outputs + thinking).
+    context_tokens: u64,
+    /// Running total hidden reasoning/thinking tokens for this request.
+    thinking_tokens: u64,
+    /// 1-based iteration number inside the tool loop.
+    iteration: usize,
+    /// This iteration's token usage (provider/model split).
+    usage: UsageReport,
 }
 
 /// Emitted as `subagent-done` when a sub-agent finishes.
@@ -2967,10 +3023,22 @@ struct SubAgentDonePayload {
 /// headless CLI / E2E test harness.
 pub trait EventSink {
     fn emit_stream_token(&self, subagent_id: Option<&str>, token: &str, thinking: bool);
-    fn emit_tool_progress(&self, subagent_id: Option<&str>, kind: &str, name: &str, path: Option<String>);
+    fn emit_tool_progress(
+        &self,
+        subagent_id: Option<&str>,
+        kind: &str,
+        name: &str,
+        path: Option<String>,
+        arguments: Option<String>,
+        result: Option<String>,
+    );
     fn emit_model_routed(&self, model: &str);
     fn emit_subagent_start(&self, id: &str, agent: &str, task: &str, model: &str);
     fn emit_subagent_done(&self, id: &str, result: &str);
+    /// Report one completed tool-loop iteration (tool call + thinking + response)
+    /// with the running context-token total, so the frontend can update the
+    /// context meter and the session summary after each iteration.
+    fn emit_iteration_usage(&self, subagent_id: Option<&str>, payload: &IterationUsagePayload);
 }
 
 /// The Tauri `AppHandle` forwards events to the frontend (unchanged behaviour).
@@ -2978,8 +3046,16 @@ impl EventSink for tauri::AppHandle {
     fn emit_stream_token(&self, subagent_id: Option<&str>, token: &str, thinking: bool) {
         emit_stream_token(self, subagent_id, token, thinking);
     }
-    fn emit_tool_progress(&self, subagent_id: Option<&str>, kind: &str, name: &str, path: Option<String>) {
-        emit_tool_progress(self, subagent_id, kind, name, path);
+    fn emit_tool_progress(
+        &self,
+        subagent_id: Option<&str>,
+        kind: &str,
+        name: &str,
+        path: Option<String>,
+        arguments: Option<String>,
+        result: Option<String>,
+    ) {
+        emit_tool_progress(self, subagent_id, kind, name, path, arguments, result);
     }
     fn emit_model_routed(&self, model: &str) {
         self.emit("model-routed", model.to_string()).ok();
@@ -3000,6 +3076,10 @@ impl EventSink for tauri::AppHandle {
         })
         .ok();
     }
+    fn emit_iteration_usage(&self, subagent_id: Option<&str>, payload: &IterationUsagePayload) {
+        let event = if subagent_id.is_some() { "subagent-iteration-usage" } else { "iteration-usage" };
+        self.emit(event, payload).ok();
+    }
 }
 
 /// A headless sink for the CLI / E2E harness: streams visible tokens to stdout,
@@ -3017,7 +3097,15 @@ impl EventSink for CliSink {
             eprint!("{}", token);
         }
     }
-    fn emit_tool_progress(&self, _subagent_id: Option<&str>, kind: &str, name: &str, path: Option<String>) {
+    fn emit_tool_progress(
+        &self,
+        _subagent_id: Option<&str>,
+        kind: &str,
+        name: &str,
+        path: Option<String>,
+        _arguments: Option<String>,
+        _result: Option<String>,
+    ) {
         let p = path.unwrap_or_default();
         match kind {
             "start" => eprintln!("\n[tool] {} {}", name, p),
@@ -3035,6 +3123,17 @@ impl EventSink for CliSink {
     }
     fn emit_subagent_done(&self, _id: &str, _result: &str) {
         eprintln!("--- subagent done ---");
+    }
+    fn emit_iteration_usage(&self, subagent_id: Option<&str>, payload: &IterationUsagePayload) {
+        eprintln!(
+            "[nolock] iteration {} usage: ctx={} thinking={} prompt={} completion={}{}",
+            payload.iteration,
+            payload.context_tokens,
+            payload.thinking_tokens,
+            payload.usage.prompt_tokens,
+            payload.usage.completion_tokens,
+            subagent_id.map(|id| format!(" (subagent {})", id)).unwrap_or_default(),
+        );
     }
 }
 
@@ -3071,12 +3170,17 @@ fn emit_stream_token(
 }
 
 /// Emit tool progress, routing to `subagent-tool-progress` for sub-agents.
+/// `arguments` (input) is attached on "start"/"done"; `result` (output) on
+/// "done"/"error" — the frontend uses both to make the live tool-call windows
+/// expandable while the agent works.
 fn emit_tool_progress(
     app_handle: &tauri::AppHandle,
     subagent_id: Option<&str>,
     kind: &str,
     name: &str,
     path: Option<String>,
+    arguments: Option<String>,
+    result: Option<String>,
 ) {
     if let Some(id) = subagent_id {
         app_handle
@@ -3087,6 +3191,8 @@ fn emit_tool_progress(
                     kind: kind.to_string(),
                     name: name.to_string(),
                     path,
+                    arguments,
+                    result,
                 },
             )
             .ok();
@@ -3098,6 +3204,8 @@ fn emit_tool_progress(
                     kind: kind.to_string(),
                     name: name.to_string(),
                     path,
+                    arguments,
+                    result,
                 },
             )
             .ok();
@@ -6872,14 +6980,18 @@ async fn ollama_chat_with_tools(
         }
         // Record this iteration's token usage (provider-reported when available;
         // otherwise estimate from the current message context + this iteration's
-        // output). Thinking tokens are intentionally NOT included for now.
+        // output). Thinking/reasoning tokens are included: reported via the
+        // provider's usage details when available, else estimated from the
+        // streamed thinking trace and folded into the completion count.
         usage.push(usage_for(
             "ollama",
             ctx.model,
             stream.prompt_tokens,
             stream.completion_tokens,
+            0, // Ollama reports eval_count including thinking — no separate itemization
             estimate_json_messages_tokens(&ollama_msgs),
             estimate_chat_tokens(&stream.iter_content),
+            estimate_chat_tokens(&stream.iter_thinking),
         ));
 
         // --- Handle tool calls or return final response ---
@@ -6934,7 +7046,8 @@ async fn ollama_chat_with_tools(
                 } else if name == "spawn_micro_agent" {
                     let agent = args["agent"].as_str().unwrap_or("").to_string();
                     let task = args["task"].as_str().unwrap_or("").to_string();
-                    ctx.sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
+                    let args_json = serde_json::to_string(args).unwrap_or_default();
+                    ctx.sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone(), Some(args_json.clone()), None);
                     let result = match runner {
                         Some(r) => Box::pin(run_micro_agent(r, &agent, &task)).await,
                         None => Err("Micro-agents are not available".to_string()),
@@ -6956,7 +7069,7 @@ async fn ollama_chat_with_tools(
                         }
                         Err(e) => (tag_agent_result(AGENT_RESULT_FAILED, &format!("Tool error: {}", e)), None),
                     };
-                    ctx.sink.emit_tool_progress(subagent_id, "done", "spawn_micro_agent", tool_path);
+                    ctx.sink.emit_tool_progress(subagent_id, "done", "spawn_micro_agent", tool_path, Some(args_json), Some(result_text.clone()));
                     let snippet = if result_text.len() > 200 {
                         format!("{}...", &result_text[..200])
                     } else {
@@ -6976,15 +7089,16 @@ async fn ollama_chat_with_tools(
                         "content": result_text
                     }));
                 } else {
-                    ctx.sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
+                    let args_json = serde_json::to_string(args).unwrap_or_default();
+                    ctx.sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone(), Some(args_json.clone()), None);
                     let (result, file_changes) =
                         execute_tool_tracked(name, args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
                             .await
                             .unwrap_or_else(|e| {
-                                ctx.sink.emit_tool_progress(subagent_id, "error", name, tool_path.clone());
+                                ctx.sink.emit_tool_progress(subagent_id, "error", name, tool_path.clone(), Some(args_json.clone()), Some(format!("Tool error: {}", e)));
                                 (format!("Tool error: {}", e), Vec::new())
                             });
-                    ctx.sink.emit_tool_progress(subagent_id, "done", name, tool_path);
+                    ctx.sink.emit_tool_progress(subagent_id, "done", name, tool_path, Some(args_json), Some(result.clone()));
 
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
@@ -7016,7 +7130,14 @@ async fn ollama_chat_with_tools(
                 let outcomes = run_spawn_batch(runner, &batch).await;
 
                 for ((tool_call_id, _, _, args, _), (result, subagent_trace)) in spawn_items.into_iter().zip(outcomes) {
-                    ctx.sink.emit_tool_progress(subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
+                    ctx.sink.emit_tool_progress(
+                        subagent_id,
+                        "done",
+                        "spawn_subagent",
+                        args["path"].as_str().map(String::from),
+                        Some(serde_json::to_string(&args).unwrap_or_default()),
+                        Some(result.clone()),
+                    );
 
                     // Charge the sub-agent's hidden reasoning to the parent's
                     // session token total so a sub-agent-heavy turn is counted.
@@ -7043,6 +7164,22 @@ async fn ollama_chat_with_tools(
                         "content": result
                     }));
                 }
+            }
+
+            // Report this completed iteration (tool call + thinking + response)
+            // with the running context total so the frontend's context meter and
+            // the session summary update after EVERY iteration, not only once at
+            // the very end of the request. The context so far is exactly what the
+            // next iteration's request will re-send (all messages incl. tool
+            // results) plus the thinking produced so far.
+            if let Some(last_usage) = usage.last() {
+                let context_so_far = estimate_json_messages_tokens(&ollama_msgs) + thinking_tokens;
+                ctx.sink.emit_iteration_usage(subagent_id, &IterationUsagePayload {
+                    context_tokens: context_so_far,
+                    thinking_tokens,
+                    iteration: iteration + 1,
+                    usage: last_usage.clone(),
+                });
             }
 
             // Add a newline separator between tool-loop iterations so the
@@ -7076,15 +7213,16 @@ async fn ollama_chat_with_tools(
                     let args = tc["function"]["arguments"].clone();
                     let tool_call_id = format!("call_planned_{}_{}", iteration, pi);
                     let tool_path = args["path"].as_str().map(String::from);
-                    ctx.sink.emit_tool_progress(subagent_id, "start", &name, tool_path.clone());
+                    let args_json = serde_json::to_string(&args).unwrap_or_default();
+                    ctx.sink.emit_tool_progress(subagent_id, "start", &name, tool_path.clone(), Some(args_json.clone()), None);
                     let (result, file_changes) =
                         execute_tool_tracked(&name, &args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
                             .await
                             .unwrap_or_else(|e| {
-                                ctx.sink.emit_tool_progress(subagent_id, "error", &name, tool_path.clone());
+                                ctx.sink.emit_tool_progress(subagent_id, "error", &name, tool_path.clone(), Some(args_json.clone()), Some(format!("Tool error: {}", e)));
                                 (format!("Tool error: {}", e), Vec::new())
                             });
-                    ctx.sink.emit_tool_progress(subagent_id, "done", &name, tool_path);
+                    ctx.sink.emit_tool_progress(subagent_id, "done", &name, tool_path, Some(args_json), Some(result.clone()));
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
                     } else {
@@ -7131,7 +7269,7 @@ async fn ollama_chat_with_tools(
 
                 // Context usage so far (messages + accumulated content + thinking).
                 let context_tokens_now = estimate_json_messages_tokens(&ollama_msgs)
-                    + estimate_chat_tokens(&full_content)
+                    + estimate_chat_tokens(&stream.iter_content)
                     + thinking_tokens;
 
                 // 1. Repetition detection → micro-agent repurpose + summarize +
@@ -7226,7 +7364,12 @@ async fn ollama_chat_with_tools(
             if full_content.is_empty() && all_tool_calls.is_empty() {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
-            let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
+            // Context the model processed: every message sent (incl. all prior
+            // iteration contents + tool results, already in `ollama_msgs`) plus
+            // this final response (not yet in msgs) plus the hidden reasoning.
+            let context_tokens = estimate_json_messages_tokens(&ollama_msgs)
+                + estimate_chat_tokens(&stream.iter_content)
+                + thinking_tokens;
             // If we gave up on a "still planning" JSON, surface the readable
             // analysis rather than the raw structured-JSON dump.
             let mut final_content = if is_planning_json(&full_content) {
@@ -7264,7 +7407,9 @@ async fn ollama_chat_with_tools(
         full_content.len(),
         all_tool_calls.len()
     );
-    let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
+    // Every iteration's content + tool results are already in `ollama_msgs` at
+    // this point, so the processed context is msgs + thinking (no double count).
+    let context_tokens = estimate_json_messages_tokens(&ollama_msgs) + thinking_tokens;
     let mut final_content = full_content.clone();
     if final_content.trim().is_empty() && !total_thinking.trim().is_empty() {
         let fallback = extract_answer_from_thinking(&total_thinking);
@@ -7331,6 +7476,10 @@ struct OpenAIStreamResult {
     prompt_tokens: u64,
     /// Completion tokens reported in the stream's final `usage` chunk (0 if absent).
     completion_tokens: u64,
+    /// Reasoning/thinking tokens itemized by the provider in the `usage` chunk
+    /// (`completion_tokens_details.reasoning_tokens` or `reasoning_tokens`).
+    /// Already included in `completion_tokens` — this is the breakdown (0 if absent).
+    reasoning_tokens: u64,
 }
 
 /// Stream an OpenAI-compatible SSE response, emitting tokens to the frontend
@@ -7350,6 +7499,8 @@ async fn stream_openai_response(
     // (OpenAI-compatible APIs emit it once `choices` is empty). 0 when absent.
     let mut prompt_usage: u64 = 0;
     let mut completion_usage: u64 = 0;
+    // Reasoning tokens itemized inside the usage chunk (0 when absent).
+    let mut reasoning_usage: u64 = 0;
 
     let process_sse_data = |data: &str,
                             iter_content: &mut String,
@@ -7357,7 +7508,8 @@ async fn stream_openai_response(
                             tool_calls: &mut Option<Vec<serde_json::Value>>,
                             full_content: &mut String,
                             prompt_usage: &mut u64,
-                            completion_usage: &mut u64|
+                            completion_usage: &mut u64,
+                            reasoning_usage: &mut u64|
      -> Result<(), String> {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
             // Capture provider-reported usage from the final stream chunk so the
@@ -7369,6 +7521,17 @@ async fn stream_openai_response(
                 }
                 if let Some(n) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
                     *completion_usage = n;
+                }
+                // Reasoning/thinking breakdown — OpenAI-compatible providers put
+                // it under `completion_tokens_details.reasoning_tokens`; some
+                // (DeepSeek, OpenRouter) also/instead expose `reasoning_tokens`.
+                let reasoning = usage
+                    .get("completion_tokens_details")
+                    .and_then(|d| d.get("reasoning_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| usage.get("reasoning_tokens").and_then(|v| v.as_u64()));
+                if let Some(n) = reasoning {
+                    *reasoning_usage = n;
                 }
             }
             // Reasoning trace (thinking-capable models) — stream with a
@@ -7430,7 +7593,7 @@ async fn stream_openai_response(
                     if let Some(data) = line.strip_prefix("data: ") {
                         let data = data.trim();
                         if data == "[DONE]" { continue; }
-                        process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage)?;
+                        process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage, &mut reasoning_usage)?;
                     }
                 }
             }
@@ -7456,7 +7619,7 @@ async fn stream_openai_response(
         if let Some(data) = line.strip_prefix("data: ") {
             let data = data.trim();
             if data != "[DONE]" {
-                process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage)?;
+                process_sse_data(data, &mut iter_content, &mut iter_thinking, &mut tool_calls, full_content, &mut prompt_usage, &mut completion_usage, &mut reasoning_usage)?;
             }
         }
     }
@@ -7467,7 +7630,7 @@ async fn stream_openai_response(
         calls.iter().map(|c| normalize_ollama_tool_call(c, arch)).collect()
     });
 
-    Ok(OpenAIStreamResult { iter_content, iter_thinking, tool_calls, prompt_tokens: prompt_usage, completion_tokens: completion_usage })
+    Ok(OpenAIStreamResult { iter_content, iter_thinking, tool_calls, prompt_tokens: prompt_usage, completion_tokens: completion_usage, reasoning_tokens: reasoning_usage })
 }
 
 /// Normalize tool-call arguments to a JSON object.
@@ -7752,14 +7915,18 @@ async fn run_openai_tool_loop(
         }
         // Record this iteration's token usage (provider-reported when available;
         // otherwise estimate from the current message context + this iteration's
-        // output). Thinking tokens are intentionally NOT included for now.
+        // output). Thinking/reasoning tokens are included: reported via the
+        // provider's usage details when available, else estimated from the
+        // streamed thinking trace and folded into the completion count.
         usage.push(usage_for(
             backend,
             model,
             stream.prompt_tokens,
             stream.completion_tokens,
+            stream.reasoning_tokens,
             estimate_json_messages_tokens(&openai_msgs),
             estimate_chat_tokens(&stream.iter_content),
+            estimate_chat_tokens(&stream.iter_thinking),
         ));
 
         // Handle tool calls or return final response
@@ -7835,8 +8002,9 @@ async fn run_openai_tool_loop(
                 } else if name == "spawn_micro_agent" {
                     let agent = args["agent"].as_str().unwrap_or("").to_string();
                     let task = args["task"].as_str().unwrap_or("").to_string();
-                    sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
-let result = match runner {
+                    let args_json = serde_json::to_string(&args).unwrap_or_default();
+                    sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone(), Some(args_json.clone()), None);
+                    let result = match runner {
                         Some(r) => Box::pin(run_micro_agent(r, &agent, &task)).await,
                         None => Err("Micro-agents are not available".to_string()),
                     };
@@ -7857,7 +8025,7 @@ let result = match runner {
                         }
                         Err(e) => (tag_agent_result(AGENT_RESULT_FAILED, &format!("Tool error: {}", e)), None),
                     };
-                    sink.emit_tool_progress(subagent_id, "done", "spawn_micro_agent", tool_path);
+                    sink.emit_tool_progress(subagent_id, "done", "spawn_micro_agent", tool_path, Some(args_json), Some(result_text.clone()));
                     let snippet = if result_text.len() > 200 {
                         format!("{}...", &result_text[..200])
                     } else {
@@ -7877,15 +8045,16 @@ let result = match runner {
                         "content": result_text
                     }));
                 } else {
-                    sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone());
+                    let args_json = serde_json::to_string(&args).unwrap_or_default();
+                    sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone(), Some(args_json.clone()), None);
                     let (result, file_changes) =
                         execute_tool_tracked(name, &args, client, tool_configs, root_path, backend)
                             .await
                             .unwrap_or_else(|e| {
-                                sink.emit_tool_progress(subagent_id, "error", name, tool_path.clone());
+                                sink.emit_tool_progress(subagent_id, "error", name, tool_path.clone(), Some(args_json.clone()), Some(format!("Tool error: {}", e)));
                                 (format!("Tool error: {}", e), Vec::new())
                             });
-                    sink.emit_tool_progress(subagent_id, "done", name, tool_path);
+                    sink.emit_tool_progress(subagent_id, "done", name, tool_path, Some(args_json), Some(result.clone()));
 
                     let snippet = if result.len() > 200 {
                         format!("{}...", &result[..200])
@@ -7917,7 +8086,14 @@ let result = match runner {
                 let outcomes = run_spawn_batch(runner, &batch).await;
 
                 for ((tool_call_id, _, _, args, _), (result, subagent_trace)) in spawn_items.into_iter().zip(outcomes) {
-                    sink.emit_tool_progress(subagent_id, "done", "spawn_subagent", args["path"].as_str().map(String::from));
+                    sink.emit_tool_progress(
+                        subagent_id,
+                        "done",
+                        "spawn_subagent",
+                        args["path"].as_str().map(String::from),
+                        Some(serde_json::to_string(&args).unwrap_or_default()),
+                        Some(result.clone()),
+                    );
 
                     // Charge the sub-agent's hidden reasoning to the parent's
                     // session token total so a sub-agent-heavy turn is counted.
@@ -7946,6 +8122,22 @@ let result = match runner {
                 }
             }
 
+            // Report this completed iteration (tool call + thinking + response)
+            // with the running context total so the frontend's context meter and
+            // the session summary update after EVERY iteration, not only once at
+            // the very end of the request. The context so far is exactly what the
+            // next iteration's request will re-send (all messages incl. tool
+            // results) plus the thinking produced so far.
+            if let Some(last_usage) = usage.last() {
+                let context_so_far = estimate_json_messages_tokens(&openai_msgs) + thinking_tokens;
+                sink.emit_iteration_usage(subagent_id, &IterationUsagePayload {
+                    context_tokens: context_so_far,
+                    thinking_tokens,
+                    iteration: iteration + 1,
+                    usage: last_usage.clone(),
+                });
+            }
+
             // Add separator between iterations
             if !full_content.is_empty() {
                 full_content.push('\n');
@@ -7963,7 +8155,7 @@ let result = match runner {
                 }
 
                 let context_tokens_now = estimate_json_messages_tokens(&openai_msgs)
-                    + estimate_chat_tokens(&full_content)
+                    + estimate_chat_tokens(&stream.iter_content)
                     + thinking_tokens;
 
                 // 1. Repetition detection → micro-agent repurpose + summarize +
@@ -8053,7 +8245,12 @@ let result = match runner {
             if full_content.is_empty() && all_tool_calls.is_empty() {
                 eprintln!("[nolock] WARNING: empty response from model in tool loop");
             }
-            let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
+            // Context the model processed: every message sent (incl. all prior
+            // iteration contents + tool results, already in `openai_msgs`) plus
+            // this final response (not yet in msgs) plus the hidden reasoning.
+            let context_tokens = estimate_json_messages_tokens(&openai_msgs)
+                + estimate_chat_tokens(&stream.iter_content)
+                + thinking_tokens;
             let mut final_content = full_content.clone();
             // Last resort: if the model stalled on thinking-only and never
             // produced visible content, surface a best-effort answer extracted
@@ -8085,7 +8282,9 @@ let result = match runner {
         full_content.len(),
         all_tool_calls.len()
     );
-    let context_tokens = estimate_json_messages_tokens(&openai_msgs) + estimate_chat_tokens(&full_content) + thinking_tokens;
+    // Every iteration's content + tool results are already in `openai_msgs` at
+    // this point, so the processed context is msgs + thinking (no double count).
+    let context_tokens = estimate_json_messages_tokens(&openai_msgs) + thinking_tokens;
     let mut final_content = full_content.clone();
     if final_content.trim().is_empty() && !total_thinking.trim().is_empty() {
         let fallback = extract_answer_from_thinking(&total_thinking);
@@ -9008,8 +9207,10 @@ pub async fn run_chat(
                         &req.model,
                         0,
                         0,
+                        0,
                         estimate_messages_tokens(&messages),
                         estimate_chat_tokens(&final_content),
+                        estimate_chat_tokens(&total_thinking),
                     )],
                 })
             }
@@ -9101,8 +9302,10 @@ pub async fn run_chat(
                     &req.model,
                     0,
                     0,
+                    0,
                     estimate_messages_tokens(&messages),
                     estimate_chat_tokens(&full_content),
+                    0,
                 )],
             })
         }
@@ -9258,8 +9461,10 @@ pub async fn run_chat(
                         &req.model,
                         0,
                         0,
+                        0,
                         estimate_messages_tokens(&messages),
                         estimate_chat_tokens(&final_content),
+                        thinking_tokens,
                     )],
                 })
             }
@@ -9368,8 +9573,10 @@ pub async fn run_chat(
                         &req.model,
                         0,
                         0,
+                        0,
                         estimate_messages_tokens(&messages),
                         estimate_chat_tokens(&full_content),
+                        thinking_tokens,
                     )],
                 })
             } else {
@@ -9454,8 +9661,10 @@ pub async fn run_chat(
                         &req.model,
                         0,
                         0,
+                        0,
                         estimate_messages_tokens(&messages),
                         estimate_chat_tokens(&full_content),
+                        0,
                     )],
                 })
             }
@@ -12537,19 +12746,63 @@ Fix the errors."#;
 
     #[test]
     fn usage_for_prefers_reported_over_estimate() {
-        let r = usage_for("openrouter", "openai/gpt-4o", 1000, 200, 500, 50);
+        let r = usage_for("openrouter", "openai/gpt-4o", 1000, 200, 0, 500, 50, 0);
         assert_eq!(r.provider, "openrouter");
         assert_eq!(r.model, "openai/gpt-4o");
         assert_eq!(r.prompt_tokens, 1000);
         assert_eq!(r.completion_tokens, 200);
         assert_eq!(r.total_tokens, 1200);
+        // Reported completions already include the itemized reasoning — the
+        // breakdown is surfaced without double counting.
+        assert_eq!(r.thinking_tokens, 0);
     }
 
     #[test]
     fn usage_for_falls_back_to_estimate_when_unreported() {
-        let r = usage_for("ollama", "qwen3", 0, 0, 400, 40);
+        let r = usage_for("ollama", "qwen3", 0, 0, 0, 400, 40, 0);
         assert_eq!(r.prompt_tokens, 400);
         assert_eq!(r.completion_tokens, 40);
         assert_eq!(r.total_tokens, 440);
+        assert_eq!(r.thinking_tokens, 0);
+    }
+
+    #[test]
+    fn usage_for_counts_thinking_tokens() {
+        // Provider itemizes reasoning separately: surfaced as the breakdown,
+        // completion stays the reported (already-inclusive) number.
+        let r = usage_for("openrouter", "deepseek/deepseek-r1", 1000, 300, 120, 900, 150, 130);
+        assert_eq!(r.prompt_tokens, 1000);
+        assert_eq!(r.completion_tokens, 300);
+        assert_eq!(r.thinking_tokens, 120);
+        assert_eq!(r.total_tokens, 1300);
+
+        // No provider usage at all: the estimated thinking tokens are folded
+        // into the completion estimate so reasoning is never under-counted.
+        let r = usage_for("ollama", "qwen3", 0, 0, 0, 400, 40, 60);
+        assert_eq!(r.prompt_tokens, 400);
+        assert_eq!(r.completion_tokens, 100, "estimate fallback must include thinking");
+        assert_eq!(r.thinking_tokens, 60);
+        assert_eq!(r.total_tokens, 500);
+    }
+
+    #[test]
+    fn iteration_usage_payload_serializes_camel_case() {
+        // The frontend listens for `iteration-usage` events and reads
+        // contextTokens / thinkingTokens / usage.promptTokens — the payload
+        // must serialize with camelCase keys.
+        let p = IterationUsagePayload {
+            context_tokens: 4321,
+            thinking_tokens: 77,
+            iteration: 3,
+            usage: usage_for("openrouter", "a/b", 100, 20, 5, 0, 0, 0),
+        };
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["contextTokens"], 4321);
+        assert_eq!(json["thinkingTokens"], 77);
+        assert_eq!(json["iteration"], 3);
+        assert_eq!(json["usage"]["promptTokens"], 100);
+        assert_eq!(json["usage"]["completionTokens"], 20);
+        assert_eq!(json["usage"]["thinkingTokens"], 5);
+        assert_eq!(json["usage"]["totalTokens"], 120);
     }
 }
