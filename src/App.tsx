@@ -22,6 +22,7 @@ import StatusBar from "./components/StatusBar";
 import ResizableHandle from "./components/ResizableHandle";
 import ShortcutsScreen from "./components/ShortcutsScreen";
 import SearchPanel from "./components/SearchPanel";
+import Notebook from "./components/Notebook";
 import { MarkdownContent } from "./components/ChatPanel";
 import nolockLogo from "./assets/nolocklogo-green.svg";
 
@@ -449,6 +450,43 @@ export default function App() {
   const isMarkdownFile = useCallback((filePath: string) => {
     return filePath.split(".").pop()?.toLowerCase() === "md";
   }, []);
+
+  const isNotebookFile = useCallback((filePath: string) => {
+    return filePath.split(".").pop()?.toLowerCase() === "ipynb";
+  }, []);
+
+  /**
+   * Renders the main view for an open file: a Colab-style notebook for
+   * `.ipynb` files, the Monaco editor for everything else.
+   */
+  const renderFileView = useCallback(
+    (file: OpenFile) => {
+      if (isNotebookFile(file.path)) {
+        return (
+          <Notebook
+            key={file.path}
+            filePath={file.path}
+            content={file.content}
+            onChange={(content) => updateFileContent(file.path, content)}
+            onSave={() => saveFile(file.path)}
+            rootPath={rootPath}
+          />
+        );
+      }
+      return (
+        <Editor
+          key={file.path}
+          filePath={file.path}
+          content={file.content}
+          onChange={(content) => updateFileContent(file.path, content)}
+          onSave={() => saveFile(file.path)}
+          revealLine={revealLine?.filePath === file.path ? revealLine.lineNumber : undefined}
+          onRevealConsumed={() => setRevealLine(null)}
+        />
+      );
+    },
+    [isNotebookFile, updateFileContent, saveFile, rootPath, revealLine]
+  );
 
   const toggleMarkdownPreview = useCallback((filePath: string) => {
     setMarkdownPreviewFiles((prev) => {
@@ -1041,15 +1079,7 @@ export default function App() {
                     )}
                     <div className="editor-content-inner">
                       {leftFile ? (
-                        <Editor
-                          key={leftFile.path}
-                          filePath={leftFile.path}
-                          content={leftFile.content}
-                          onChange={(content) => updateFileContent(leftFile.path, content)}
-                          onSave={() => saveFile(leftFile.path)}
-                          revealLine={revealLine?.filePath === leftFile.path ? revealLine.lineNumber : undefined}
-                          onRevealConsumed={() => setRevealLine(null)}
-                        />
+                        renderFileView(leftFile)
                       ) : (
                         <ShortcutsScreen />
                       )}
@@ -1089,15 +1119,7 @@ export default function App() {
                     )}
                     <div className="editor-content-inner">
                       {rightFile ? (
-                        <Editor
-                          key={rightFile.path}
-                          filePath={rightFile.path}
-                          content={rightFile.content}
-                          onChange={(content) => updateFileContent(rightFile.path, content)}
-                          onSave={() => saveFile(rightFile.path)}
-                          revealLine={revealLine?.filePath === rightFile.path ? revealLine.lineNumber : undefined}
-                          onRevealConsumed={() => setRevealLine(null)}
-                        />
+                        renderFileView(rightFile)
                       ) : (
                         <ShortcutsScreen />
                       )}
@@ -1146,6 +1168,9 @@ export default function App() {
 
                   <div className={`editor-content ${currentFile && markdownPreviewFiles.has(currentFile.path) ? "md-split" : ""}`}>
                     {currentFile ? (
+                      isNotebookFile(currentFile.path) ? (
+                        renderFileView(currentFile)
+                      ) : (
                         <>
                           <Editor
                             key={currentFile.path}
@@ -1162,6 +1187,7 @@ export default function App() {
                             </div>
                           )}
                         </>
+                      )
                     ) : (
                       <ShortcutsScreen />
                     )}

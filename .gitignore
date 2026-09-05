@@ -7,6 +7,13 @@ src-tauri/target/
 .sessions/
 src-tauri/gen/
 .venv-rlhf/
+# Python virtual environments (notebook runtimes are per-workspace, never committed)
+.venv/
+.venvs/
+venv/
+# Python bytecode / caches created by notebook execution
+__pycache__/
+*.pyc
 # Ignore RLHF feedback data, but keep the training guide and dependencies tracked
 .rlhf/*
 !.rlhf/requirements.txt
