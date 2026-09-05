@@ -11,6 +11,8 @@ mod fabric;
 mod hooks;
 mod linter;
 mod macos_keyboard;
+pub mod notebook;
+pub mod pykernel;
 pub mod secrets;
 mod switchyard;
 mod terminal_memory;
@@ -9724,6 +9726,7 @@ pub fn run() {
         .manage(PtyState {
             instances: Mutex::new(HashMap::new()),
         })
+        .manage(pykernel::KernelState::default())
         .manage(SubAgentMemory::new())
         .manage(browser::BrowserState::new())
         .manage(terminal_memory::TermMemory::new())
@@ -9798,6 +9801,13 @@ pub fn run() {
             secrets::store_secret,
             secrets::get_secret,
             secrets::delete_secret,
+            notebook::python_list_envs,
+            notebook::python_create_env,
+            pykernel::kernel_start,
+            pykernel::kernel_run,
+            pykernel::kernel_interrupt,
+            pykernel::kernel_stop,
+            pykernel::kernel_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running nolock");

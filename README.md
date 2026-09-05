@@ -81,6 +81,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 ## Features
 
 - **Code Editor** — Full-featured Monaco editor with syntax highlighting for 100+ languages, bracket colorization, minimap, word wrap, and **inline linting** (ESLint for TypeScript/JavaScript, Ruff for Python, Clippy for Rust) with configurable rules via <kbd>Ctrl+E, S</kbd>.
+- **Native Notebooks (`.ipynb`)** — Colab-style Jupyter notebooks rendered natively: markdown cells, auto-height Monaco code cells, rich outputs (images, HTML, markdown, JSON, tracebacks), and a **persistent Python kernel per notebook** running inside a **Python virtual environment** you pick (or create) from the toolbar. State survives across cells; Shift+Enter runs and advances.
 - **File Search & Replace** — Search across all workspace files with regex support, match-case toggles, debounced live results, grouped by file with inline match previews, and batch replace-all with confirmation.
 - **AI Inline Completions** — Fill-In-The-Middle (FITM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
 - **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing, grep, edit, write_file), custom tools via `.tools/`, and context token tracking.

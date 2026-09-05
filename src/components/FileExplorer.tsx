@@ -45,6 +45,7 @@ function getFileColor(name: string): string {
     py: "#4584b6", rs: "#dea584", go: "#00add8",
     html: "#e34c26", css: "#563d7c",
     json: "#cbcb41", md: "#519aba",
+    ipynb: "#f37626",
     yaml: "#cb171e", yml: "#cb171e",
     toml: "#9c4221", sh: "#89e051", bash: "#89e051",
   };
