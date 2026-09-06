@@ -57,6 +57,12 @@ import Notebook from "../Notebook";
 const NOTEBOOK_JSON = JSON.stringify({
   cells: [
     {
+      id: "cell-title",
+      cell_type: "markdown",
+      metadata: {},
+      source: ["# HW 1 — Polynomial functions"],
+    },
+    {
       id: "cell-abc",
       cell_type: "code",
       metadata: {},
@@ -371,6 +377,181 @@ describe("Notebook — run flow shows outputs", () => {
       expect(err).toBeTruthy();
       expect(err!.textContent).toContain("KernelError");
       expect(err!.textContent).toContain("Failed to spawn Python kernel");
+    });
+  });
+
+  it("typesets text/latex outputs via KaTeX and persists a single mimebundle", async () => {
+    setupLocalStorageMocks();
+    setupInvokeMocks({
+      status: "ok",
+      execCount: 2,
+      stdout: "",
+      stderr: "",
+      outputs: [
+        { kind: "result", mime: "text/latex", data: "$$x^{2} + 2 x$$" },
+        { kind: "result", mime: "text/plain", data: "x**2 + 2*x" },
+      ],
+      error: null,
+      elapsedMs: 2,
+    });
+
+    let content = NOTEBOOK_JSON;
+    const onChange = vi.fn((next: string) => {
+      content = next;
+    });
+    const { container, rerender } = render(
+      <Notebook
+        filePath="/tmp/proj/test.ipynb"
+        content={content}
+        onChange={onChange}
+        onSave={vi.fn()}
+        rootPath="/tmp/proj"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("python_list_envs", expect.anything());
+    });
+    fireEvent.click(container.querySelectorAll(".nb-run-btn")[0]);
+    await waitFor(() => expect(onChange).toHaveBeenCalled());
+    rerender(
+      <Notebook
+        filePath="/tmp/proj/test.ipynb"
+        content={content}
+        onChange={onChange}
+        onSave={vi.fn()}
+        rootPath="/tmp/proj"
+      />,
+    );
+
+    // KaTeX typeset markup renders inline
+    await waitFor(() => {
+      const latex = container.querySelector(".nb-out-latex");
+      expect(latex).toBeTruthy();
+      expect(latex!.querySelector(".katex")).toBeTruthy();
+    });
+
+    // Persisted as ONE execute_result with a combined mimebundle (Colab shape)
+    const parsed = JSON.parse(content);
+    const cell = parsed.cells.find((c: any) => c.id === "cell-abc");
+    expect(cell.outputs).toHaveLength(1);
+    expect(cell.outputs[0].output_type).toBe("execute_result");
+    expect(cell.outputs[0].data["text/latex"]).toBe("$$x^{2} + 2 x$$");
+    expect(cell.outputs[0].data["text/plain"]).toBe("x**2 + 2*x");
+  });
+
+  it("exports a self-contained printable HTML next to the notebook and opens it", async () => {
+    setupLocalStorageMocks();
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "python_list_envs") return [ENV];
+      return null;
+    });
+
+    const { container } = render(
+      <Notebook
+        filePath="/tmp/proj/test.ipynb"
+        content={NOTEBOOK_JSON}
+        onChange={vi.fn()}
+        onSave={vi.fn()}
+        rootPath="/tmp/proj"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("python_list_envs", expect.anything());
+    });
+
+    const exportBtn = container.querySelector(
+      'button[title*="Export as a self-contained"]',
+    ) as HTMLButtonElement | null;
+    expect(exportBtn).toBeTruthy();
+    fireEvent.click(exportBtn!);
+
+    await waitFor(() => {
+      const wf = mockInvoke.mock.calls.find((c: any[]) => c[0] === "write_file");
+      expect(wf).toBeTruthy();
+      const args = wf![1] as { path: string; content: string };
+      expect(args.path).toBe("/tmp/proj/test.html");
+      expect(args.content).toContain("<!DOCTYPE html>");
+      // KaTeX is inlined so the file renders math offline. (Font data URIs
+      // are asserted at lib level — vitest's css:false empties ?raw CSS
+      // imports in the component test environment.)
+      expect(args.content).toContain(".katex");
+      // Document title comes from the notebook's first markdown heading,
+      // never from the file name
+      expect(args.content).toContain("<title>HW 1 — Polynomial functions</title>");
+      expect(args.content).not.toContain("test.ipynb");
+      expect(args.content).not.toContain("nb-title");
+      // Code cell with prompt + source, escaped
+      expect(args.content).toContain("In [ ]:");
+      expect(args.content).toContain("print('hello from kernel')");
+    });
+    // The export must open the file via the open_path command (the shell
+    // plugin's `open` rejects bare filesystem paths).
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("open_path", { path: "/tmp/proj/test.html" });
+    });
+  });
+
+  it("excludes cells tagged hide from the exported HTML", async () => {
+    setupLocalStorageMocks();
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "python_list_envs") return [ENV];
+      return null;
+    });
+
+    const hiddenNotebook = JSON.stringify({
+      cells: [
+        {
+          id: "cell-helper",
+          cell_type: "code",
+          metadata: { tags: ["hide"] },
+          outputs: [],
+          execution_count: 1,
+          source: ["SECRET_HELPER = 'never print me'"],
+        },
+        {
+          id: "cell-answer",
+          cell_type: "markdown",
+          metadata: {},
+          source: ["# The visible answer"],
+        },
+      ],
+      metadata: {},
+      nbformat: 4,
+      nbformat_minor: 5,
+    });
+
+    const { container } = render(
+      <Notebook
+        filePath="/tmp/proj/test.ipynb"
+        content={hiddenNotebook}
+        onChange={vi.fn()}
+        onSave={vi.fn()}
+        rootPath="/tmp/proj"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("python_list_envs", expect.anything());
+    });
+
+    // The hidden cell is dimmed in the UI
+    expect(container.querySelector(".nb-cell.nb-hidden")).toBeTruthy();
+
+    const exportBtn = container.querySelector(
+      'button[title*="Export as a self-contained"]',
+    ) as HTMLButtonElement | null;
+    expect(exportBtn).toBeTruthy();
+    fireEvent.click(exportBtn!);
+
+    // mockInvoke accumulates calls across tests — take the LAST write_file.
+    await waitFor(() => {
+      const wfCalls = mockInvoke.mock.calls.filter((c: any[]) => c[0] === "write_file");
+      expect(wfCalls.length).toBeGreaterThan(0);
+      const args = wfCalls[wfCalls.length - 1][1] as { path: string; content: string };
+      expect(args.content).toContain("The visible answer");
+      expect(args.content).not.toContain("SECRET_HELPER");
     });
   });
 });

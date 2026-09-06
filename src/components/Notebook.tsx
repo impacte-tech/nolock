@@ -23,6 +23,15 @@ import type { MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as monaco from "monaco-editor";
+import katex from "katex";
+import { marked } from "marked";
+import { MATH_DELIMITERS, protectMath } from "../lib/math";
+import "katex/dist/katex.min.css";
+// Inlined into exported HTML so the file is fully self-contained (offline).
+import katexCssRaw from "katex/dist/katex.min.css?raw";
+import { inlineKatexFonts } from "../lib/katexFonts";
+import katexJsRaw from "katex/dist/katex.min.js?raw";
+import katexAutoRenderRaw from "katex/dist/contrib/auto-render.min.js?raw";
 import { MarkdownContent } from "./ChatPanel";
 import Select from "./Select";
 import {
@@ -108,7 +117,75 @@ function ensureMonacoTheme() {
   notebookThemeDefined = true;
 }
 
-/** Convert a kernel RunResult into nbformat cell outputs. */
+// --- Math (KaTeX) -----------------------------------------------------------
+
+/**
+ * Strip display-math delimiters (`$$…$$`, `\[…\]`) that libraries like SymPy
+ * and latexify wrap around their `_repr_latex_` output — KaTeX's
+ * `renderToString(…, {displayMode: true})` expects the bare expression.
+ */
+function cleanLatex(s: string): string {
+  let out = s.trim();
+  if (out.startsWith("$$") && out.endsWith("$$") && out.length > 4) {
+    out = out.slice(2, -2);
+  } else if (out.startsWith("\\[") && out.endsWith("\\]") && out.length > 4) {
+    out = out.slice(2, -2);
+  } else if (out.startsWith("$") && out.endsWith("$") && out.length > 2) {
+    out = out.slice(1, -1);
+  }
+  return out.trim();
+}
+
+/** Render a LaTeX string (with or without delimiters) into HTML. */
+function renderLatexHtml(latex: string): string {
+  try {
+    return katex.renderToString(cleanLatex(latex), {
+      displayMode: true,
+      throwOnError: false,
+      output: "html",
+    });
+  } catch {
+    return escapeHtml(latex);
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * Cells tagged "hide" (or nbconvert's "remove-cell") are excluded from
+ * exports. They still execute normally — the tag only affects visibility.
+ */
+export function isHiddenCell(cell: NotebookCell): boolean {
+  const tags = cell.metadata?.tags;
+  return (
+    Array.isArray(tags) && (tags.includes("hide") || tags.includes("remove-cell"))
+  );
+}
+
+/**
+ * Markdown with $…$ / $$…$$ math typeset in place (Colab behaviour).
+ * `MarkdownContent` handles the auto-render itself — this wrapper only adds
+ * the container ref used by notebook cells.
+ */
+function MarkdownWithMath({ text }: { text: string }) {
+  return <MarkdownContent text={text} />;
+}
+
+/**
+ * Convert a kernel RunResult into nbformat cell outputs.
+ *
+ * Rich outputs are grouped into standard nbformat mimebundles: consecutive
+ * kernel outputs of the same kind (`result`/`display`) merge into ONE
+ * `execute_result`/`display_data` output with a combined `data` dict — the
+ * shape Jupyter/Colab expect (e.g. SymPy emits text/latex + text/plain for a
+ * single expression; Colab then picks its preferred renderer).
+ */
 function toNbformatOutputs(result: RunResult): NotebookOutput[] {
   const outputs: NotebookOutput[] = [];
   if (result.stdout) {
@@ -117,17 +194,31 @@ function toNbformatOutputs(result: RunResult): NotebookOutput[] {
   if (result.stderr) {
     outputs.push({ output_type: "stream", name: "stderr", text: stringToSource(result.stderr) });
   }
-  for (const o of result.outputs) {
-    if (o.kind === "result") {
+
+  let pending: { kind: "result" | "display"; data: Record<string, unknown> } | null = null;
+  const flushPending = () => {
+    if (!pending) return;
+    if (pending.kind === "result") {
       outputs.push({
         output_type: "execute_result",
         execution_count: result.execCount,
-        data: { [o.mime]: o.data },
+        data: pending.data,
       });
-    } else if (o.kind === "display") {
-      outputs.push({ output_type: "display_data", data: { [o.mime]: o.data } });
+    } else {
+      outputs.push({ output_type: "display_data", data: pending.data });
     }
+    pending = null;
+  };
+  for (const o of result.outputs) {
+    if (o.kind !== "result" && o.kind !== "display") continue;
+    if (!pending || pending.kind !== o.kind) {
+      flushPending();
+      pending = { kind: o.kind, data: {} };
+    }
+    pending.data[o.mime] = o.data;
   }
+  flushPending();
+
   if (result.error) {
     outputs.push({
       output_type: "error",
@@ -279,7 +370,11 @@ function OutputView({ output }: { output: NotebookOutput }) {
       return <div className="nb-out-html" dangerouslySetInnerHTML={{ __html: String(data["text/html"]) }} />;
     }
     if (typeof data["text/markdown"] === "string" && data["text/markdown"]) {
-      return <div className="nb-out-md"><MarkdownContent text={String(data["text/markdown"])} /></div>;
+      return (
+        <div className="nb-out-md">
+          <MarkdownWithMath text={String(data["text/markdown"])} />
+        </div>
+      );
     }
     if (data["application/json"] !== undefined && data["application/json"] !== null) {
       const json = data["application/json"];
@@ -287,6 +382,16 @@ function OutputView({ output }: { output: NotebookOutput }) {
         <pre className="nb-out-text">
           {typeof json === "string" ? json : JSON.stringify(json, null, 2)}
         </pre>
+      );
+    }
+    // Typeset LaTeX (SymPy, latexify, …) — preferred over the raw repr so a
+    // text/latex + text/plain bundle renders as math, not both.
+    if (typeof data["text/latex"] === "string" && data["text/latex"]) {
+      return (
+        <div
+          className="nb-out-latex"
+          dangerouslySetInnerHTML={{ __html: renderLatexHtml(String(data["text/latex"])) }}
+        />
       );
     }
     if (typeof data["text/plain"] === "string" && data["text/plain"]) {
@@ -321,6 +426,7 @@ interface CellViewProps {
   onRun: (cellId: string, advance: boolean) => void;
   onMove: (cellId: string, delta: -1 | 1) => void;
   onDelete: (cellId: string) => void;
+  onToggleHide: (cellId: string) => void;
   editorRegistry: MutableRefObject<Map<string, monaco.editor.IStandaloneCodeEditor>>;
   pendingFocusRef: MutableRefObject<string | null>;
   onSaveRef: MutableRefObject<() => void>;
@@ -334,33 +440,51 @@ function CellView({
   onRun,
   onMove,
   onDelete,
+  onToggleHide,
   editorRegistry,
   pendingFocusRef,
   onSaveRef,
 }: CellViewProps) {
   const [editingMd, setEditingMd] = useState(false);
   const source = sourceToString(cell.source);
+  const hidden = isHiddenCell(cell);
 
   const gutter = (
     <div className="nb-gutter">
-      <button
-        className={`nb-run-btn${running ? " busy" : ""}`}
-        title="Run cell (Shift+Enter)"
-        onClick={() => onRun(cell.id, true)}
-        disabled={running}
-      >
-        {running ? <span className="nb-spinner" /> : <PlayIcon />}
-      </button>
       {cell.cell_type === "code" && (
-        <span className="nb-exec-count" title="Execution count">
-          {cell.execution_count != null ? `[${cell.execution_count}]` : "[ ]"}
-        </span>
+        <>
+          <button
+            className={`nb-run-btn${running ? " busy" : ""}`}
+            title="Run cell (Shift+Enter)"
+            onClick={() => onRun(cell.id, true)}
+            disabled={running}
+          >
+            {running ? <span className="nb-spinner" /> : <PlayIcon />}
+          </button>
+          <span className="nb-exec-count" title="Execution count">
+            {cell.execution_count != null ? `[${cell.execution_count}]` : "[ ]"}
+          </span>
+        </>
       )}
     </div>
   );
 
   const actions = (
     <div className="nb-cell-actions">
+      <button
+        title={hidden ? "Hidden from export — click to include" : "Hide this cell from the exported PDF"}
+        onClick={() => onToggleHide(cell.id)}
+      >
+        {hidden ? (
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+            <path d="M8 3c-3.5 0-6.3 2.4-7.5 5 .5 1.1 1.2 2.1 2.1 2.9l1.5-1.5C3.7 9 3.4 8.5 3.2 8 4.3 6 6 4.5 8 4.5c.8 0 1.6.2 2.3.6l1.2-1.2C10.4 3.3 9.2 3 8 3zm5.4 1.2L2.1 15.5l.7.7L4 14.9c1.2.7 2.6 1.1 4 1.1 3.5 0 6.3-2.4 7.5-5-.5-1.2-1.3-2.3-2.3-3.2l1.5-1.5-.7-.7-1.4 1.4c-.1-.1-.1-.2-.2-.2zM8 5.5C6.6 5.5 5.5 6.6 5.5 8c0 .5.1 1 .4 1.4l4.5-4.5C9.9 5.7 9 5.5 8 5.5zm5.1 2.4c-.3.6-.6 1.1-1 1.6l-5.6 5.6c.5.1 1 .2 1.5.2 2 0 3.7-1.5 4.8-3.5.2-.4.4-.9.6-1.3-.1-.9-.2-1.8-.3-2.6z" />
+          </svg>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+            <path d="M8 3C4.5 3 1.7 5.4.5 8 1.7 10.6 4.5 13 8 13s6.3-2.4 7.5-5C14.3 5.4 11.5 3 8 3zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6zm0 1.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z" />
+          </svg>
+        )}
+      </button>
       <button title="Move cell up" onClick={() => onMove(cell.id, -1)}>
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
           <path d="M8 3l5 5H9v7H7v-7H3z" />
@@ -381,7 +505,7 @@ function CellView({
 
   if (cell.cell_type === "markdown") {
     return (
-      <div className="nb-cell nb-md" onDoubleClick={() => setEditingMd(true)}>
+      <div className={`nb-cell nb-md${hidden ? " nb-hidden" : ""}`} onDoubleClick={() => setEditingMd(true)}>
         {gutter}
         <div className="nb-cell-body">
           {editingMd ? (
@@ -408,7 +532,7 @@ function CellView({
           ) : (
             <div className="nb-md-rendered">
               {source.trim() ? (
-                <MarkdownContent text={source} />
+                <MarkdownWithMath text={source} />
               ) : (
                 <span className="nb-md-empty">Double-click to add text</span>
               )}
@@ -423,7 +547,7 @@ function CellView({
   if (cell.cell_type !== "code") {
     // Unknown/raw cell types render as inert raw text.
     return (
-      <div className="nb-cell nb-raw">
+      <div className={`nb-cell nb-raw${hidden ? " nb-hidden" : ""}`}>
         {gutter}
         <div className="nb-cell-body">
           <pre className="nb-out-text">{source}</pre>
@@ -435,7 +559,7 @@ function CellView({
 
   const outputs = liveOutputs ?? cell.outputs;
   return (
-    <div className={`nb-cell nb-code${running ? " running" : ""}`}>
+    <div className={`nb-cell nb-code${running ? " running" : ""}${hidden ? " nb-hidden" : ""}`}>
       {gutter}
       <div className="nb-cell-body">
         <CellEditor
@@ -459,6 +583,142 @@ function CellView({
       {actions}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Export — self-contained printable HTML (open in a browser → Ctrl+P → PDF)
+//
+// This is the same route Colab's "File → Print" takes: a clean light-theme
+// document with markdown rendered, code as monospace blocks, and every output
+// (streams, images, HTML, tables, LaTeX). KaTeX is inlined so the exported
+// file works fully offline; `renderMathInElement` typesets $…$ / $$…$$ in both
+// markdown and text/latex outputs.
+// ---------------------------------------------------------------------------
+
+const EXPORT_CSS = `
+  body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; color: #202124;
+         max-width: 860px; margin: 0 auto; padding: 32px 24px 64px; line-height: 1.55; }
+  .cell { margin: 14px 0; break-inside: avoid; page-break-inside: avoid; }
+  .cell.code { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
+  .prompt { background: #f8f9fa; padding: 6px 14px; font-family: 'JetBrains Mono', Consolas, monospace;
+            font-size: 12px; color: #5f6368; border-bottom: 1px solid #eee; }
+  pre.src { margin: 0; padding: 12px 14px; font-family: 'JetBrains Mono', Consolas, monospace;
+            font-size: 13px; white-space: pre-wrap; word-break: break-word; background: #fff; }
+  .outs { border-top: 1px dashed #e0e0e0; }
+  pre.out { margin: 0; padding: 10px 14px; font-family: 'JetBrains Mono', Consolas, monospace;
+            font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  .out.stream.stderr, pre.out.error { color: #c5221f; background: #fdf3f2; }
+  .out.latex { padding: 12px 14px; overflow-x: auto; }
+  .out.latex .katex-display { margin: 0.4em 0; }
+  img.out.image { max-width: 100%; padding: 10px 14px; box-sizing: border-box; }
+  .cell.md { padding: 4px 6px; }
+  .cell.md pre { background: #f6f8fa; padding: 10px; border-radius: 6px; overflow-x: auto; }
+  .cell.md code { background: #f1f3f4; padding: 1px 5px; border-radius: 4px;
+                  font-family: 'JetBrains Mono', monospace; font-size: 0.9em; }
+  .cell.md table { border-collapse: collapse; }
+  .cell.md th, .cell.md td { border: 1px solid #dadce0; padding: 6px 10px; }
+  .cell.md h1 { font-size: 1.7em; margin: 4px 0 14px; padding-bottom: 8px;
+                border-bottom: 1px solid #dadce0; }
+  @media print { body { padding: 0; max-width: none; } }
+`;
+
+function buildExportHtml(nb: NotebookJson): string {
+  const safeScript = (js: string) => js.replace(/<\/script>/gi, "<\\/script>");
+
+  const outputHtml = (o: NotebookOutput): string => {
+    if (o.output_type === "stream") {
+      return `<pre class="out stream${o.name === "stderr" ? " stderr" : ""}">${escapeHtml(sourceToString(o.text))}</pre>`;
+    }
+    if (o.output_type === "execute_result" || o.output_type === "display_data") {
+      const data = (o.data ?? {}) as Record<string, unknown>;
+      if (typeof data["text/latex"] === "string" && data["text/latex"]) {
+        return `<div class="out latex">${escapeHtml(String(data["text/latex"]))}</div>`;
+      }
+      if (typeof data["image/png"] === "string" && data["image/png"]) {
+        return `<img class="out image" alt="output" src="data:image/png;base64,${data["image/png"]}" />`;
+      }
+      if (typeof data["image/jpeg"] === "string" && data["image/jpeg"]) {
+        return `<img class="out image" alt="output" src="data:image/jpeg;base64,${data["image/jpeg"]}" />`;
+      }
+      if (typeof data["image/svg+xml"] === "string" && data["image/svg+xml"]) {
+        return `<div class="out svg">${String(data["image/svg+xml"])}</div>`;
+      }
+      if (typeof data["text/html"] === "string" && data["text/html"]) {
+        return `<div class="out html">${String(data["text/html"])}</div>`;
+      }
+      if (typeof data["text/markdown"] === "string" && data["text/markdown"]) {
+        const { masked, restore } = protectMath(String(data["text/markdown"]));
+        return `<div class="out md">${restore(marked.parse(masked) as string)}</div>`;
+      }
+      if (typeof data["text/plain"] === "string" && data["text/plain"]) {
+        return `<pre class="out text">${escapeHtml(String(data["text/plain"]))}</pre>`;
+      }
+      return "";
+    }
+    if (o.output_type === "error") {
+      const tb = Array.isArray(o.traceback)
+        ? (o.traceback as unknown[]).map(String).join("\n")
+        : `${String(o.ename ?? "Error")}: ${String(o.evalue ?? "")}`;
+      return `<pre class="out error">${escapeHtml(tb)}</pre>`;
+    }
+    return "";
+  };
+
+  const visibleCells = nb.cells.filter((cell) => !isHiddenCell(cell));
+
+  /**
+   * Document title for the export: the first level-1 markdown heading written
+   * by the author — never the notebook filename (keeps submissions anonymous
+   * and avoids leaking file names into PDF metadata/headers).
+   */
+  let docTitle = "";
+  for (const cell of visibleCells) {
+    if (cell.cell_type !== "markdown") continue;
+    const m = sourceToString(cell.source).match(/^#\s+(.+)\s*$/m);
+    if (m) {
+      docTitle = m[1].trim();
+      break;
+    }
+  }
+
+  const cellsHtml = visibleCells
+    .map((cell) => {
+      const src = sourceToString(cell.source);
+      if (cell.cell_type === "markdown") {
+        const { masked, restore } = protectMath(src);
+        return `<div class="cell md">${restore(marked.parse(masked) as string)}</div>`;
+      }
+      if (cell.cell_type !== "code") {
+        return `<div class="cell raw"><pre class="src">${escapeHtml(src)}</pre></div>`;
+      }
+      const outs = cell.outputs.map(outputHtml).filter(Boolean).join("\n");
+      return (
+        `<div class="cell code"><div class="prompt">In [${cell.execution_count ?? " "}]:</div>` +
+        `<pre class="src">${escapeHtml(src)}</pre>` +
+        (outs ? `<div class="outs">${outs}</div>` : "") +
+        `</div>`
+      );
+    })
+    .join("\n");
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${escapeHtml(docTitle)}</title>
+<style>${inlineKatexFonts(katexCssRaw)}</style>
+<style>${EXPORT_CSS}</style>
+</head>
+<body>
+${cellsHtml}
+<script>${safeScript(katexJsRaw)}</script>
+<script>${safeScript(katexAutoRenderRaw)}</script>
+<script>
+  renderMathInElement(document.body, { delimiters: ${JSON.stringify(MATH_DELIMITERS)}, throwOnError: false });
+</script>
+</body>
+</html>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +794,7 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
   }, []);
   const pidRef = useRef<number | null>(null);
   const [kernelError, setKernelError] = useState<string | null>(null);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
   // In-flight start promise — prevents double-spawn races (e.g. Shift+Enter
   // twice, or run-all while connecting): a second kernel_start would KILL the
   // first kernel mid-handshake and break the in-flight run.
@@ -689,6 +950,28 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
     [emitCells]
   );
 
+  // Toggle the "hide" export tag — hidden cells still run, but ⬇ Export
+  // skips them (helper definitions, scratch work, ...).
+  const toggleCellHide = useCallback(
+    (cellId: string) => {
+      const nb = nbRef.current;
+      if (!nb) return;
+      emitCells(
+        nb.cells.map((c) => {
+          if (c.id !== cellId) return c;
+          const tags = Array.isArray(c.metadata.tags)
+            ? c.metadata.tags.map(String)
+            : [];
+          const i = tags.indexOf("hide");
+          if (i >= 0) tags.splice(i, 1);
+          else tags.push("hide");
+          return { ...c, metadata: { ...c.metadata, tags } };
+        })
+      );
+    },
+    [emitCells]
+  );
+
   // --- execution -----------------------------------------------------------
   const [runningCellIds, setRunningCellIds] = useState<Set<string>>(new Set());
   const [liveOutputs, setLiveOutputs] = useState<Record<string, NotebookOutput[]>>({});
@@ -815,6 +1098,33 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
       await runCell(id, false);
     }
   }, [runCell]);
+
+  // --- export ---------------------------------------------------------------
+  const exportNotebook = useCallback(async () => {
+    const nb = nbRef.current;
+    if (!nb) return;
+    setKernelError(null);
+    setExportMsg(null);
+    try {
+      const htmlPath = /\.ipynb$/i.test(filePath)
+        ? filePath.replace(/\.ipynb$/i, ".html")
+        : `${filePath}.html`;
+      const html = buildExportHtml(nb);
+      await invoke("write_file", { path: htmlPath, content: html });
+      try {
+        await invoke("open_path", { path: htmlPath });
+        setExportMsg(
+          `Exported to ${htmlPath.split("/").pop()} — opened in your browser. Ctrl+P → Save as PDF.`
+        );
+      } catch (openErr) {
+        setExportMsg(
+          `Exported to ${htmlPath} — auto-open failed (${String(openErr)}); open the file manually to print.`
+        );
+      }
+    } catch (e) {
+      setKernelError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [filePath]);
 
   // --- kernel events -------------------------------------------------------
   useEffect(() => {
@@ -962,6 +1272,13 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
         <button className="nb-btn" onClick={() => onSaveRef.current()} title="Save (Ctrl+S)">
           Save
         </button>
+        <button
+          className="nb-btn"
+          onClick={exportNotebook}
+          title="Export as a self-contained printable HTML (opens in your browser — Ctrl+P → Save as PDF). The .ipynb itself also uploads directly into Google Colab with outputs and math preserved."
+        >
+          ⬇ Export
+        </button>
         <span className="nb-toolbar-spacer" />
         {envCreatorOpen ? (
           <span className="nb-env-creator">
@@ -995,6 +1312,7 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
       </div>
 
       {kernelError && <div className="nb-kernel-error">⚠ {kernelError}</div>}
+      {exportMsg && <div className="nb-export-ok">✔ {exportMsg}</div>}
 
       <div className="nb-cells">
         {notebook.cells.map((cell) => (
@@ -1007,6 +1325,7 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
             onRun={runCell}
             onMove={moveCell}
             onDelete={deleteCell}
+            onToggleHide={toggleCellHide}
             editorRegistry={editorRegistryRef}
             pendingFocusRef={pendingFocusRef}
             onSaveRef={onSaveRef}

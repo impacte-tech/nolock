@@ -6,6 +6,7 @@ import FileAutocomplete, { type AgentRef } from "./FileAutocomplete";
 import SkillAutocomplete from "./SkillAutocomplete";
 import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
+import { renderMath, protectMath } from "../lib/math";
 import { getSecret } from "../lib/secrets";
 import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity, isCloudBackend, BACKENDS } from "../lib/backends";
 import {
@@ -189,9 +190,19 @@ interface Props {
 let globalOpenUrl: ((url: string) => void) | null = null;
 
 export function MarkdownContent({ text }: { text: string }) {
-  const html = marked.parse(text) as string;
+  const ref = useRef<HTMLDivElement>(null);
+  // Mask math spans → parse markdown → restore math (protects \, and _ from
+  // markdown mangling) → KaTeX auto-render typesets the restored spans.
+  const { masked, restore } = protectMath(text);
+  const html = restore(marked.parse(masked) as string);
+
+  useEffect(() => {
+    if (ref.current) renderMath(ref.current);
+  }, [text]);
+
   return (
     <div
+      ref={ref}
       className="chat-markdown"
       dangerouslySetInnerHTML={{ __html: html }}
     />

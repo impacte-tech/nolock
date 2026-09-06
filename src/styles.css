@@ -1257,6 +1257,18 @@ html, body, #root {
   margin-bottom: 0;
 }
 
+/* KaTeX in agent chat — display math scrolls horizontally if long */
+.chat-markdown .katex-display {
+  margin: 8px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
+.chat-markdown .katex {
+  font-size: 1.05em;
+}
+
 .chat-markdown h1,
 .chat-markdown h2,
 .chat-markdown h3,
@@ -5165,6 +5177,15 @@ select.field-input {
   border-color: #e8b830;
 }
 
+.nb-cell.nb-hidden {
+  opacity: 0.45;
+  border-style: dashed;
+}
+
+.nb-cell.nb-hidden:hover {
+  opacity: 0.85;
+}
+
 /* --- Left gutter (Colab-style run button + exec count) --- */
 .nb-gutter {
   display: flex;
@@ -5331,6 +5352,21 @@ select.field-input {
   padding: 4px 12px;
 }
 
+.nb-out-latex {
+  padding: 8px 12px;
+  overflow-x: auto;
+  color: var(--text-primary);
+}
+
+.nb-out-latex .katex {
+  font-size: 1.05em;
+  text-align: left;
+}
+
+.nb-out-latex .katex-display {
+  margin: 0.4em 0;
+}
+
 /* --- Markdown cells --- */
 .nb-md-rendered {
   padding: 4px 6px;
@@ -5367,6 +5403,15 @@ select.field-input {
   background: rgba(248, 81, 73, 0.1);
   border-bottom: 1px solid rgba(248, 81, 73, 0.35);
   color: #f85149;
+  font-size: 12px;
+  padding: 6px 14px;
+  flex-shrink: 0;
+}
+
+.nb-export-ok {
+  background: rgba(63, 185, 80, 0.1);
+  border-bottom: 1px solid rgba(63, 185, 80, 0.35);
+  color: #3fb950;
   font-size: 12px;
   padding: 6px 14px;
   flex-shrink: 0;
