@@ -9717,8 +9717,39 @@ pub async fn run_chat(
 // Main
 // ---------------------------------------------------------------------------
 
+/// Open a file or URL with the system default handler (xdg-open / open /
+/// cmd start). Used by the notebook export — the shell plugin's `open`
+/// validator only permits http(s)/mailto/tel URLs, not filesystem paths.
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    let result = if cfg!(target_os = "linux") {
+        std::process::Command::new("xdg-open").arg(&path).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&path).spawn()
+    } else {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .spawn()
+    };
+    result
+        .map(|_| ())
+        .map_err(|e| format!("failed to open {}: {}", path, e))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Workaround: on some Linux GPU driver stacks, WebKitGTK's DMABUF /
+    // accelerated-compositing path renders the tauri://-served frontend as a
+    // black window even though the web process is fully healthy (page loads,
+    // React mounts, IPC works — the pixels just never composite). Forcing the
+    // non-composited software path fixes it. Users can still opt back into
+    // hardware rendering by pre-setting either variable themselves.
+    if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
@@ -9744,6 +9775,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            open_path,
             read_file,
             write_file,
             list_directory,

@@ -6,6 +6,13 @@ import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MarkdownContent } from "../ChatPanel";
 
+/** Poll until an async condition holds (KaTeX renders in an effect). */
+async function waitForCond(fn: () => boolean, tries = 50): Promise<void> {
+  for (let i = 0; i < tries && !fn(); i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 describe("MarkdownContent", () => {
   it("renders plain text", () => {
     render(<MarkdownContent text="Hello world" />);
@@ -100,5 +107,44 @@ describe("MarkdownContent", () => {
     expect(screen.getByText("world").tagName).toBe("STRONG");
     expect(screen.getByText("great").tagName).toBe("EM");
     expect(screen.getByText("code").tagName).toBe("CODE");
+  });
+
+  it("typesets $$…$$ display math via KaTeX", async () => {
+    const { container } = render(
+      <MarkdownContent text={"Before\n\n$$\\mathbb{I}[a=b] = 1 - a - b + 2ab,$$\n\nAfter"} />,
+    );
+    // wait for the useEffect-driven KaTeX render
+    await waitForCond(() => container.querySelector(".katex") !== null);
+    expect(container.querySelector(".katex")).toBeTruthy();
+    expect(container.textContent).toContain("Before");
+    expect(container.textContent).toContain("After");
+  });
+
+  it("leaves $ inside inline code untouched", () => {
+    const { container } = render(<MarkdownContent text={"run `cost = $5` now"} />);
+    // auto-render ignores <code> — no KaTeX markup should appear
+    expect(container.querySelector(".katex")).toBeFalsy();
+    expect(screen.getByText("cost = $5")).toBeInTheDocument();
+  });
+
+  it("typesets the Lagrange-style formula with _ subscripts and \\, (regression)", async () => {
+    const f2 =
+      "$\\displaystyle \\mathbb{P}_{x \\sim D}\\left[f(x) \\neq g(x)\\right] = " +
+      "\\frac{1 - \\mathbb{E}_{x \\sim D}\\left[f(x)\\,g(x)\\right]}{2}.$";
+    const { container } = render(<MarkdownContent text={f2} />);
+    await waitForCond(() => container.querySelector(".katex") !== null);
+    // KaTeX keeps the original TeX in its MathML annotation — the underscores
+    // must have survived the markdown stage for this to render at all.
+    expect(container.querySelector(".katex")).toBeTruthy();
+    expect(container.textContent).toContain("_{x \\sim D}");
+  });
+
+  it("still typesets the simple indicator formula", async () => {
+    const f1 =
+      "$\\displaystyle \\mathbb{I}[a = b] = \\frac{1 + ab}{2}, \\qquad " +
+      "\\mathbb{I}[a \\neq b] = \\frac{1 - ab}{2} \\qquad (a,b \\in \\{-1,+1\\}).$";
+    const { container } = render(<MarkdownContent text={f1} />);
+    await waitForCond(() => container.querySelector(".katex") !== null);
+    expect(container.querySelector(".katex")).toBeTruthy();
   });
 });
