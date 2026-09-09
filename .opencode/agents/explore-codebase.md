@@ -1,7 +1,7 @@
 ---
 description: Fast read-only exploration of the nolock codebase (React, Tauri, Rust)
 mode: subagent
-model: ollama/gemma4:12b-mlx
+model: ollama/oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU
 temperature: 0.2
 permission:
   edit: deny

@@ -8,15 +8,22 @@ use regex::Regex;
 
 mod browser;
 mod fabric;
-mod hooks;
-mod linter;
+pub mod hooks;
+pub mod linter;
 mod macos_keyboard;
 pub mod notebook;
 pub mod pykernel;
 pub mod secrets;
-mod switchyard;
-mod terminal_memory;
+pub mod switchyard;
+pub mod terminal_memory;
 pub mod validation;
+
+/// Public entry points for the headless web server (`bin/nolock-server.rs`).
+/// The Tauri command fns above stay private (a `pub` command at the crate root
+/// collides with the macro the `#[tauri::command]` attribute exports); this
+/// child module can access them and re-expose the exact same logic.
+#[path = "web_bridge.rs"]
+pub mod web_bridge;
 
 // ---------------------------------------------------------------------------
 // File system commands
@@ -181,7 +188,7 @@ fn append_to_file(path: String, content: String) -> Result<(), String> {
 }
 
 #[derive(serde::Serialize)]
-struct DirEntry {
+pub struct DirEntry {
     name: String,
     path: String,
     is_dir: bool,
@@ -192,7 +199,7 @@ struct DirEntry {
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize)]
-struct AgentEntry {
+pub struct AgentEntry {
     name: String,       // file stem (e.g. "code-reviewer" from "code-reviewer.json")
     path: String,       // full path to the file
 }
@@ -876,7 +883,7 @@ const GIT_EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// (committed + staged + unstaged changes) plus untracked files.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GitChangedFile {
+pub struct GitChangedFile {
     /// Repo-root-relative path (the NEW path for renames).
     path: String,
     /// "added" | "modified" | "deleted" | "renamed"
@@ -897,7 +904,7 @@ struct GitChangedFile {
 /// The unified git diff of a single file for a session window.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GitFileDiff {
+pub struct GitFileDiff {
     path: String,
     /// "added" | "modified" | "deleted" | "renamed"
     status: String,
@@ -1243,7 +1250,7 @@ fn git_session_file_diff(
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize)]
-struct CustomToolEntry {
+pub struct CustomToolEntry {
     name: String,
     path: String,
     description: String,
@@ -1379,7 +1386,7 @@ fn subagent_reset(memory: tauri::State<'_, SubAgentMemory>) -> Result<(), String
 }
 
 #[derive(serde::Serialize)]
-struct SkillEntry {
+pub struct SkillEntry {
     name: String,       // file stem (e.g. "code-review" from "code-review.md")
     path: String,       // full path to the file
 }
@@ -1419,7 +1426,7 @@ fn list_skills(root_path: String) -> Result<Vec<SkillEntry>, String> {
 }
 
 #[derive(serde::Serialize)]
-struct SkillCommandResult {
+pub struct SkillCommandResult {
     stdout: String,
     stderr: String,
     exit_code: i32,
@@ -1505,7 +1512,7 @@ fn run_skill_command(root_path: String, skill_name: String) -> Result<SkillComma
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize)]
-struct SearchMatch {
+pub struct SearchMatch {
     file_path: String,
     line_number: usize,
     line_content: String,
@@ -1514,7 +1521,7 @@ struct SearchMatch {
 }
 
 #[derive(serde::Serialize)]
-struct ReplaceResult {
+pub struct ReplaceResult {
     files_changed: usize,
     replacements_made: usize,
 }
@@ -2081,14 +2088,14 @@ fn get_rlhf_dir(app: tauri::AppHandle) -> Result<String, String> {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ModelInfoRequest {
+pub struct ModelInfoRequest {
     backend: String,
     url: String,
     model: String,
 }
 
 #[derive(serde::Serialize)]
-struct ModelInfoResult {
+pub struct ModelInfoResult {
     context_length: u32,
 }
 
@@ -2215,7 +2222,7 @@ fn opencode_has_zdr(id: &str) -> bool {
 }
 
 #[derive(serde::Deserialize)]
-struct FetchModelsRequest {
+pub struct FetchModelsRequest {
     backend: String,
     url: String,
     #[serde(default)]
@@ -2225,7 +2232,7 @@ struct FetchModelsRequest {
 }
 
 #[derive(serde::Serialize)]
-struct ModelListItem {
+pub struct ModelListItem {
     id: String,
     name: String,
     is_free: bool,
@@ -2459,12 +2466,12 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
-struct FetchRoutersRequest {
+pub struct FetchRoutersRequest {
     api_key: String,
 }
 
 #[derive(serde::Serialize)]
-struct RouterItem {
+pub struct RouterItem {
     /// Router name — used to build the `router:{name}` model reference.
     id: String,
     /// Display name.
@@ -2542,7 +2549,7 @@ async fn fetch_digitalocean_routers(req: FetchRoutersRequest) -> Result<Vec<Rout
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
-struct CompletionRequest {
+pub struct CompletionRequest {
     backend: String,
     url: String,
     model: String,
@@ -2575,7 +2582,7 @@ pub struct ChatMessage {
 /// model's context window fills up).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionRecord {
+pub struct SessionRecord {
     id: String,
     summary: String,
     /// "active" | "finished" | "archived"
@@ -3301,7 +3308,9 @@ impl SubAgentMemory {
     }
 
     /// Reset all memory (called when a new chat session starts).
-    fn clear(&self) {
+    /// `pub` so the headless web server (`bin/nolock-server.rs`) can expose the
+    /// same `subagent_reset` command without a Tauri app running.
+    pub fn clear(&self) {
         self.convos.lock().unwrap().clear();
     }
 }
@@ -4353,6 +4362,285 @@ pub fn unwrap_structured_answer(content: &str) -> String {
 ///   - sometimes the whole array (or individual entries) is malformed (extra
 ///     braces, trailing commas). In that case we fall back to scanning for
 ///     well-formed `{"tool_name"|"name": "...", "arguments": {...}}` objects.
+/// Native LFM2 bracket tool-call support (ullr-tools fine-tune).
+///
+/// The LiquidAI LFM2 format emits tool calls as Python-like bracket syntax in
+/// the message content: `[tool_name(key="value", flag=true), ...]`. Ollama's
+/// tool-call parser does not recognize this shape, so the calls stay in
+/// `content`. This parser extracts them (string-aware, handles nested
+/// lists/dicts, both quote styles, true/false/null literals) and converts
+/// them into the canonical Ollama tool-call JSON so they flow through the
+/// normal execution path. Only calls whose name matches a known tool are
+/// accepted, which prevents false positives on code identifiers in answers.
+struct NativeCallParser {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl NativeCallParser {
+    fn new(s: &str) -> Self {
+        Self {
+            chars: s.chars().collect(),
+            pos: 0,
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while self.pos < self.chars.len() && self.chars[self.pos].is_whitespace() {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn starts_with(&self, needle: &[char]) -> bool {
+        self.chars[self.pos..].starts_with(needle)
+    }
+
+    fn parse_ident(&mut self) -> Option<String> {
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_alphanumeric() || c == '_' {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if self.pos > start {
+            Some(self.chars[start..self.pos].iter().collect())
+        } else {
+            None
+        }
+    }
+
+    fn parse_quoted(&mut self, quote: char) -> Option<String> {
+        self.pos += 1; // opening quote
+        let mut out = String::new();
+        while let Some(c) = self.peek() {
+            self.pos += 1;
+            if c == '\\' {
+                if let Some(e) = self.peek() {
+                    self.pos += 1;
+                    match e {
+                        'n' => out.push('\n'),
+                        't' => out.push('\t'),
+                        'r' => out.push('\r'),
+                        '\'' => out.push('\''),
+                        '"' => out.push('"'),
+                        '\\' => out.push('\\'),
+                        other => {
+                            out.push('\\');
+                            out.push(other);
+                        }
+                    }
+                }
+            } else if c == quote {
+                return Some(out);
+            } else {
+                out.push(c);
+            }
+        }
+        None // unterminated
+    }
+
+    fn parse_value(&mut self) -> Option<serde_json::Value> {
+        self.skip_ws();
+        match self.peek()? {
+            '"' | '\'' => self.parse_quoted(self.peek()?).map(serde_json::Value::String),
+            '[' => self.parse_list(),
+            '{' => self.parse_dict(),
+            't' if self.starts_with(&['t', 'r', 'u', 'e']) => {
+                self.pos += 4;
+                Some(serde_json::Value::Bool(true))
+            }
+            'f' if self.starts_with(&['f', 'a', 'l', 's', 'e']) => {
+                self.pos += 5;
+                Some(serde_json::Value::Bool(false))
+            }
+            'n' if self.starts_with(&['n', 'u', 'l', 'l']) => {
+                self.pos += 4;
+                Some(serde_json::Value::Null)
+            }
+            'N' if self.starts_with(&['N', 'o', 'n', 'e']) => {
+                self.pos += 4;
+                Some(serde_json::Value::Null)
+            }
+            _ => self.parse_number(),
+        }
+    }
+
+    fn parse_number(&mut self) -> Option<serde_json::Value> {
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        let s: String = self.chars[start..self.pos].iter().collect();
+        if let Ok(i) = s.parse::<i64>() {
+            Some(serde_json::json!(i))
+        } else {
+            s.parse::<f64>().ok().map(|f| serde_json::json!(f))
+        }
+    }
+
+    fn parse_list(&mut self) -> Option<serde_json::Value> {
+        self.pos += 1; // '['
+        let mut items = Vec::new();
+        loop {
+            self.skip_ws();
+            match self.peek()? {
+                ']' => {
+                    self.pos += 1;
+                    break;
+                }
+                ',' => {
+                    self.pos += 1;
+                }
+                _ => items.push(self.parse_value()?),
+            }
+        }
+        Some(serde_json::Value::Array(items))
+    }
+
+    fn parse_dict(&mut self) -> Option<serde_json::Value> {
+        self.pos += 1; // '{'
+        let mut map = serde_json::Map::new();
+        loop {
+            self.skip_ws();
+            match self.peek()? {
+                '}' => {
+                    self.pos += 1;
+                    break;
+                }
+                ',' => {
+                    self.pos += 1;
+                }
+                _ => {}
+            }
+            self.skip_ws();
+            // Key: quoted string or bare identifier.
+            let key = match self.peek()? {
+                '"' | '\'' => self.parse_quoted(self.peek()?)?,
+                _ => self.parse_ident()?,
+            };
+            self.skip_ws();
+            match self.peek()? {
+                ':' | '=' => self.pos += 1,
+                _ => return None,
+            }
+            let val = self.parse_value()?;
+            map.insert(key, val);
+        }
+        Some(serde_json::Value::Object(map))
+    }
+
+    /// Parse the kwarg list after `name(`. `self.pos` is just past the `(`.
+    fn parse_kwargs(&mut self) -> Option<serde_json::Value> {
+        let mut args = serde_json::Map::new();
+        loop {
+            self.skip_ws();
+            match self.peek()? {
+                ')' => {
+                    self.pos += 1;
+                    break;
+                }
+                ',' => {
+                    self.pos += 1;
+                }
+                _ => {}
+            }
+            self.skip_ws();
+            let key = self.parse_ident()?;
+            self.skip_ws();
+            match self.peek()? {
+                '=' | ':' => self.pos += 1,
+                _ => return None,
+            }
+            let val = self.parse_value()?;
+            args.insert(key, val);
+            self.skip_ws();
+            match self.peek()? {
+                ',' => {
+                    self.pos += 1;
+                }
+                ')' => {
+                    self.pos += 1;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        Some(serde_json::Value::Object(args))
+    }
+}
+
+/// Extract native bracket tool calls from content. Only calls whose name is
+/// in `valid_tools` are accepted (prevents false positives on code
+/// identifiers like `println!` or `unwrap(` in final answers). Fenced code
+/// blocks are skipped before scanning.
+fn parse_native_tool_calls(
+    content: &str,
+    valid_tools: &[String],
+) -> Option<Vec<serde_json::Value>> {
+    if valid_tools.is_empty() || content.len() < 8 {
+        return None;
+    }
+
+    // Remove fenced code blocks so call-looking code in final answers
+    // (e.g. ```rust ... ```) is never mistaken for a tool call.
+    let mut cleaned = String::with_capacity(content.len());
+    let mut in_fence = false;
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            cleaned.push_str(line);
+            cleaned.push('\n');
+        }
+    }
+
+    let mut parser = NativeCallParser::new(&cleaned);
+    let mut calls: Vec<serde_json::Value> = Vec::new();
+    let mut pos = 0usize;
+    while pos < parser.chars.len() {
+        let mut matched = false;
+        for name in valid_tools {
+            let name_chars: Vec<char> = name.chars().collect();
+            let end = pos + name_chars.len();
+            if end < parser.chars.len()
+                && parser.chars[pos..end] == name_chars[..]
+                && parser.chars.get(end) == Some(&'(')
+            {
+                parser.pos = end + 1;
+                if let Some(args) = parser.parse_kwargs() {
+                    calls.push(serde_json::json!({
+                        "function": { "name": name.clone(), "arguments": args }
+                    }));
+                    pos = parser.pos;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !matched {
+            pos += 1;
+        }
+    }
+
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
+}
+
 fn extract_planned_tool_calls(content: &str) -> Vec<serde_json::Value> {
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(content);
     if let Ok(v) = parsed {
@@ -7198,7 +7486,24 @@ async fn ollama_chat_with_tools(
             // Treat that as "wants more tool rounds": execute the planned steps
             // as real tool calls and continue the loop instead of surfacing the
             // JSON (or returning too early).
-            let planned = extract_planned_tool_calls(&stream.iter_content);
+            let mut planned = extract_planned_tool_calls(&stream.iter_content);
+            if planned.is_empty() && !effective_tools.is_empty() {
+                // Native LFM2 bracket format: [tool_name(key=value, ...), ...]
+                // Ollama's parser doesn't recognize it, so parse it here and
+                // run the calls through the same planned-execution path.
+                let valid_names: Vec<String> = effective_tools
+                    .iter()
+                    .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                    .collect();
+                planned = parse_native_tool_calls(&stream.iter_content, &valid_names)
+                    .unwrap_or_default();
+                if !planned.is_empty() {
+                    eprintln!(
+                        "[nolock] ollama tool loop: parsed {} native bracket tool call(s) from content",
+                        planned.len()
+                    );
+                }
+            }
             if !planned.is_empty() {
                 eprintln!(
                     "[nolock] ollama tool loop: executing {} planned step(s) from structured JSON",
@@ -12211,6 +12516,63 @@ Fix the errors."#;
         let norm = normalize_ollama_tool_call(&call, ModelArch::Lfm);
         assert_eq!(norm["function"]["name"], "grep");
         assert_eq!(norm["function"]["arguments"]["pattern"], "TODO");
+    }
+
+    #[test]
+    fn native_bracket_parser_extracts_simple_call() {
+        let tools = vec!["web_search".to_string()];
+        let calls = parse_native_tool_calls(
+            "[web_search(query=\"best rust documentation\")]",
+            &tools,
+        );
+        assert!(calls.is_some());
+        let calls = calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "web_search");
+        assert_eq!(
+            calls[0]["function"]["arguments"]["query"],
+            "best rust documentation"
+        );
+    }
+
+    #[test]
+    fn native_bracket_parser_handles_nested_and_typed_args() {
+        let tools = vec!["edit".to_string(), "bash_sandbox".to_string()];
+        let content = "[edit(path=\"src/App.tsx\", edits=[{'old_text': 'fn main() {', 'new_text': 'fn main() { // ok'}]), bash_sandbox(command=\"tsc --noEmit\", timeout=60)]";
+        let calls = parse_native_tool_calls(content, &tools).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["function"]["name"], "edit");
+        assert_eq!(
+            calls[0]["function"]["arguments"]["edits"][0]["old_text"],
+            "fn main() {"
+        );
+        assert_eq!(calls[1]["function"]["arguments"]["timeout"], 60);
+    }
+
+    #[test]
+    fn native_bracket_parser_ignores_code_fences_and_unknown_tools() {
+        let tools = vec!["read_file".to_string()];
+        // Fenced code block mentioning a tool call must NOT be parsed.
+        let fenced = "Here is how:\n```rust\nread_file(path=\"x\")\n```\ndone";
+        assert!(parse_native_tool_calls(fenced, &tools).is_none());
+        // Unknown tool name must not match.
+        let unknown = "[unwrap(x=1)]";
+        assert!(parse_native_tool_calls(unknown, &tools).is_none());
+        // The real tool still parses alongside surrounding prose.
+        let prose = "Let me check that.\n[read_file(path=\"src/main.rs\")]";
+        let calls = parse_native_tool_calls(prose, &tools).unwrap();
+        assert_eq!(calls[0]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn native_bracket_parser_handles_multiline_and_escapes() {
+        let tools = vec!["write_file".to_string()];
+        let content = "[write_file(path=\"hello.py\", content=\"print(\\\"hi\\\")\\nprint('there')\")]";
+        let calls = parse_native_tool_calls(content, &tools).unwrap();
+        assert_eq!(
+            calls[0]["function"]["arguments"]["content"],
+            "print(\"hi\")\nprint('there')"
+        );
     }
 
     #[test]
