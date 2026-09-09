@@ -103,61 +103,122 @@ impl TermMemory {
 }
 
 // ---------------------------------------------------------------------------
-// Tauri commands
+// Public API (shared by the Tauri commands below and the headless web server
+// in `bin/nolock-server.rs`, which has no tauri::State to pass)
+// ---------------------------------------------------------------------------
+
+impl TermMemory {
+    /// Record that a command was executed. Increments count if it already
+    /// exists, otherwise adds a new entry with category "uncategorized".
+    pub fn record(&self, command: String) -> Result<(), String> {
+        let trimmed = command.trim().to_string();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut db = self.db.lock().map_err(|e| e.to_string())?;
+
+        // Check if command already exists (exact match on trimmed)
+        if let Some(existing) = db.commands.iter_mut().find(|c| c.command == trimmed) {
+            existing.count = existing.count.saturating_add(1);
+            existing.timestamp = now;
+        } else {
+            db.commands.push(CommandRecord {
+                command: trimmed,
+                category: "uncategorized".to_string(),
+                timestamp: now,
+                count: 1,
+            });
+        }
+
+        drop(db);
+        self.save();
+        Ok(())
+    }
+
+    /// Returns the top 5 most frequently used commands, sorted by count descending.
+    pub fn top_commands(&self) -> Result<Vec<CommandRecord>, String> {
+        let db = self.db.lock().map_err(|e| e.to_string())?;
+        let mut sorted = db.commands.clone();
+        sorted.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| b.timestamp.cmp(&a.timestamp))
+        });
+        sorted.truncate(5);
+        Ok(sorted)
+    }
+
+    /// Returns all known categories.
+    pub fn categories(&self) -> Result<Vec<String>, String> {
+        let db = self.db.lock().map_err(|e| e.to_string())?;
+        Ok(db.categories.clone())
+    }
+
+    /// Assign (or re-assign) a category to a command.
+    /// If the category is new, it is automatically added to the categories list.
+    pub fn save_category(&self, command: String, category: String) -> Result<(), String> {
+        let cat = category.trim().to_string();
+        if cat.is_empty() {
+            return Err("Category cannot be empty".to_string());
+        }
+
+        let mut db = self.db.lock().map_err(|e| e.to_string())?;
+
+        // Update the command record
+        if let Some(record) = db.commands.iter_mut().find(|c| c.command == command) {
+            record.category = cat.clone();
+        } else {
+            // Command not found — still possible to create a record for it
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            db.commands.push(CommandRecord {
+                command,
+                category: cat.clone(),
+                timestamp: now,
+                count: 0,
+            });
+        }
+
+        // Add category if new
+        if !db.categories.contains(&cat) {
+            db.categories.push(cat);
+            db.categories.sort();
+        }
+
+        drop(db);
+        self.save();
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands (thin wrappers over the public API above)
 // ---------------------------------------------------------------------------
 
 /// Record that a command was executed. Increments count if it already exists,
 /// otherwise adds a new entry with category "uncategorized".
 #[tauri::command]
 pub fn record_command(state: tauri::State<'_, TermMemory>, command: String) -> Result<(), String> {
-    let trimmed = command.trim().to_string();
-    if trimmed.is_empty() {
-        return Ok(());
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
-
-    // Check if command already exists (exact match on trimmed)
-    if let Some(existing) = db.commands.iter_mut().find(|c| c.command == trimmed) {
-        existing.count = existing.count.saturating_add(1);
-        existing.timestamp = now;
-    } else {
-        db.commands.push(CommandRecord {
-            command: trimmed,
-            category: "uncategorized".to_string(),
-            timestamp: now,
-            count: 1,
-        });
-    }
-
-    drop(db);
-    state.save();
-    Ok(())
+    state.record(command)
 }
 
 /// Returns the top 5 most frequently used commands, sorted by count descending.
 #[tauri::command]
 pub fn get_top_commands(state: tauri::State<'_, TermMemory>) -> Result<Vec<CommandRecord>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    let mut sorted = db.commands.clone();
-    sorted.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
-            .then_with(|| b.timestamp.cmp(&a.timestamp))
-    });
-    sorted.truncate(5);
-    Ok(sorted)
+    state.top_commands()
 }
 
 /// Returns all known categories.
 #[tauri::command]
 pub fn get_command_categories(state: tauri::State<'_, TermMemory>) -> Result<Vec<String>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    Ok(db.categories.clone())
+    state.categories()
 }
 
 /// Assign (or re-assign) a category to a command.
@@ -168,39 +229,7 @@ pub fn save_command_category(
     command: String,
     category: String,
 ) -> Result<(), String> {
-    let cat = category.trim().to_string();
-    if cat.is_empty() {
-        return Err("Category cannot be empty".to_string());
-    }
-
-    let mut db = state.db.lock().map_err(|e| e.to_string())?;
-
-    // Update the command record
-    if let Some(record) = db.commands.iter_mut().find(|c| c.command == command) {
-        record.category = cat.clone();
-    } else {
-        // Command not found — still possible to create a record for it
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        db.commands.push(CommandRecord {
-            command,
-            category: cat.clone(),
-            timestamp: now,
-            count: 0,
-        });
-    }
-
-    // Add category if new
-    if !db.categories.contains(&cat) {
-        db.categories.push(cat);
-        db.categories.sort();
-    }
-
-    drop(db);
-    state.save();
-    Ok(())
+    state.save_category(command, category)
 }
 
 // ---------------------------------------------------------------------------

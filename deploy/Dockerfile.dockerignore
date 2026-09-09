@@ -1,0 +1,28 @@
+# BuildKit per-Dockerfile ignore file (applies to deploy/Dockerfile only).
+# Keeps the Docker build context small — the heavy local artifacts never
+# reach the build daemon.
+.git
+.github
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+src-tauri/tests
+src-tauri/.ruff_cache
+.venvs
+.sessions
+.rlhf
+.routers
+.ruff_cache
+.micro-agents
+.agents
+.docs
+.planning
+.hooks
+.opencode
+.routers
+.venvs
+e2e
+scripts
+*.md
+!README.md

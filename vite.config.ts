@@ -19,15 +19,34 @@ const testAliases =
       }
     : {};
 
+// Web deployment target (`npm run build:web`): swap the Tauri IPC/event/dialog
+// modules for browser shims that talk to the nolock-server Rust backend
+// (src-tauri/src/bin/nolock-server.rs). The desktop build keeps the real
+// @tauri-apps modules — same source, two targets.
+const webTarget = process.env.VITE_TARGET === "web";
+const webAliases = webTarget
+  ? {
+      "@tauri-apps/api/core": path.resolve(__dirname, "src/web/core.ts"),
+      "@tauri-apps/api/event": path.resolve(__dirname, "src/web/event.ts"),
+      "@tauri-apps/plugin-dialog": path.resolve(__dirname, "src/web/dialog.ts"),
+      "@tauri-apps/plugin-shell": path.resolve(__dirname, "src/web/shell.ts"),
+    }
+  : {};
+
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   resolve: {
-    alias: testAliases,
+    alias: { ...testAliases, ...webAliases },
   },
   server: {
     port: 1420,
     strictPort: true,
+    // In web mode, proxy the Rust backend API (run `cargo run --bin nolock-server`
+    // alongside `npm run dev:web`).
+    ...(webTarget
+      ? { proxy: { "/api": { target: "http://127.0.0.1:8080", changeOrigin: false } } }
+      : {}),
     watch: {
       ignored: ["**/src-tauri/**"],
     },

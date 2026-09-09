@@ -23,7 +23,10 @@ regex = "=1.11.1"
 portable-pty = "=0.8.1"
 keyring = "=2.3.3"
 libc = "0.2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
+# Web deployment (nolock-server binary): serves the same command surface the
+# Tauri IPC exposes over HTTP + SSE so the identical frontend runs in a browser.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
 # NVIDIA NeMo Fabric — core config & runtime contracts for agents.
 # Used to validate agent creation (typed config) and agent-to-agent flows
 # (run planning, normalized results, artifact manifests, diagnostics).
