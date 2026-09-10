@@ -1,5 +1,8 @@
 // Shared model-provider (backend) definitions and helpers.
 
+import { IS_WEB } from "./webEnv";
+import { getLlamacppUrl } from "../web/serverConfig";
+
 export type BackendRole = "planning" | "executor";
 
 export interface BackendInfo {
@@ -39,13 +42,32 @@ export function backendDefaultUrl(backend: string): string {
  * Resolve the server URL for a backend. The globally-selected backend may have a
  * user-customized URL (stored in `nolock.url`); every other backend falls back to
  * its known default URL.
+ *
+ * A per-backend override (`nolock.url.<backend>`) takes precedence over both —
+ * used on the web to auto-wire the llama.cpp service URL from the server config
+ * (`GET /api/config` → `LLAMACPP_URL` Railway reference variable) without
+ * clobbering a user's manual `nolock.url` for the global backend.
  */
 export function resolveBackendUrl(backend: string): string {
+  const perBackend = localStorage.getItem(`nolock.url.${backend}`);
+  if (perBackend) return perBackend;
   const globalBackend = localStorage.getItem("nolock.backend") || "ollama";
   if (backend === globalBackend) {
     return localStorage.getItem("nolock.url") || backendDefaultUrl(backend);
   }
   return backendDefaultUrl(backend);
+}
+
+/**
+ * Seed a per-backend URL override (web only). Used at startup to auto-wire
+ * the llama.cpp service URL from the server config. Only seeds when the user has
+ * not already set an override for that backend, so manual config always wins.
+ */
+export function seedBackendUrlOverride(backend: string, url: string): void {
+  const key = `nolock.url.${backend}`;
+  if (!localStorage.getItem(key)) {
+    localStorage.setItem(key, url);
+  }
 }
 
 /** The backend used for chat requests (per-panel override falls back to the global backend). */

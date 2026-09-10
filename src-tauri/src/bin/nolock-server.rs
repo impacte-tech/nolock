@@ -164,6 +164,11 @@ struct AppState {
     secrets_path: PathBuf,
     dist_dir: PathBuf,
     auth_token: Option<String>,
+    /// Optional llama.cpp service URL (from `LLAMACPP_URL` env var, set by
+    /// Railway's reference-variable syntax to the private-network URL of the
+    /// llama.cpp service). Exposed to the frontend via `GET /api/config` so the
+    /// web app auto-wires the llama.cpp provider without manual setup.
+    llamacpp_url: Option<String>,
 }
 
 fn data_dir() -> PathBuf {
@@ -890,6 +895,7 @@ async fn health_handler() -> &'static str {
 /// Lightweight auth check used by the web login page. Returns 200 when the
 /// request carries a valid token (Bearer header), 401 otherwise. Marked
 /// no-store so proxies never cache an auth decision.
+
 async fn auth_check_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -900,6 +906,27 @@ async fn auth_check_handler(
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
+/// Server-provided config for the web frontend. Currently exposes the optional
+/// llama.cpp service URL (from `LLAMACPP_URL`) so the web app auto-wires the
+/// llama.cpp provider without manual setup. Auth via Bearer header or `?token=`.
+async fn config_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&state, &headers, params.get("token").map(|s| s.as_str())) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "ok": true,
+            "llamacppUrl": state.llamacpp_url,
+        })),
     )
         .into_response()
 }
@@ -1061,6 +1088,7 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./public"));
     let auth_token = std::env::var("NOLOCK_WEB_TOKEN").ok().filter(|t| !t.is_empty());
+    let llamacpp_url = std::env::var("LLAMACPP_URL").ok().filter(|u| !u.is_empty());
 
     let state = Arc::new(AppState {
         hub: Hub::new(),
@@ -1071,11 +1099,13 @@ async fn main() {
         secrets_path: data_dir().join("secrets.json"),
         dist_dir: dist_dir.clone(),
         auth_token: auth_token.clone(),
+        llamacpp_url,
     });
 
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/api/auth/check", get(auth_check_handler))
+        .route("/api/config", get(config_handler))
         .route("/api/events", get(events_handler))
         .route("/api/file", get(file_handler))
         .route("/api/invoke/{command}", post(invoke_handler))

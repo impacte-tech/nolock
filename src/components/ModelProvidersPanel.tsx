@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getSecret, setSecret } from "../lib/secrets";
-import { BACKENDS, isPlanningBackend } from "../lib/backends";
+import { BACKENDS, isPlanningBackend, resolveBackendUrl } from "../lib/backends";
 import Select from "./Select";
 
 interface Props {
@@ -65,7 +65,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     const found = BACKENDS.find((b) => b.value === value);
     if (found) {
       setBackend(value);
-      setUrl(found.defaultUrl);
+      setUrl(resolveBackendUrl(value));
       // Load the new backend's API key
       setApiKey(localStorage.getItem(`nolock.apiKey.${value}`) || "");
       setRouters([]);
