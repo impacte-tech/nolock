@@ -887,6 +887,23 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
+/// Lightweight auth check used by the web login page. Returns 200 when the
+/// request carries a valid token (Bearer header), 401 otherwise. Marked
+/// no-store so proxies never cache an auth decision.
+async fn auth_check_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&state, &headers, None) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
 async fn invoke_handler(
     State(state): State<Arc<AppState>>,
     AxumPath(command): AxumPath<String>,
@@ -1027,6 +1044,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/api/auth/check", get(auth_check_handler))
         .route("/api/events", get(events_handler))
         .route("/api/invoke/{command}", post(invoke_handler))
         .fallback(get(static_handler))

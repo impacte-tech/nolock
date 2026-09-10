@@ -12,6 +12,8 @@
  * Tauri's `listen` semantics (multiple listeners per event, unlisten cleanup).
  */
 
+import { getToken } from "./auth";
+
 export interface Event<T> {
   event: string;
   id: number;
@@ -28,7 +30,7 @@ const listeners = new Map<string, Set<EventCallback<unknown>>>();
 let nextId = 1;
 
 function sseUrl(): string {
-  const token = new URLSearchParams(window.location.search).get("token");
+  const token = getToken();
   return token ? `/api/events?token=${encodeURIComponent(token)}` : "/api/events";
 }
 

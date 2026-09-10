@@ -28,6 +28,9 @@ const webAliases = webTarget
   ? {
       "@tauri-apps/api/core": path.resolve(__dirname, "src/web/core.ts"),
       "@tauri-apps/api/event": path.resolve(__dirname, "src/web/event.ts"),
+      "@tauri-apps/api/dpi": path.resolve(__dirname, "src/web/dpi.ts"),
+      "@tauri-apps/api/webview": path.resolve(__dirname, "src/web/webview.ts"),
+      "@tauri-apps/api/window": path.resolve(__dirname, "src/web/window.ts"),
       "@tauri-apps/plugin-dialog": path.resolve(__dirname, "src/web/dialog.ts"),
       "@tauri-apps/plugin-shell": path.resolve(__dirname, "src/web/shell.ts"),
     }
@@ -36,6 +39,9 @@ const webAliases = webTarget
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  // Injected only in the web build so shared code can detect the target via
+  // `typeof __WEB_TARGET__ !== "undefined" && __WEB_TARGET__` (see src/lib/webEnv.ts).
+  define: webTarget ? { __WEB_TARGET__: "true" } : {},
   resolve: {
     alias: { ...testAliases, ...webAliases },
   },

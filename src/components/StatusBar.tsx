@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getChatBackend, getFitmBackend, formatModelLabel } from "../lib/backends";
 import { type SwitchyardConfig } from "../lib/switchyard";
+import { IS_WEB } from "../lib/webEnv";
+import { clearToken } from "../web/auth";
 
 interface Props {
   showChat: boolean;
@@ -148,6 +150,19 @@ export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
         <span className="status-item" style={{ cursor: "pointer" }} onClick={onToggleChat}>
           {showChat ? "Hide Chat" : "Chat"}
         </span>
+        {IS_WEB && (
+          <span
+            className="status-item"
+            style={{ cursor: "pointer" }}
+            onClick={() => {
+              clearToken();
+              window.location.reload();
+            }}
+            title="Sign out"
+          >
+            {"\uD83D\uDD12"} Sign out
+          </span>
+        )}
       </div>
     </div>
   );
