@@ -296,6 +296,7 @@ args!(ModelInfoArgs { req: main_impl::ModelInfoRequest });
 args!(FetchModelsArgs { req: main_impl::FetchModelsRequest });
 args!(FetchRoutersArgs { req: main_impl::FetchRoutersRequest });
 args!(CompletionArgs { req: main_impl::CompletionRequest });
+args!(ChatArgs { req: main_impl::ChatRequest });
 args!(TermCmdArgs { command: String });
 args!(TermCatArgs { command: String, category: String });
 args!(SecretSetArgs { service: String, key: String, value: String });
@@ -497,11 +498,14 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         }
 
         // ----- ai_chat: same `run_chat` core the desktop app uses, with the
-        // SSE-backed WebSink instead of the Tauri AppHandle
+        // SSE-backed WebSink instead of the Tauri AppHandle. The frontend wraps
+        // the request in `{ req: ... }` (matching the Tauri command signature
+        // `ai_chat(req: ChatRequest)`), so unwrap it like the other req-commands.
+
         "ai_chat" => {
-            let req: main_impl::ChatRequest = parse(command, args)?;
+            let a: ChatArgs = parse(command, args)?;
             let sink = WebSink { hub: state.hub.clone() };
-            ok(main_impl::run_chat(&sink, &state.memory, req).await)
+            ok(main_impl::run_chat(&sink, &state.memory, a.req).await)
         }
         "subagent_reset" => {
             state.memory.clear();
