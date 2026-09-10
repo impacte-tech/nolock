@@ -209,7 +209,7 @@ export default function AISettings({ visible, onClose }: Props) {
     });
   };
 
-  const supportsTools = config.backend === "ollama" || config.backend === "openrouter" || config.backend === "digitalocean";
+  const supportsTools = config.backend === "ollama" || config.backend === "openrouter" || config.backend === "digitalocean" || config.backend === "llamacpp";
   const needsApiKey = config.backend === "openrouter" || config.backend === "opencode" || config.backend === "digitalocean";
 
   if (!visible) return null;
@@ -355,7 +355,7 @@ export default function AISettings({ visible, onClose }: Props) {
             <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 8 }}>
               {supportsTools
                 ? "Enable tools the AI agent can use during chat. The model decides when to call them."
-                : "Tool calling is only supported with Ollama and OpenRouter backends."}
+                : "Tool calling is only supported with Ollama, llama.cpp, OpenRouter and DigitalOcean backends."}
             </span>
             {AVAILABLE_TOOLS.map((tool) => (
               <label
