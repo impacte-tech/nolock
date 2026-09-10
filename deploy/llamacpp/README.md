@@ -54,6 +54,7 @@ from HuggingFace on first start):
 | `LLAMA_ARG_HF_REPO` | `Qwen/Qwen2.5-0.5B-Instruct-GGUF` | Any GGUF repo on HF |
 | `LLAMA_ARG_HF_FILE` | `qwen2.5-0.5b-instruct-q4_k_m.gguf` | Optional; auto-picks a quant if omitted |
 | `LLAMA_ARG_CTX_SIZE` | `4096` | Context window (tokens) |
+| `LLAMA_ARG_THREADS` | `4` | **Set to the VM's core count** (hobby = 4). Without this llama.cpp spawns one thread per HOST core (48) and thrashes — capping it gives a ~40x speedup |
 | `LLAMA_ARG_N_PARALLEL` | `1` | Parallel slots (each costs RAM) |
 | `LLAMA_ARG_N_GPU_LAYERS` | `0` | `>0` only on a GPU instance |
 
