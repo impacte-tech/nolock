@@ -1,5 +1,10 @@
 /// <reference types="vite/client" />
 
+// Injected by vite `define` only when built with VITE_TARGET=web (see
+// vite.config.ts). In the desktop build the identifier is never defined, so
+// `typeof __WEB_TARGET__` evaluates to "undefined" at runtime.
+declare const __WEB_TARGET__: boolean;
+
 // Vite ?inline assets — binary files forced to base64 data URIs.
 declare module "*.woff2?inline" {
   const src: string;

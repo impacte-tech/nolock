@@ -10,20 +10,16 @@
  * uses. Errors reject with the raw error string, matching Tauri semantics.
  */
 
+import { getToken } from "./auth";
+
 interface InvokeEnvelope<T> {
   ok: boolean;
   data?: T;
   error?: string;
 }
 
-/** Bearer token when the server runs with NOLOCK_WEB_TOKEN set (?token= in URL). */
-export function webToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return new URLSearchParams(window.location.search).get("token");
-}
-
 function authHeaders(): Record<string, string> {
-  const token = webToken();
+  const token = getToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
