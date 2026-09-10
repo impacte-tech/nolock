@@ -3641,7 +3641,31 @@ pub async fn run_subagent(
         )
         .await
     } else if backend == "llamacpp" {
-        Err("Sub-agents on the llamacpp backend are not supported; use ollama or a cloud provider.".to_string())
+        // llama.cpp's OpenAI-compatible `/v1/chat/completions` supports native
+        // tool calling (the `ullr` model family is trained for it). Route
+        // sub-agents through the shared tool loop so they can use tools.
+        run_openai_tool_loop(
+            runner.client,
+            runner.sink,
+            &format!("{}/v1/chat/completions", url.trim_end_matches('/')),
+            &api_key,
+            &model,
+            &backend,
+            &msgs,
+            &tools,
+            runner.tool_configs,
+            runner.root_path,
+            agent.temperature,
+            runner.max_tokens,
+            sub_iterations,
+            None,
+            runner.use_model_affinity,
+            Some(&id),
+            Some(&sub_runner),
+            &std::collections::HashSet::new(),
+            runner.context_length,
+        )
+        .await
     } else {
         run_openai_tool_loop(
             runner.client,
@@ -3974,7 +3998,32 @@ pub async fn run_micro_agent(
             ))
             .await
         } else if backend == "llamacpp" {
-            Err("Micro-agents on the llamacpp backend are not supported; use ollama or a cloud provider.".to_string())
+            // llama.cpp's OpenAI-compatible `/v1/chat/completions` supports
+            // native tool calling (the `ullr` model family is trained for it).
+            // Route micro-agents through the shared tool loop so they can use
+            // tools.
+            Box::pin(run_openai_tool_loop(
+                runner.client,
+                runner.sink,
+                &format!("{}/v1/chat/completions", url.trim_end_matches('/')),
+                &api_key,
+                &model,
+                &backend,
+                &msgs,
+                &tools,
+                runner.tool_configs,
+                runner.root_path,
+                agent.temperature,
+                runner.max_tokens,
+                MICRO_AGENT_MAX_ITERATIONS,
+                None,
+                runner.use_model_affinity,
+                Some(&id),
+                Some(&sub_runner),
+                &std::collections::HashSet::new(),
+                runner.context_length,
+            ))
+            .await
         } else {
             Box::pin(run_openai_tool_loop(
                 runner.client,
@@ -9523,20 +9572,52 @@ pub async fn run_chat(
             }
         }
         "llamacpp" => {
-            let prompt = messages
-                .iter()
-                .map(|m| format!("{}: {}", m.role, m.content))
-                .collect::<Vec<_>>()
-                .join("\n")
-                + "\nassistant:";
+            if has_tools {
+                // llama.cpp's server exposes an OpenAI-compatible
+                // `/v1/chat/completions` endpoint that supports native tool
+                // calling (the `ullr` model family is trained for it). Route
+                // through the shared tool loop so tools actually execute,
+                // instead of the plain `/completion` endpoint which has no
+                // tool support.
+                let api_key = req.api_key.clone().unwrap_or_default();
+                let full_url = format!("{}/v1/chat/completions", req.url.trim_end_matches('/'));
+                run_openai_tool_loop(
+                    &client,
+                    sink,
+                    &full_url,
+                    &api_key,
+                    &req.model,
+                    &req.backend,
+                    &messages,
+                    &tools,
+                    &req.tool_configs,
+                    req.root_path.as_deref(),
+                    temperature,
+                    cloud_max_tokens,
+                    req.max_iterations,
+                    None, // extra_headers
+                    true, // use_model_affinity
+                    None, // subagent_id (main agent)
+                    Some(&runner),
+                    &pre_spawned,
+                    context_len as u64,
+                )
+                .await
+            } else {
+                let prompt = messages
+                    .iter()
+                    .map(|m| format!("{}: {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\nassistant:";
 
-            let body = serde_json::json!({
-                "prompt": prompt,
-                "n_predict": max_tokens,
-                "temperature": temperature,
-                "stream": true
-            });
-            eprintln!("[nolock] llamacpp POST {}/completion (streaming)", req.url);
+                let body = serde_json::json!({
+                    "prompt": prompt,
+                    "n_predict": max_tokens,
+                    "temperature": temperature,
+                    "stream": true
+                });
+                eprintln!("[nolock] llamacpp POST {}/completion (streaming)", req.url);
             let mut resp = client
                 .post(format!("{}/completion", req.url))
                 .json(&body)
@@ -9615,6 +9696,7 @@ pub async fn run_chat(
                     0,
                 )],
             })
+            }
         }
         "openrouter" => {
             if has_tools {
