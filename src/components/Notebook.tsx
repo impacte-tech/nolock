@@ -22,6 +22,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { IS_WEB } from "../lib/webEnv";
+import { getToken } from "../web/auth";
 import * as monaco from "monaco-editor";
 import katex from "katex";
 import { marked } from "marked";
@@ -1105,23 +1107,53 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
     if (!nb) return;
     setKernelError(null);
     setExportMsg(null);
+
+    // Web: open a new tab synchronously (within the user gesture) so popup
+    // blockers don't block it. We'll navigate it to the exported file after
+    // the HTML is written to the server. This is still in the gesture here, so
+    // window.open returns a handle (or null when blocked).
+    let exportWin: Window | null = null;
+    if (IS_WEB) {
+      exportWin = window.open("about:blank", "_blank");
+    }
+
     try {
       const htmlPath = /\.ipynb$/i.test(filePath)
         ? filePath.replace(/\.ipynb$/i, ".html")
         : `${filePath}.html`;
       const html = buildExportHtml(nb);
       await invoke("write_file", { path: htmlPath, content: html });
-      try {
-        await invoke("open_path", { path: htmlPath });
-        setExportMsg(
-          `Exported to ${htmlPath.split("/").pop()} — opened in your browser. Ctrl+P → Save as PDF.`
-        );
-      } catch (openErr) {
-        setExportMsg(
-          `Exported to ${htmlPath} — auto-open failed (${String(openErr)}); open the file manually to print.`
-        );
+      if (IS_WEB) {
+        // Serve the created HTML back over HTTP so the browser can render it
+        // (the browser can't open a server-side path directly).
+        const token = getToken();
+        const qs = token ? `&token=${encodeURIComponent(token)}` : "";
+        const url = `/api/file?path=${encodeURIComponent(htmlPath)}${qs}`;
+        if (exportWin) {
+          exportWin.location.href = url;
+          setExportMsg(
+            `Exported to ${htmlPath.split("/").pop()} — opened in a new tab. Ctrl+P → Save as PDF.`
+          );
+        } else {
+          // Popup blocked — surface a clickable path in the message.
+          setExportMsg(
+            `Exported to ${htmlPath} — your browser blocked the popup; open ${url} to view it.`
+          );
+        }
+      } else {
+        try {
+          await invoke("open_path", { path: htmlPath });
+          setExportMsg(
+            `Exported to ${htmlPath.split("/").pop()} — opened in your browser. Ctrl+P → Save as PDF.`
+          );
+        } catch (openErr) {
+          setExportMsg(
+            `Exported to ${htmlPath} — auto-open failed (${String(openErr)}); open the file manually to print.`
+          );
+        }
       }
     } catch (e) {
+      if (exportWin) exportWin.close();
       setKernelError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, [filePath]);

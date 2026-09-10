@@ -1016,6 +1016,37 @@ fn mime_for(path: &str) -> &'static str {
     }
 }
 
+/// Serve a file from the server filesystem. Used by the web export feature to
+/// open an exported HTML notebook in a new browser tab (the browser cannot open
+/// server-side paths directly, so the server streams the file back over HTTP).
+/// Auth via Bearer header or `?token=` (the latter so a plain `window.open`
+/// link works — EventSource-style query tokens are already supported).
+async fn file_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized(&state, &headers, params.get("token").map(|s| s.as_str())) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let Some(path) = params.get("path") else {
+        return (StatusCode::BAD_REQUEST, "missing path").into_response();
+    };
+    let full = PathBuf::from(&path);
+    if !full.is_file() {
+        return (StatusCode::NOT_FOUND, "file not found").into_response();
+    }
+    let mime = mime_for(&path);
+    if let Ok(bytes) = std::fs::read(&full) {
+        return (
+            [(axum::http::header::CONTENT_TYPE, mime)],
+            bytes,
+        )
+            .into_response();
+    }
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1046,6 +1077,7 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/api/auth/check", get(auth_check_handler))
         .route("/api/events", get(events_handler))
+        .route("/api/file", get(file_handler))
         .route("/api/invoke/{command}", post(invoke_handler))
         .fallback(get(static_handler))
         .with_state(state);
