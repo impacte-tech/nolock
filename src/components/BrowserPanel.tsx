@@ -4,6 +4,7 @@ import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { Webview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { IS_WEB } from "../lib/webEnv";
 
 interface Props {
   url: string;
@@ -127,6 +128,14 @@ export default function BrowserPanel({ url, onClose, resizeEpoch }: Props) {
     async (targetUrl: string) => {
       const el = containerRef.current;
       if (!el) return;
+
+      // Web build: there is no native webview — open the URL in the user's
+      // actual browser (new tab) and show a hint instead of a blank pane.
+      if (IS_WEB) {
+        setLoading(false);
+        window.open(targetUrl, "_blank", "noopener,noreferrer");
+        return;
+      }
 
       setLoading(true);
 
@@ -344,7 +353,22 @@ export default function BrowserPanel({ url, onClose, resizeEpoch }: Props) {
         </button>
       </div>
       <div className="browser-content" ref={containerRef}>
-        {loading && <div className="browser-loading">Loading...</div>}
+        {IS_WEB ? (
+          <div className="browser-web-hint">
+            <p>
+              The browser panel opens in a new tab of your browser.
+            </p>
+            <p className="browser-web-url">{currentUrl}</p>
+            <button
+              className="browser-btn"
+              onClick={() => window.open(currentUrl, "_blank", "noopener,noreferrer")}
+            >
+              Open {currentUrl}
+            </button>
+          </div>
+        ) : (
+          loading && <div className="browser-loading">Loading...</div>
+        )}
       </div>
     </div>
   );
