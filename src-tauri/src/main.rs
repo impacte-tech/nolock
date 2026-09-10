@@ -8713,7 +8713,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
             let resp = client
                 .post(format!("{}/completion", req.url))
                 .json(&body)
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(120))
                 .send()
                 .await
                 .map_err(|e| {
@@ -9540,7 +9540,7 @@ pub async fn run_chat(
             let mut resp = client
                 .post(format!("{}/completion", req.url))
                 .json(&body)
-                .timeout(std::time::Duration::from_secs(60))
+                .timeout(std::time::Duration::from_secs(120))
                 .send()
                 .await
                 .map_err(|e| e.to_string())?;
