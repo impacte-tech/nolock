@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { setToken } from "../web/auth";
-import nolockLogo from "../assets/nolocklogo-green.svg";
+import nolockLogo from "../assets/nolock-mark-white.svg";
 
 interface Props {
   onAuthenticated: () => void;

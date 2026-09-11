@@ -24,7 +24,7 @@ import ShortcutsScreen from "./components/ShortcutsScreen";
 import SearchPanel from "./components/SearchPanel";
 import Notebook from "./components/Notebook";
 import { MarkdownContent } from "./components/ChatPanel";
-import nolockLogo from "./assets/nolocklogo-green.svg";
+import nolockLogo from "./assets/nolocklogo-white.svg";
 
 // ---------------------------------------------------------------------------
 // localStorage migration — copy old zencode.* keys to nolock.*

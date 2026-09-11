@@ -10157,7 +10157,7 @@ pub fn run() {
         .setup(|app| {
             // Set the window icon so the taskbar/dock shows the nolock logo
             // instead of a generic gear icon (Linux) or default icon.
-            let icon_bytes = include_bytes!("../icons/32x32.png");
+            let icon_bytes = include_bytes!("../icons/128x128@2x.png");
             let icon = tauri::image::Image::from_bytes(icon_bytes)?;
             if let Some(window) = app.get_webview_window("main") {
                 window.set_icon(icon)?;

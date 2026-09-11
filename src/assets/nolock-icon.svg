@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <title>nolock app icon</title>
+  <g fill="#000000" stroke="#000000" stroke-width="0"><rect x="16" y="16" width="480" height="480" rx="108" fill="#000000"/><g transform="translate(42 56) scale(1.9)" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="0"><path d="M24 168V90H40V101C47 92 57 88 69 88C91 88 104 103 104 128V168H88V129C88 112 81 104 68 104C52 104 40 115 40 132V168Z"/><circle cx="160" cy="128" r="32" fill="none" stroke-width="16"/><path d="M137 151L183 105" fill="none" stroke-width="14"/><g transform="translate(-148 0)"><path transform="translate(314 50) rotate(20)" d="M-36 26V0A36 36 0 0 1 36 0V46H22V0A22 22 0 0 0 -22 0V10C-27 10 -30 14 -30 18H-22V26Q-22 28 -24 28H-34Q-36 28 -36 26Z"/></g></g></g>
+</svg>

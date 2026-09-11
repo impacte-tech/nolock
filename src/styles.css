@@ -77,7 +77,8 @@ html, body, #root {
 }
 
 .menubar-logo-img {
-  height: 40px;
+  display: block;
+  height: 34px;
   width: auto;
 }
 

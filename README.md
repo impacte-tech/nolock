@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="src/assets/nolocklogo-green.svg" alt="nolock" width="400"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="src/assets/nolocklogo-white.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="src/assets/nolocklogo.svg" />
+    <img src="src/assets/nolocklogo.svg" alt="nolock" width="400" height="141" />
+  </picture>
 </p>
 
 <h1 align="center">nolock</h1>

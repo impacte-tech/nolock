@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import LoginPage from "./LoginPage";
 import { getToken, clearToken } from "../web/auth";
-import nolockLogo from "../assets/nolocklogo-green.svg";
+import nolockLogo from "../assets/nolock-mark-white.svg";
 
 /**
  * Web-only auth gate. Rendered by `main.tsx` around the whole app when the
