@@ -26,6 +26,10 @@ Connect it to your preferred AI backend (Ollama, llama.cpp, OpenRouter, or OpenC
 
 ---
 
+## Uploading files
+
+In the web or desktop app, open a project folder and use **Upload** in the Explorer to select files, or drag files from your computer onto an Explorer folder. Dropping onto empty space uploads to the project root; dropping onto a file uploads to its parent folder. Each file can be up to **10 MB (10,000,000 bytes)**. Binary files are supported, and existing files are never overwritten. The Explorer reports upload results and refreshes automatically. Web uploads are saved on the server; desktop uploads are saved locally.
+
 ## Open Source Technologies
 
 nolock is built on the shoulders of many incredible open-source projects. Below is a breakdown of what each one does and how it's used.

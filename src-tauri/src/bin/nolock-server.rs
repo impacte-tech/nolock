@@ -309,6 +309,7 @@ args!(KernelStartArgs { kernel_id: String, python_path: String, cwd: String });
 args!(KernelRunArgs {
     kernel_id: String, run_id: String, code: String, timeout_secs: Option<u64>,
 });
+args!(UploadFileArgs { directory: String, name: String, content: Vec<u8> });
 args!(KernelIdArgs { kernel_id: String });
 args!(CreateEnvArgs { root_path: String, name: String });
 
@@ -320,6 +321,10 @@ args!(CreateEnvArgs { root_path: String, name: String });
 async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
     match command {
         // ----- File system (direct reuse — same functions as the desktop app)
+        "upload_file" => {
+            let a: UploadFileArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::upload_file(a.directory, a.name, a.content))
+        }
         "read_file" => {
             let a: ReadFileArgs = parse(command, args)?;
             ok(main_impl::web_bridge::read_file(a.path))
@@ -935,6 +940,14 @@ async fn config_handler(
         .into_response()
 }
 
+async fn invoke_upload_handler(
+    state: axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> impl axum::response::IntoResponse {
+    invoke_handler(state, axum::extract::Path("upload_file".to_string()), headers, body).await
+}
+
 async fn invoke_handler(
     State(state): State<Arc<AppState>>,
     AxumPath(command): AxumPath<String>,
@@ -1112,6 +1125,9 @@ async fn main() {
         .route("/api/config", get(config_handler))
         .route("/api/events", get(events_handler))
         .route("/api/file", get(file_handler))
+        // JSON byte arrays need up to four wire bytes per file byte.
+        .route("/api/invoke/upload_file", post(invoke_upload_handler)
+            .layer(axum::extract::DefaultBodyLimit::max(40_000_000 + 65_536)))
         .route("/api/invoke/{command}", post(invoke_handler))
         .fallback(get(static_handler))
         .with_state(state);

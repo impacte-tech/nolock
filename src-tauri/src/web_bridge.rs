@@ -195,3 +195,7 @@ pub async fn fetch_digitalocean_routers(
 pub async fn ai_complete(req: super::CompletionRequest) -> Result<String, String> {
     super::ai_complete(req).await
 }
+
+pub fn upload_file(directory: String, name: String, content: Vec<u8>) -> Result<String, String> {
+    super::upload_file(directory, name, content)
+}

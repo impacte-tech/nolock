@@ -7,6 +7,7 @@ use tauri::Emitter;
 use regex::Regex;
 
 mod browser;
+mod uploads;
 mod fabric;
 pub mod hooks;
 pub mod linter;
@@ -28,6 +29,11 @@ pub mod web_bridge;
 // ---------------------------------------------------------------------------
 // File system commands
 // ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn upload_file(directory: String, name: String, content: Vec<u8>) -> Result<String, String> {
+    uploads::save_upload(&directory, &name, &content)
+}
 
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
@@ -10163,6 +10169,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_path,
+            upload_file,
             read_file,
             write_file,
             list_directory,

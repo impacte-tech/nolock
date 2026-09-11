@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { uploadFile } from "../lib/uploads";
 import DirectoryPicker from "./DirectoryPicker";
 
 interface DirEntry {
@@ -53,6 +54,10 @@ function getFileColor(name: string): string {
 }
 
 export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey, style }: Props) {
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadBusyRef = useRef(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState("");
   const [entries, setEntries] = useState<TreeDirEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [activePath, setActivePath] = useState<string | null>(null);
@@ -366,8 +371,55 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     return null;
   }, []);
 
+  const uploadFiles = useCallback(async (files: File[], directory: string) => {
+    if (!directory || uploadBusyRef.current || !files.length) return;
+    uploadBusyRef.current = true;
+    setUploading(true);
+    setUploadMessage("");
+    const errors: string[] = [];
+    let count = 0;
+    for (const file of files) {
+      try {
+        await uploadFile(directory, file);
+        count++;
+      } catch (error) {
+        errors.push(`${file.name}: ${String(error)}`);
+      }
+    }
+    // Refresh expanded folders too, so nested uploads appear immediately.
+    const refresh = async (items: TreeDirEntry[]): Promise<TreeDirEntry[]> => Promise.all(items.map(async entry => {
+      if (!entry.is_dir || !entry.expanded) return { ...entry, loaded: false };
+      const children = await invoke<DirEntry[]>("list_directory", { path: entry.path, showHidden: true });
+      const old = new Map(entry.children?.map(child => [child.path, child]));
+      return { ...entry, loaded: true, children: await refresh(children.map(child => ({ ...old.get(child.path), ...child }))) };
+    }));
+    try {
+      const roots = await invoke<DirEntry[]>("list_directory", { path: rootPath, showHidden: true });
+      const old = new Map(entriesRef.current.map(entry => [entry.path, entry]));
+      setEntries(await refresh(roots.map(entry => ({ ...old.get(entry.path), ...entry }))));
+    } catch (error) {
+      errors.push(`Refresh failed: ${String(error)}`);
+    }
+    setUploadMessage([count ? `Uploaded ${count} file${count === 1 ? "" : "s"}.` : "", ...errors].filter(Boolean).join(" "));
+    uploadBusyRef.current = false;
+    setUploading(false);
+  }, [rootPath]);
+
+  const uploadDestination = (target: EventTarget) => {
+    const item = (target as Element).closest('.tree-item');
+    const path = item?.getAttribute('data-path');
+    if (!path) return rootPath;
+    return item?.getAttribute('data-is-dir') === 'true' ? path : path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))) || rootPath;
+  };
+
   // Container-level drag/drop (event delegation)
   const handleContainerDragOver = useCallback((e: React.DragEvent) => {
+    if (Array.from(e.dataTransfer.types).includes("Files")) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = rootPath && !uploading ? "copy" : "none";
+      setDragOverPath(uploadDestination(e.target));
+      return;
+    }
     const item = (e.target as Element).closest('.tree-item');
     if (!item) {
       if (dragOverPath !== null) setDragOverPath(null);
@@ -385,7 +437,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     if (path && dragOverPath !== path) {
       setDragOverPath(path);
     }
-  }, [dragOverPath]);
+  }, [dragOverPath, rootPath, uploading]);
 
   const handleContainerDragLeave = useCallback((e: React.DragEvent) => {
     // Only clear when actually leaving the entire file-tree
@@ -398,6 +450,10 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   const handleContainerDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     setDragOverPath(null);
+    if (e.dataTransfer.files.length) {
+      await uploadFiles(Array.from(e.dataTransfer.files), uploadDestination(e.target));
+      return;
+    }
     const srcPath = dragSourceRef.current || e.dataTransfer.getData("text/plain");
     dragSourceRef.current = null;
     if (!srcPath) return;
@@ -417,7 +473,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
       console.error("Failed to move file:", err);
       alert(`Failed to move file: ${err}`);
     }
-  }, [rootPath, reloadPreservingState]);
+  }, [rootPath, reloadPreservingState, uploadFiles]);
 
   // ---- Tree rendering ----
   const renderItem = (entry: TreeDirEntry, depth: number) => {
@@ -456,6 +512,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
           onContextMenu={(e) => openCtxForItem(e, entry)}
           draggable={!entry.is_dir}
           onDragStart={handleDragStart}
+          onDragEnd={() => { dragSourceRef.current = null; setDragOverPath(null); }}
         >
           {entry.is_dir ? (
             <span className="chevron">{chevron}</span>
@@ -538,7 +595,16 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     <div className="file-explorer" style={style}>
       <div className="explorer-header">
         <span>Explorer</span>
+        <button disabled={!rootPath || uploading} onClick={() => uploadInputRef.current?.click()} title="Upload files (up to 10 MB each)">Upload</button>
+        <input ref={uploadInputRef} type="file" multiple hidden aria-label="Upload files" onChange={e => {
+          const files = Array.from(e.target.files || []);
+          e.target.value = "";
+          void uploadFiles(files, rootPath);
+        }} />
         <button onClick={() => loadDir(rootPath)} title="Refresh">&#x21bb;</button>
+      </div>
+      <div className="upload-status" role="status" aria-live="polite">
+        {uploading ? "Uploading…" : uploadMessage || "Drop files into a folder · Up to 10 MB each"}
       </div>
       <div
         className="file-tree"
