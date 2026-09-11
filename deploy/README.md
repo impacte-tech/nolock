@@ -21,26 +21,12 @@ folder. The deployed app is the **same codebase** as the Tauri v2 desktop app:
 | `env.example` | Every environment variable the server understands |
 | `README.md` | This file |
 
-> **Why is `railway.json` at the repo root?** Railway only reads
-> `railway.json` / `railway.toml` from the service root directory, and the
-> Docker build context must be the repo root (the Dockerfile builds
-> `src/` + `src-tauri/`). The root file is a thin pointer:
-> `{ "build": { "builder": "DOCKERFILE", "dockerfilePath": "deploy/Dockerfile" } }`.
-> All actual configuration lives here in `deploy/`.
->
-> **Important — the service builder must point at this Dockerfile.** Railway's
-> Railpack builder only auto-detects a `Dockerfile` at the repo **root**; it
-> does not read `deploy/Dockerfile` on its own. Two things make the deploy work:
->
-> 1. The service's **Build Settings** must have **Dockerfile path** set to
->    `deploy/Dockerfile` (this is a service-level setting, set once in the
->    Railway dashboard or via the API — it is NOT stored in the repo).
-> 2. A **root `Dockerfile`** (a copy of `deploy/Dockerfile`) is committed as a
->    safety net: if the service setting is ever reset, Railpack auto-detects
->    the root file and the build still works.
->
-> Keep `Dockerfile` (root) and `deploy/Dockerfile` in sync — they are the same
-> multi-stage build.
+Railway build settings are configured **per service**. There is no root
+`railway.json`: that legacy file overrode the llama.cpp service's Dockerfile
+with the web app's Dockerfile when both services used the same repository.
+The web service uses repository root `/` and `deploy/Dockerfile`; llama.cpp uses
+root `/deploy/llamacpp` and its own `Dockerfile`. Keep the root `Dockerfile` and
+`deploy/Dockerfile` in sync as a web-build fallback.
 
 ## Deploy to Railway
 
@@ -49,12 +35,14 @@ folder. The deployed app is the **same codebase** as the Tauri v2 desktop app:
 3. **Set the builder to the Dockerfile** (once): in the service's **Settings →
    Build**, set **Dockerfile path** to `deploy/Dockerfile`. (The committed root
    `Dockerfile` is a fallback if this is ever reset.)
-4. Set the public domain: **Settings → Networking → Generate Domain** (or add a
+4. Set the web service start command to `/app/nolock-server`, healthcheck path
+   `/health`, and healthcheck timeout `120` seconds.
+5. Set the public domain: **Settings → Networking → Generate Domain** (or add a
    custom domain). Railway routes HTTPS traffic to the container's `$PORT`.
-5. (Recommended) Add a **volume** mounted at `/data` and set the variable
+6. (Recommended) Add a **volume** mounted at `/data` and set the variable
    `NOLOCK_DATA_DIR=/data/nolock` so secrets, RLHF logs and any opened
    project folders survive redeploys.
-6. (Recommended for public URLs) Set `NOLOCK_WEB_TOKEN=<random secret>`. The
+7. (Recommended for public URLs) Set `NOLOCK_WEB_TOKEN=<random secret>`. The
    web app now shows a **login page** — paste the token there (or open
    `https://<domain>/?token=<secret>` to pre-fill it). The token is stored in
    the browser and sent as a `Bearer` header on every API call.

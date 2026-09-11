@@ -55,7 +55,8 @@ this wrapper to enable llama.cpp pulls from the UI:
    with service root **`/deploy/llamacpp`**, Dockerfile path **`Dockerfile`**,
    start command **`/entrypoint.sh`**, healthcheck `/health`, and a 300-second
    healthcheck timeout. Use Railway service settings, not a new `railway.json`
-   path (Railway no longer accepts new Config-as-Code settings). This replaces
+   path (Railway no longer accepts new Config-as-Code settings). The repository
+   intentionally has no root `railway.json`, which would override these settings. This replaces
    the old dashboard start command that directly ran `llama-server`.
 3. Generate one random `NOLOCK_MODEL_PULL_TOKEN` and set the **same secret** on
    both services. Keep it out of Git, logs, browser settings, and URLs.
