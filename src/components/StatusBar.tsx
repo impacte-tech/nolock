@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getChatBackend, getFimBackend, formatModelLabel } from "../lib/backends";
+import { getChatBackend, getFimBackend, formatModelLabel, resolveBackendUrl } from "../lib/backends";
+import { fetchModels } from "../lib/models";
 import { type SwitchyardConfig } from "../lib/switchyard";
 import { IS_WEB } from "../lib/webEnv";
 import { clearToken } from "../web/auth";
@@ -26,9 +27,16 @@ export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
   const [switchyardRoute, setSwitchyardRoute] = useState<string | null>(null);
 
   useEffect(() => {
+    // Guards against state updates after unmount/env teardown: `check` is
+    // async (provider health probes can take seconds), and a late resolution
+    // must not touch state once the effect has been cleaned up.
+    let cancelled = false;
     const check = async () => {
       const b = getChatBackend();
-      const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
+      // Resolve the SAME URL the chat/FIM requests use (per-backend override →
+      // global URL → default), not just the global `nolock.url` — on the web
+      // deployment the llama.cpp URL lives in `nolock.url.llamacpp`.
+      const url = resolveBackendUrl(b);
       const chatBackend = getChatBackend();
       const fitmBackend = getFimBackend();
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
@@ -48,12 +56,24 @@ export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
           // Config unreadable — fall through to the normal provider display.
         }
       }
+      if (cancelled) return;
       setSwitchyardRoute(activeRoute);
 
       try {
         let ok = false;
-        // Health-check by poking the backend with a trivial request using the configured model
-        if (b === "ollama") {
+        if (IS_WEB && (b === "ollama" || b === "llamacpp")) {
+          // On the web deployment the provider URL can be a private-network
+          // address (e.g. Railway's `<service>.railway.internal`) that only
+          // the nolock-server can reach — the browser cannot. Health-check
+          // through the server (same path chat/completions actually use) so
+          // the status reflects reality instead of a permanent false negative.
+          try {
+            await fetchModels(b, url);
+            ok = true;
+          } catch {
+            ok = false;
+          }
+        } else if (b === "ollama") {
           // Just check if ollama is reachable
           const resp = await fetch(`${url}/api/tags`);
           ok = resp.ok;
@@ -63,6 +83,7 @@ export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
         } else {
           ok = true; // openrouter / opencode / digitalocean assumed OK
         }
+        if (cancelled) return;
         setBackend({
           ok,
           name: b,
@@ -70,6 +91,7 @@ export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
           chatModel: formatModelLabel(chatBackend, chatModel),
         });
       } catch {
+        if (cancelled) return;
         setBackend({
           ok: false,
           name: b,
@@ -100,6 +122,7 @@ export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
     window.addEventListener("nolock:settings-changed", onSettingsChanged);
     window.addEventListener("storage", onStorage);
     return () => {
+      cancelled = true;
       clearInterval(interval);
       window.removeEventListener("nolock:settings-changed", onSettingsChanged);
       window.removeEventListener("storage", onStorage);

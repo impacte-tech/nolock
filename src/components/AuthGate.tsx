@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import LoginPage from "./LoginPage";
-import { getToken, clearToken } from "../web/auth";
+import { getToken, setToken, clearToken, hasStoredToken } from "../web/auth";
+import { seedLlamacppUrlFromServer } from "../lib/backends";
 import nolockLogo from "../assets/nolock-mark-white.svg";
 
 /**
@@ -24,6 +25,16 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     })
       .then((res) => {
         if (res.ok) {
+          // A token that arrived via the URL (`?token=…`) is read by getToken()
+          // but never stored — persist it per-tab so the session survives
+          // reloads without the query parameter. Tokens entered on the login
+          // page are already stored, and stored tokens always win.
+          if (!hasStoredToken()) {
+            setToken(token, false);
+          }
+          // Wire deployment-provided provider config (llama.cpp URL) now that
+          // the token is valid — the startup attempt ran before any token.
+          void seedLlamacppUrlFromServer();
           setState("authed");
         } else {
           clearToken();

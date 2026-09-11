@@ -70,6 +70,21 @@ export function seedBackendUrlOverride(backend: string, url: string): void {
   }
 }
 
+/**
+ * Web-only: fetch the deployment config (`GET /api/config` → the `LLAMACPP_URL`
+ * Railway reference variable) and seed the llama.cpp per-backend URL override.
+ *
+ * Called at startup AND again after the web login succeeds — the first attempt
+ * runs before the user has a token, so the authenticated re-run after login is
+ * what actually wires the llama.cpp provider on a fresh browser.
+ */
+export async function seedLlamacppUrlFromServer(): Promise<void> {
+  const url = await getLlamacppUrl();
+  if (url) {
+    seedBackendUrlOverride("llamacpp", url);
+  }
+}
+
 /** The backend used for chat requests (per-panel override falls back to the global backend). */
 export function getChatBackend(): string {
   return localStorage.getItem("nolock.chatBackend") || localStorage.getItem("nolock.backend") || "ollama";

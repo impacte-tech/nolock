@@ -3,8 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import AuthGate from "./components/AuthGate";
 import { IS_WEB } from "./lib/webEnv";
-import { seedBackendUrlOverride } from "./lib/backends";
-import { getLlamacppUrl } from "./web/serverConfig";
+import { seedLlamacppUrlFromServer } from "./lib/backends";
 import "./styles.css";
 
 // On the web target the whole app is gated behind the login page (AuthGate).
@@ -25,11 +24,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 // (`GET /api/config` → the `LLAMACPP_URL` Railway reference variable). Seeds a
 // per-backend override (`nolock.url.llamacpp`) so the llamacpp provider works
 // out of the box — unless the user already set a custom URL, which always wins.
+// Runs again after login (see AuthGate) because the first attempt happens
+// before the browser holds a valid token.
 
 if (IS_WEB) {
-  void getLlamacppUrl().then((url) => {
-    if (url) {
-      seedBackendUrlOverride("llamacpp", url);
-    }
-  });
+  void seedLlamacppUrlFromServer();
 }

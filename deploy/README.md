@@ -39,13 +39,15 @@ root `/deploy/llamacpp` and its own `Dockerfile`. Keep the root `Dockerfile` and
    `/health`, and healthcheck timeout `120` seconds.
 5. Set the public domain: **Settings → Networking → Generate Domain** (or add a
    custom domain). Railway routes HTTPS traffic to the container's `$PORT`.
-6. (Recommended) Add a **volume** mounted at `/data` and set the variable
+6. Add a **volume** mounted at `/data` and set the variable
    `NOLOCK_DATA_DIR=/data/nolock` so secrets, RLHF logs and any opened
-   project folders survive redeploys.
+   project folders survive redeploys. Without the volume, all server-side
+   state is lost on every redeploy.
 7. (Recommended for public URLs) Set `NOLOCK_WEB_TOKEN=<random secret>`. The
    web app now shows a **login page** — paste the token there (or open
-   `https://<domain>/?token=<secret>` to pre-fill it). The token is stored in
-   the browser and sent as a `Bearer` header on every API call.
+   `https://<domain>/?token=<secret>` to sign in automatically; the token is
+   then remembered for that browser tab). The token is stored in the browser
+   and sent as a `Bearer` header on every API call.
 
 First build takes a while (full Rust release build of the tauri crate stack);
 subsequent builds reuse Docker layers (dependency cache) and are much faster.

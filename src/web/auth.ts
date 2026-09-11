@@ -69,3 +69,23 @@ export function clearToken(): void {
 export function hasToken(): boolean {
   return getToken() !== null;
 }
+
+/**
+ * True when a token is persisted in localStorage/sessionStorage — i.e. NOT
+ * one that only came from the URL `?token=` parameter (which `getToken`
+ * reads as a fallback but never stores).
+ */
+export function hasStoredToken(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    if (localStorage.getItem(LS_KEY)) return true;
+  } catch {
+    /* storage unavailable */
+  }
+  try {
+    if (sessionStorage.getItem(SS_KEY)) return true;
+  } catch {
+    /* storage unavailable */
+  }
+  return false;
+}
