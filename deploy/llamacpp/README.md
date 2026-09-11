@@ -52,9 +52,11 @@ this wrapper to enable llama.cpp pulls from the UI:
 1. Keep the existing llama.cpp service and `/models` volume. Do **not** create or
    move a volume. Preserve `MODEL_HF` and `LLAMA_CACHE` to reuse the active model.
 2. Set the llama.cpp service's source to `impacte-tech/nolock`, branch `main`,
-   with repository root `/` and config file **`/deploy/llamacpp/railway.json`**.
-   This uses `deploy/llamacpp/Dockerfile` and `/entrypoint.sh`, replacing the old
-   dashboard start command that directly ran `llama-server`.
+   with service root **`/deploy/llamacpp`**, Dockerfile path **`Dockerfile`**,
+   start command **`/entrypoint.sh`**, healthcheck `/health`, and a 300-second
+   healthcheck timeout. Use Railway service settings, not a new `railway.json`
+   path (Railway no longer accepts new Config-as-Code settings). This replaces
+   the old dashboard start command that directly ran `llama-server`.
 3. Generate one random `NOLOCK_MODEL_PULL_TOKEN` and set the **same secret** on
    both services. Keep it out of Git, logs, browser settings, and URLs.
 4. On `llamacpp`, set `NOLOCK_MODEL_DIR=/models` and
@@ -101,7 +103,7 @@ python3 -m unittest discover -s deploy/llamacpp/tests -v
 cargo test --manifest-path src-tauri/Cargo.toml --bin nolock model_pulls::tests
 npm test -- src/components/__tests__/ModelPullPanel.test.tsx
 
-docker build -t nolock-llamacpp-pulls -f deploy/llamacpp/Dockerfile .
+docker build -t nolock-llamacpp-pulls deploy/llamacpp
 ```
 
 Upstream contracts: [Hugging Face GGUF/Ollama](https://huggingface.co/docs/hub/ollama),
