@@ -1,7 +1,11 @@
 // ---------------------------------------------------------------------------
-// ShortcutsScreen — the default landing page when no file is open, showing
-// keyboard shortcuts grouped by category.
+// ShortcutsScreen — the default landing page when no file is open.
+// Desktop: shows keyboard shortcuts grouped by category.
+// Web: the shortcuts screen is hidden (the feature itself still works — all
+// chord shortcuts remain active); a minimal placeholder is shown instead.
 // ---------------------------------------------------------------------------
+
+import { IS_WEB } from "../lib/webEnv";
 
 interface ShortcutEntry {
   keys: string;
@@ -62,6 +66,16 @@ const GROUPS: ShortcutGroup[] = [
 ];
 
 export default function ShortcutsScreen() {
+  if (IS_WEB) {
+    return (
+      <div className="shortcuts-screen">
+        <div className="shortcuts-web-placeholder">
+          <p>Open a folder to start editing.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="shortcuts-screen">
       <div className="shortcuts-grid">

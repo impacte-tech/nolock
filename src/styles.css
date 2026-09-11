@@ -3470,6 +3470,17 @@ select.field-input {
   overflow-y: auto;
 }
 
+/* Web build: minimal placeholder instead of the shortcuts cheat-sheet. */
+.shortcuts-web-placeholder {
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.shortcuts-web-placeholder p {
+  margin: 0;
+}
+
 .shortcuts-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
