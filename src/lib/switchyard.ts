@@ -57,7 +57,7 @@ export const ROUTE_PURPOSES: { value: RoutePurpose; label: string }[] = [
   { value: "chat", label: "Chat (main agent)" },
   { value: "subagent", label: "Sub-agent" },
   { value: "agent-select", label: "Agent selection" },
-  { value: "fitm", label: "Inline completion (FITM)" },
+  { value: "fitm", label: "Inline completion (FIM)" },
 ];
 
 export const ROUTE_ALGORITHMS: { value: RouteAlgorithm; label: string }[] = [

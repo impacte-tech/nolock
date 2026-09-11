@@ -3243,7 +3243,7 @@ select.field-input {
   opacity: 0.9;
 }
 
-/* ===== Monaco Editor — ghost text (FITM inline completions) =====
+/* ===== Monaco Editor — ghost text (FIM inline completions) =====
    Override the default blue color from vs-dark to white so that
    AI-generated completions match the editor foreground.           */
 .monaco-editor {
@@ -5606,3 +5606,21 @@ select.field-input {
 }
 
 .upload-status { padding: 6px 10px; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+
+.menu-entry--disabled { opacity: 0.45; cursor: default; }
+.menu-entry--disabled:hover { background: transparent; }
+
+.model-pull-panel { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.model-pull-panel h3 { margin: 0 0 12px; font-size: 14px; }
+.model-pull-input-row { display: flex; align-items: center; gap: 8px; }
+.model-pull-input-row .field-input { flex: 1; min-width: 0; }
+.model-pull-hint { font-size: 11px; color: var(--text-muted); line-height: 1.6; margin: 8px 0; }
+.model-pull-hint a { color: var(--text-primary); text-decoration: underline; }
+.model-pull-panel summary { font-size: 12px; cursor: pointer; }
+.model-pull-error { font-size: 12px; color: var(--text-error, #f87171); overflow-wrap: anywhere; }
+.model-pull-jobs { display: grid; gap: 10px; }
+.model-pull-job { padding: 12px; border: 1px solid var(--border); border-radius: 6px; }
+.model-pull-job-heading { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; overflow-wrap: anywhere; }
+.model-pull-job progress { display: block; width: 100%; height: 6px; margin: 8px 0; }
+.model-pull-job .btn-secondary { display: block; margin-top: 8px; }
+.model-pull-path { display: block; overflow-wrap: anywhere; font-size: 11px; }

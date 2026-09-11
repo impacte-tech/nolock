@@ -90,3 +90,9 @@ NOLOCK_WEB_DIST=../dist ./target/release/nolock-server
 
 Hot-reload development: `cargo run --bin nolock-server` in one shell and
 `npm run dev:web` in another (Vite proxies `/api` to `127.0.0.1:8080`).
+
+## Model pulls from the UI
+
+See [llama.cpp model-store deployment](llamacpp/README.md) to enable authenticated
+GGUF pulls directly onto the inference service’s volume. Ollama uses its native
+pull API; mount `OLLAMA_MODELS` on the Ollama service’s own persistent volume.

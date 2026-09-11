@@ -309,6 +309,7 @@ args!(KernelStartArgs { kernel_id: String, python_path: String, cwd: String });
 args!(KernelRunArgs {
     kernel_id: String, run_id: String, code: String, timeout_secs: Option<u64>,
 });
+args!(ModelPullArgs { req: main_impl::model_pulls::PullRequest });
 args!(UploadFileArgs { directory: String, name: String, content: Vec<u8> });
 args!(KernelIdArgs { kernel_id: String });
 args!(CreateEnvArgs { root_path: String, name: String });
@@ -488,6 +489,18 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         "get_model_info" => {
             let a: ModelInfoArgs = parse(command, args)?;
             ok(main_impl::web_bridge::get_model_info(a.req).await)
+        }
+        "start_model_pull" => {
+            let a: ModelPullArgs = parse(command, args)?;
+            ok(main_impl::model_pulls::start(a.req).await)
+        }
+        "list_model_pulls" => {
+            let a: ModelPullArgs = parse(command, args)?;
+            ok(main_impl::model_pulls::list(a.req).await)
+        }
+        "cancel_model_pull" => {
+            let a: ModelPullArgs = parse(command, args)?;
+            ok(main_impl::model_pulls::cancel(a.req).await)
         }
         "fetch_models" => {
             let a: FetchModelsArgs = parse(command, args)?;

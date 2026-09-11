@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getChatBackend, getFitmBackend, formatModelLabel } from "../lib/backends";
+import { getChatBackend, getFimBackend, formatModelLabel } from "../lib/backends";
 import { type SwitchyardConfig } from "../lib/switchyard";
 import { IS_WEB } from "../lib/webEnv";
 import { clearToken } from "../web/auth";
@@ -30,7 +30,7 @@ export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
       const b = getChatBackend();
       const url = localStorage.getItem("nolock.url") || "http://localhost:11434";
       const chatBackend = getChatBackend();
-      const fitmBackend = getFitmBackend();
+      const fitmBackend = getFimBackend();
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
 

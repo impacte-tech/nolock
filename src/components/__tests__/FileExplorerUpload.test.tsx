@@ -43,6 +43,7 @@ describe("file uploads", () => {
     });
     fireEvent.change(screen.getByLabelText("Upload files"), { target: { files: [new File([], "existing")] } });
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("File exists"));
-    expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled();
+    expect(screen.getByLabelText("Upload files")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Upload" })).not.toBeInTheDocument();
   });
 });

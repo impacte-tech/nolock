@@ -3,8 +3,8 @@ import * as monaco from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getSecret } from "../lib/secrets";
-import { getFitmBackend, resolveBackendUrl } from "../lib/backends";
-import { buildAiPrompt, processCompletionResponse } from "./fitm";
+import { getFimBackend, resolveBackendUrl } from "../lib/backends";
+import { buildAiPrompt, processCompletionResponse } from "./fim";
 
 // Configure Monaco workers
 self.MonacoEnvironment = {
@@ -53,7 +53,7 @@ function getLanguage(filePath: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// FITM Inline Completion Provider with gate-based debounce
+// FIM Inline Completion Provider with gate-based debounce
 //
 // How it works:
 //   - Every keystroke sets _ready = false (gate closed) and starts a timer
@@ -144,13 +144,13 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
     });
 
     if (fullPrefix.trim().length < 5) {
-      console.log("[FITM] prefix too short, skipping");
+      console.log("[FIM] prefix too short, skipping");
       return { items: [] };
     }
 
     const prefix = fullPrefix.length > 4000 ? fullPrefix.slice(-4000) : fullPrefix;
 
-    // --- Build suffix (next 20 lines after cursor for FITM) ---
+    // --- Build suffix (next 20 lines after cursor for FIM) ---
     const totalLines = model.getLineCount();
     const suffixEndLine = Math.min(position.lineNumber + 20, totalLines);
     const suffix = model.getValueInRange({
@@ -163,7 +163,7 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
     const requestId = ++this._requestCounter;
 
     try {
-      const backend = getFitmBackend();
+      const backend = getFimBackend();
       const url = resolveBackendUrl(backend);
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
       const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
@@ -173,7 +173,7 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
       const fitmSystemPrompt = localStorage.getItem("nolock.fitmSystemPrompt");
 
       if (!completionModel) {
-        console.log("[FITM] no completion model configured");
+        console.log("[FIM] no completion model configured");
         return { items: [] };
       }
 
@@ -181,11 +181,11 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
 
       let currentPrompt = buildAiPrompt(prefix, suffix || null);
 
-      console.log("[FITM] prefix_last_100:", JSON.stringify(prefix.slice(-100)));
-      console.log("[FITM] suffix_first_100:", JSON.stringify(suffix.slice(0, 100)));
-      console.log("[FITM] hasSuffix:", hasSuffix);
-      console.log("[FITM] prompt_len:", currentPrompt.length);
-      console.log("[FITM] prompt_starts_with_FIM:", currentPrompt.startsWith("<|fim_prefix|>"));
+      console.log("[FIM] prefix_last_100:", JSON.stringify(prefix.slice(-100)));
+      console.log("[FIM] suffix_first_100:", JSON.stringify(suffix.slice(0, 100)));
+      console.log("[FIM] hasSuffix:", hasSuffix);
+      console.log("[FIM] prompt_len:", currentPrompt.length);
+      console.log("[FIM] prompt_starts_with_FIM:", currentPrompt.startsWith("<|fim_prefix|>"));
 
       const attemptCompletion = async (
         prompt: string,
@@ -206,44 +206,44 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
         });
       };
 
-      console.log("[FITM] --- attempt 1 (FIM) ---");
+      console.log("[FIM] --- attempt 1 (FIM) ---");
       let text: string = await attemptCompletion(currentPrompt, hasSuffix ? suffix : null);
-      console.log("[FITM] attempt 1 raw response:", JSON.stringify(text));
-      console.log("[FITM] attempt 1 response_len:", text.length);
+      console.log("[FIM] attempt 1 raw response:", JSON.stringify(text));
+      console.log("[FIM] attempt 1 response_len:", text.length);
 
       if (token.isCancellationRequested || requestId !== this._requestCounter) {
-        console.log("[FITM] discard stale response (attempt 1)");
+        console.log("[FIM] discard stale response (attempt 1)");
         return { items: [] };
       }
 
       if (!text && hasSuffix) {
-        console.log("[FITM] FIM returned empty, retrying with raw prefix");
+        console.log("[FIM] FIM returned empty, retrying with raw prefix");
         currentPrompt = prefix;
-        console.log("[FITM] --- attempt 2 (raw prefix, no FIM) ---");
+        console.log("[FIM] --- attempt 2 (raw prefix, no FIM) ---");
         text = await attemptCompletion(currentPrompt, null);
-        console.log("[FITM] attempt 2 raw response:", JSON.stringify(text));
-        console.log("[FITM] attempt 2 response_len:", text.length);
+        console.log("[FIM] attempt 2 raw response:", JSON.stringify(text));
+        console.log("[FIM] attempt 2 response_len:", text.length);
 
         if (token.isCancellationRequested || requestId !== this._requestCounter) {
-          console.log("[FITM] discard stale response (attempt 2)");
+          console.log("[FIM] discard stale response (attempt 2)");
           return { items: [] };
         }
       }
 
       if (!text) {
-        console.log("[FITM] all attempts returned empty, no suggestion");
+        console.log("[FIM] all attempts returned empty, no suggestion");
         return { items: [] };
       }
 
       const cleaned = processCompletionResponse(text);
-      console.log("[FITM] cleaned:", JSON.stringify(cleaned));
+      console.log("[FIM] cleaned:", JSON.stringify(cleaned));
 
       if (!cleaned) {
-        console.log("[FITM] cleaning pipeline rejected the response");
+        console.log("[FIM] cleaning pipeline rejected the response");
         return { items: [] };
       }
 
-      console.log("[FITM] returning suggestion, len:", cleaned.length);
+      console.log("[FIM] returning suggestion, len:", cleaned.length);
       return {
         items: [
           {
@@ -258,7 +258,7 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
         ],
       };
     } catch (err) {
-      console.log("[FITM] error:", err);
+      console.log("[FIM] error:", err);
       return { items: [] };
     }
   }
@@ -405,7 +405,7 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
       editor.trigger("keyboard", "editor.action.selectAll", null);
     });
 
-    // Ctrl+. — explicit FITM trigger (bypasses debounce)
+    // Ctrl+. — explicit FIM trigger (bypasses debounce)
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Period, () => {
       provider.requestExplicitCompletion();
     });

@@ -4,6 +4,7 @@ interface MenuItem {
   label: string;
   action: () => void;
   shortcut?: string;
+  disabled?: boolean;
 }
 
 interface MenuGroup {
@@ -48,8 +49,10 @@ export default function MenuBar({ menus, logo }: Props) {
               {menu.items.map((item) => (
                 <div
                   key={item.label}
-                  className="menu-entry"
+                  className={`menu-entry${item.disabled ? " menu-entry--disabled" : ""}`}
+                  aria-disabled={item.disabled || undefined}
                   onClick={() => {
+                    if (item.disabled) return;
                     item.action();
                     setOpenMenu(null);
                   }}

@@ -252,7 +252,7 @@ export default function AISettings({ visible, onClose }: Props) {
               value={config.completionModel}
               onChange={(v) => setConfig({ ...config, completionModel: v })}
               placeholder="e.g. qwen2.5-coder:0.5b"
-              label="Code Completion Model (FITM)"
+              label="Code Completion Model (FIM)"
             />
             <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
               Smaller/faster model for inline code suggestions. Uses Fill-In-The-Middle (prefix+suffix).

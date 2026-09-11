@@ -2,14 +2,14 @@ import { useState, useEffect } from "react";
 import ModelSelector from "./ModelSelector";
 import Select from "./Select";
 import NumberField, { parseInt10 } from "./NumberField";
-import { BACKENDS, resolveBackendUrl, getFitmBackend } from "../lib/backends";
+import { BACKENDS, resolveBackendUrl, getFimBackend } from "../lib/backends";
 
 interface Props {
   visible: boolean;
   onClose: () => void;
 }
 
-export default function FITMModelPanel({ visible, onClose }: Props) {
+export default function FIMModelPanel({ visible, onClose }: Props) {
   const [completionModel, setCompletionModel] = useState("");
   const [backend, setBackend] = useState("ollama");
   const [apiKey, setApiKey] = useState("");
@@ -31,8 +31,8 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.2);
     const savedTokens = localStorage.getItem("nolock.fitmMaxTokens");
     setMaxTokens(savedTokens ? parseInt(savedTokens, 10) : 64);
-    // FITM uses its own provider (falls back to the global one).
-    const fitmBackend = getFitmBackend();
+    // FIM uses its own provider (falls back to the global one).
+    const fitmBackend = getFimBackend();
     setBackend(fitmBackend);
     setApiKey(localStorage.getItem(`nolock.apiKey.${fitmBackend}`) || "");
   }, [visible]);
@@ -58,7 +58,7 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span>FITM Model</span>
+          <span>FIM model</span>
           <button onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
@@ -76,7 +76,7 @@ export default function FITMModelPanel({ visible, onClose }: Props) {
             value={completionModel}
             onChange={setCompletionModel}
             placeholder="e.g. qwen2.5-coder:0.5b"
-            label="Code Completion Model (FITM)"
+            label="Code Completion Model (FIM)"
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
             Smaller/faster model for inline code suggestions. Uses Fill-In-The-Middle (prefix+suffix).

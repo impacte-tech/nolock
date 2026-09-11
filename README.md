@@ -32,7 +32,11 @@ Connect it to your preferred AI backend (Ollama, llama.cpp, OpenRouter, or OpenC
 
 ## Uploading files
 
-In the web or desktop app, open a project folder and use **Upload** in the Explorer to select files, or drag files from your computer onto an Explorer folder. Dropping onto empty space uploads to the project root; dropping onto a file uploads to its parent folder. Each file can be up to **10 MB (10,000,000 bytes)**. Binary files are supported, and existing files are never overwritten. The Explorer reports upload results and refreshes automatically. Web uploads are saved on the server; desktop uploads are saved locally.
+In the web or desktop app, open a project folder and use **Files → Upload** to select files, or drag files from your computer onto an Explorer folder. Dropping onto empty space uploads to the project root; dropping onto a file uploads to its parent folder. Each file can be up to **10 MB (10,000,000 bytes)**. Binary files are supported, and existing files are never overwritten. The Explorer reports upload results and refreshes automatically. Web uploads are saved on the server; desktop uploads are saved locally.
+
+## Pulling Hugging Face models
+
+Open **AI Integrations → Model Providers**, select **Ollama** or **llama.cpp**, paste a Hugging Face GGUF model identifier (or model-page URL), and press **Pull**. The UI explains where to find the identifier, shows download progress, and supports cancellation and retry. Downloads run on the selected inference service's storage. llama.cpp requires the volume-local model store and keeps its active model unchanged; see [deployment and storage setup](deploy/llamacpp/README.md).
 
 ## Open Source Technologies
 
@@ -91,7 +95,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **Code Editor** — Full-featured Monaco editor with syntax highlighting for 100+ languages, bracket colorization, minimap, word wrap, and **inline linting** (ESLint for TypeScript/JavaScript, Ruff for Python, Clippy for Rust) with configurable rules via <kbd>Ctrl+E, S</kbd>.
 - **Native Notebooks (`.ipynb`)** — Colab-style Jupyter notebooks rendered natively: markdown cells with `$…$` math, auto-height Monaco code cells, rich outputs (images, HTML, tables, **typeset LaTeX via KaTeX**), and a **persistent Python kernel per notebook** running inside a **Python virtual environment** you pick (or create) from the toolbar. State survives across cells; Shift+Enter runs and advances. **⬇ Export** produces a self-contained printable HTML (open it anywhere → Ctrl+P → PDF), and the `.ipynb` uploads directly into Google Colab with outputs and math preserved.
 - **File Search & Replace** — Search across all workspace files with regex support, match-case toggles, debounced live results, grouped by file with inline match previews, and batch replace-all with confirmation.
-- **AI Inline Completions** — Fill-In-The-Middle (FITM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
+- **AI Inline Completions** — Fill-In-The-Middle (FIM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
 - **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing, grep, edit, write_file), custom tools via `.tools/`, and context token tracking.
 - **AI Agent Manager** — Create and manage specialized AI agents (e.g., code-reviewer, doc-writer) stored as `.md` files (Markdown with YAML frontmatter) in the `.agents/` directory with custom system prompts. Legacy `.json` format is still supported.
 - **Hooks** — Project-local automation rules (`.hooks/`) that trigger AI agent runs on CLI commands (e.g. `git commit`), cron schedules, or manual `!hook-name` signals. Open via <kbd>Ctrl+A, H</kbd>.
@@ -659,7 +663,7 @@ Within the search panel (`Ctrl+F, S`):
 | `Ctrl+A, O` | Toggle agent chat panel |
 | `Ctrl+A, P` | Model providers |
 | `Ctrl+A, M` | Chat model settings |
-| `Ctrl+A, F` | FITM model settings |
+| `Ctrl+A, F` | FIM model settings |
 | `Ctrl+A, T` | Agent tools |
 | `Ctrl+A, G` | Manage AI agents |
 | `Ctrl+A, K` | Manage skills |

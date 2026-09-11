@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// End-to-end test: Monaco → AiInlineCompletionProvider → Tauri invoke → FITM
+// End-to-end test: Monaco → AiInlineCompletionProvider → Tauri invoke → FIM
 // pipeline → response cleaning → Monaco ghost text.
 //
 // These tests simulate the FULL flow from a Monaco editor keystroke through
@@ -61,21 +61,21 @@ function openGate(provider: AiInlineCompletionProvider) {
 }
 
 /**
- * Spy on console.log to capture [FITM] trace messages.
- * Returns a function to retrieve all captured [FITM] log entries.
+ * Spy on console.log to capture [FIM] trace messages.
+ * Returns a function to retrieve all captured [FIM] log entries.
  */
 function captureFitmLogs() {
   const logs: string[] = [];
   const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
     const msg = args.map(a => String(a)).join(" ");
-    if (msg.includes("[FITM]")) {
+    if (msg.includes("[FIM]")) {
       logs.push(msg);
     }
   });
   return {
     logs,
     stop: () => spy.mockRestore(),
-    getFitmMessages: () => logs.filter(l => l.includes("[FITM]")),
+    getFitmMessages: () => logs.filter(l => l.includes("[FIM]")),
   };
 }
 
@@ -83,7 +83,7 @@ function captureFitmLogs() {
 // E2E: Full pipeline — realistic responses
 // ===========================================================================
 
-describe("FITM E2E — full pipeline", () => {
+describe("FIM E2E — full pipeline", () => {
   it("returns suggestion when model responds with FIM tokens + code (qwen2.5-coder style)", async () => {
     // qwen2.5-coder typically outputs <|fim_middle|> followed by the completion
     mockCompletionResponse("<|fim_middle|>  return a + b;\n}");
@@ -182,7 +182,7 @@ describe("FITM E2E — full pipeline", () => {
 // E2E: Debug scenarios — matching the observed production issue
 // ===========================================================================
 
-describe("FITM E2E — debug scenarios", () => {
+describe("FIM E2E — debug scenarios", () => {
   it("produces informative trace logs when model returns empty (observed issue)", async () => {
     const capture = captureFitmLogs();
 
@@ -208,16 +208,16 @@ describe("FITM E2E — debug scenarios", () => {
 
     // The trace should show: prefix, suffix, hasSuffix, prompt_len, attempt 1, fallback, attempt 2
     const allLogs = fitmLogs.join("\n");
-    expect(allLogs).toContain("[FITM] prefix_last_100:");
-    expect(allLogs).toContain("[FITM] suffix_first_100:");
-    expect(allLogs).toContain("[FITM] hasSuffix: true");
-    expect(allLogs).toContain("[FITM] prompt_starts_with_FIM:");
-    expect(allLogs).toContain("[FITM] --- attempt 1 (FIM) ---");
-    expect(allLogs).toContain("[FITM] attempt 1 raw response:");
-    expect(allLogs).toContain('[FITM] attempt 1 raw response: ""');
-    expect(allLogs).toContain("[FITM] FIM returned empty, retrying with raw prefix");
-    expect(allLogs).toContain("[FITM] --- attempt 2 (raw prefix, no FIM) ---");
-    expect(allLogs).toContain('[FITM] attempt 2 raw response: ""');
+    expect(allLogs).toContain("[FIM] prefix_last_100:");
+    expect(allLogs).toContain("[FIM] suffix_first_100:");
+    expect(allLogs).toContain("[FIM] hasSuffix: true");
+    expect(allLogs).toContain("[FIM] prompt_starts_with_FIM:");
+    expect(allLogs).toContain("[FIM] --- attempt 1 (FIM) ---");
+    expect(allLogs).toContain("[FIM] attempt 1 raw response:");
+    expect(allLogs).toContain('[FIM] attempt 1 raw response: ""');
+    expect(allLogs).toContain("[FIM] FIM returned empty, retrying with raw prefix");
+    expect(allLogs).toContain("[FIM] --- attempt 2 (raw prefix, no FIM) ---");
+    expect(allLogs).toContain('[FIM] attempt 2 raw response: ""');
 
     capture.stop();
   });
@@ -318,7 +318,7 @@ describe("FITM E2E — debug scenarios", () => {
 // E2E: Edge cases at the Monaco boundary
 // ===========================================================================
 
-describe("FITM E2E — Monaco boundary cases", () => {
+describe("FIM E2E — Monaco boundary cases", () => {
   it("does not call the backend when prefix has fewer than 5 non-whitespace characters", async () => {
     mockCompletionResponse("result");
     const provider = new AiInlineCompletionProvider();
@@ -381,7 +381,7 @@ describe("FITM E2E — Monaco boundary cases", () => {
 // E2E: Response cleaning pipeline — realism checks
 // ===========================================================================
 
-describe("FITM E2E — response realism", () => {
+describe("FIM E2E — response realism", () => {
   it("rejects purely conversational response (realistic model hallucination)", async () => {
     // Small models sometimes respond with natural language instead of code
     mockCompletionResponse(
@@ -445,7 +445,7 @@ describe("FITM E2E — response realism", () => {
 // E2E: Edge cases discovered during the raw-mode fix
 // ===========================================================================
 
-describe("FITM E2E — raw-mode edge cases", () => {
+describe("FIM E2E — raw-mode edge cases", () => {
   it("forwards system_prompt to the backend", async () => {
     mockCompletionResponse("const result = 42;");
     localStorage.setItem("nolock.fitmSystemPrompt", "You are a Rust expert.");

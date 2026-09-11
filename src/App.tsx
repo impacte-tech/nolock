@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { flushSync } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileExplorer from "./components/FileExplorer";
@@ -9,7 +10,7 @@ import BrowserPanel from "./components/BrowserPanel";
 import MenuBar from "./components/MenuBar";
 import ModelProvidersPanel from "./components/ModelProvidersPanel";
 import ChatModelPanel from "./components/ChatModelPanel";
-import FITMModelPanel from "./components/FITMModelPanel";
+import FIMModelPanel from "./components/FIMModelPanel";
 import ToolsPanel from "./components/ToolsPanel";
 import RlhfPanel from "./components/RlhfPanel";
 import SwitchyardPanel from "./components/SwitchyardPanel";
@@ -100,7 +101,7 @@ export default function App() {
   const [showChat, setShowChat] = useState(false);
   const [showModelProviders, setShowModelProviders] = useState(false);
   const [showChatModel, setShowChatModel] = useState(false);
-  const [showFITMModel, setShowFITMModel] = useState(false);
+  const [showFIMModel, setShowFIMModel] = useState(false);
   const [showTools, setShowTools] = useState(false);
   const [showRlhf, setShowRlhf] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -205,6 +206,8 @@ export default function App() {
     return localStorage.getItem("nolock.lastRootPath") || "";
   });
   const [refreshKey, setRefreshKey] = useState(0);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
 
   // Persist last opened folder across restarts
   useEffect(() => {
@@ -641,7 +644,7 @@ export default function App() {
           if (showAgentManager) setShowAgentManager(false);
           if (showModelProviders) setShowModelProviders(false);
           if (showChatModel) setShowChatModel(false);
-          if (showFITMModel) setShowFITMModel(false);
+          if (showFIMModel) setShowFIMModel(false);
           if (showTools) setShowTools(false);
           if (showSettings) setShowSettings(false);
           if (showTermMemory) { setShowTermMemory(false); }
@@ -685,7 +688,7 @@ export default function App() {
           if (e.key === "f") {
             e.preventDefault();
             setChordPrefix(null);
-            setShowFITMModel(true);
+            setShowFIMModel(true);
             return;
           }
           if (e.key === "t") {
@@ -887,7 +890,7 @@ export default function App() {
         if (showAgentManager) setShowAgentManager(false);
         if (showModelProviders) setShowModelProviders(false);
         if (showChatModel) setShowChatModel(false);
-        if (showFITMModel) setShowFITMModel(false);
+        if (showFIMModel) setShowFIMModel(false);
         if (showTools) setShowTools(false);
         if (showSettings) setShowSettings(false);
         if (showTermMemory) {
@@ -901,14 +904,23 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, showModelProviders, showChatModel, showFITMModel, showTools, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
+  }, [openFolder, refreshFolder, createTerminal, showModelProviders, showChatModel, showFIMModel, showTools, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
 
   // --- Menu ---
   const menus = [
     {
-      label: "File Explorer",
+      label: "Files",
       items: [
         { label: "Open Folder", action: openFolder, shortcut: "Ctrl+F, O" },
+        { label: "Upload", disabled: !rootPath || uploadingFiles, action: () => {
+          // Mount the explorer synchronously so opening the picker stays within
+          // the user's click gesture, including when Search is currently open.
+          flushSync(() => {
+            setShowExplorer(true);
+            setShowSearch(false);
+          });
+          uploadInputRef.current?.click();
+        } },
         { label: "Refresh Explorer", action: refreshFolder, shortcut: "Ctrl+F, R" },
         { label: "Toggle Explorer", action: () => setShowExplorer((v) => !v), shortcut: "Ctrl+F, E" },
         { label: "Search in Files", action: () => {
@@ -940,7 +952,7 @@ export default function App() {
         { label: "Toggle Agent Chat", action: () => setShowChat((v) => !v), shortcut: "Ctrl+A, O" },
         { label: "Model Providers...", action: () => setShowModelProviders(true), shortcut: "Ctrl+A, P" },
         { label: "Chat Model...", action: () => setShowChatModel(true), shortcut: "Ctrl+A, M" },
-        { label: "FITM Model...", action: () => setShowFITMModel(true), shortcut: "Ctrl+A, F" },
+        { label: "FIM model...", action: () => setShowFIMModel(true), shortcut: "Ctrl+A, F" },
         { label: "Tools...", action: () => setShowTools(true), shortcut: "Ctrl+A, T" },
         { label: "Agents...", action: () => { setAgentManagerInitialTab("agents"); setShowAgentManager(true); }, shortcut: "Ctrl+A, G" },
         { label: "Skills...", action: () => { setAgentManagerInitialTab("skills"); setShowAgentManager(true); }, shortcut: "Ctrl+A, K" },
@@ -1009,6 +1021,8 @@ export default function App() {
               />
             ) : (
               <FileExplorer
+                uploadInputRef={uploadInputRef}
+                onUploadingChange={setUploadingFiles}
                 onFileOpen={openFile}
                 rootPath={rootPath}
                 setRootPath={setRootPath}
@@ -1254,7 +1268,7 @@ export default function App() {
 
       <ModelProvidersPanel visible={showModelProviders} onClose={() => setShowModelProviders(false)} />
       <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />
-      <FITMModelPanel visible={showFITMModel} onClose={() => setShowFITMModel(false)} />
+      <FIMModelPanel visible={showFIMModel} onClose={() => setShowFIMModel(false)} />
       <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} rootPath={rootPath} />
       <HooksPanel visible={showHooks} onClose={() => setShowHooks(false)} rootPath={rootPath} />
       <RlhfPanel visible={showRlhf} onClose={() => setShowRlhf(false)} />

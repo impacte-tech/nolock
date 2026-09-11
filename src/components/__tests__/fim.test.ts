@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Unit tests for FITM utility functions (pure, no mocks needed)
+// Unit tests for FIM utility functions (pure, no mocks needed)
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "vitest";
@@ -9,7 +9,7 @@ import {
   scoreCodeQuality,
   truncateAtLogicalBoundary,
   processCompletionResponse,
-} from "../fitm";
+} from "../fim";
 
 // ===========================================================================
 // buildAiPrompt

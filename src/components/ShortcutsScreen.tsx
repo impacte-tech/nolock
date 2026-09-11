@@ -41,7 +41,7 @@ const GROUPS: ShortcutGroup[] = [
       { keys: "Ctrl+A, O", description: "Toggle agent chat" },
       { keys: "Ctrl+A, P", description: "Model providers" },
       { keys: "Ctrl+A, M", description: "Chat model settings" },
-      { keys: "Ctrl+A, F", description: "FITM model settings" },
+      { keys: "Ctrl+A, F", description: "FIM model settings" },
       { keys: "Ctrl+A, T", description: "Agent tools" },
       { keys: "Ctrl+A, G", description: "Manage AI agents" },
       { keys: "Ctrl+A, K", description: "Manage skills" },

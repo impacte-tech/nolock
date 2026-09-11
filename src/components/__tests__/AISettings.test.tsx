@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import ModelProvidersPanel from "../ModelProvidersPanel";
 import ChatModelPanel from "../ChatModelPanel";
-import FITMModelPanel from "../FITMModelPanel";
+import FIMModelPanel from "../FIMModelPanel";
 import ToolsPanel from "../ToolsPanel";
 
 // ===== ModelProvidersPanel =====
@@ -118,35 +118,35 @@ describe("ChatModelPanel", () => {
   });
 });
 
-// ===== FITMModelPanel =====
-describe("FITMModelPanel", () => {
+// ===== FIMModelPanel =====
+describe("FIMModelPanel", () => {
   beforeEach(() => {
     localStorage.clear();
   });
 
   it("returns null when not visible", () => {
     const { container } = render(
-      <FITMModelPanel visible={false} onClose={vi.fn()} />,
+      <FIMModelPanel visible={false} onClose={vi.fn()} />,
     );
     expect(container.innerHTML).toBe("");
   });
 
   it("renders with title and input", () => {
-    render(<FITMModelPanel visible={true} onClose={vi.fn()} />);
-    expect(screen.getByText("FITM Model")).toBeInTheDocument();
+    render(<FIMModelPanel visible={true} onClose={vi.fn()} />);
+    expect(screen.getByText("FIM model")).toBeInTheDocument();
     const input = screen.getByPlaceholderText("e.g. qwen2.5-coder:0.5b");
     expect(input).toBeInTheDocument();
   });
 
   it("loads completion model from localStorage", () => {
     localStorage.setItem("nolock.completionModel", "test-fitm");
-    render(<FITMModelPanel visible={true} onClose={vi.fn()} />);
+    render(<FIMModelPanel visible={true} onClose={vi.fn()} />);
     expect(screen.getByDisplayValue("test-fitm")).toBeInTheDocument();
   });
 
   it("saves completion model on Save", () => {
     const onClose = vi.fn();
-    render(<FITMModelPanel visible={true} onClose={onClose} />);
+    render(<FIMModelPanel visible={true} onClose={onClose} />);
     const input = screen.getByPlaceholderText("e.g. qwen2.5-coder:0.5b");
     fireEvent.change(input, { target: { value: "my-fitm-model" } });
     fireEvent.click(screen.getByText("Save"));

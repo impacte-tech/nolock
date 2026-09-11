@@ -222,10 +222,10 @@ describe("AiInlineCompletionProvider - API integration", () => {
 });
 
 // ===========================================================================
-// FITM parameter forwarding
+// FIM parameter forwarding
 // ===========================================================================
 
-describe("AiInlineCompletionProvider - FITM parameter forwarding", () => {
+describe("AiInlineCompletionProvider - FIM parameter forwarding", () => {
   beforeEach(() => {
     mockCompletionResponse("const result = 42;");
   });

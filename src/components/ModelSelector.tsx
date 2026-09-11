@@ -112,6 +112,14 @@ export default function ModelSelector({
     }
   }, [browseOpen, fetched, loading, supportsListing, doFetch]);
 
+  useEffect(() => {
+    const refresh = (event: Event) => {
+      if ((event as CustomEvent).detail?.backend === provider) setFetched(false);
+    };
+    window.addEventListener("nolock:models-changed", refresh);
+    return () => window.removeEventListener("nolock:models-changed", refresh);
+  }, [provider]);
+
   const handleFilterChange = (key: keyof ModelFilters) => {
     const updated = { ...filters, [key]: !filters[key] };
     setFilters(updated);

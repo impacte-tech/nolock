@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 import App from "../App";
 import {
@@ -36,10 +36,36 @@ describe("App", () => {
 
   it("renders the menu bar", () => {
     render(<App />);
-    expect(screen.getByText("File Explorer")).toBeInTheDocument();
+    expect(screen.getByText("Files")).toBeInTheDocument();
     expect(screen.getAllByText("Terminal").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Browser").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("AI Integrations").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("disables Files > Upload until a project is open", () => {
+    render(<App />);
+    fireEvent.mouseDown(screen.getByText("Files"));
+    expect(screen.getByText("Upload").closest(".menu-entry")).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it.each(["Toggle Explorer", "Search in Files"])("uploads from Files when %s is active", async (action) => {
+    localStorage.setItem("nolock.lastRootPath", "/project");
+    render(<App />);
+    fireEvent.mouseDown(screen.getByText("Files"));
+    fireEvent.click(screen.getByText(action));
+    expect(screen.queryByLabelText("Upload files")).not.toBeInTheDocument();
+    const picker = vi.spyOn(HTMLInputElement.prototype, "click");
+    fireEvent.mouseDown(screen.getByText("Files"));
+    fireEvent.click(screen.getByText("Upload"));
+    expect(picker).toHaveBeenCalledOnce();
+    picker.mockRestore();
+    fireEvent.change(screen.getByLabelText("Upload files"), {
+      target: { files: [new File(["hello"], "note.txt")] },
+    });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("upload_file", {
+      directory: "/project", name: "note.txt", content: [104, 101, 108, 108, 111],
+    }));
+    await screen.findByText("Uploaded 1 file.");
   });
 
   it("renders the status bar", () => {
@@ -123,12 +149,12 @@ describe("App", () => {
   it("toggles file explorer on Ctrl+E", () => {
     render(<App />);
     // Explorer should be visible by default
-    expect(screen.getByText("File Explorer")).toBeInTheDocument();
+    expect(screen.getByText("Files")).toBeInTheDocument();
 
     // Let's check for the explorer panel specifically
     fireEvent.keyDown(window, { key: "e", ctrlKey: true, shiftKey: false });
     // After toggling off, the File Explorer header should not be in the document
-    // Actually, the menu still shows "File Explorer" label - the actual visibility
+    // Actually, the menu still shows "Files" label - the actual visibility
     // affects the element visibility, not the menu. We just check it doesn't crash.
   });
 

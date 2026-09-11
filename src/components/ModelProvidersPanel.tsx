@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getSecret, setSecret } from "../lib/secrets";
 import { BACKENDS, isPlanningBackend, resolveBackendUrl } from "../lib/backends";
+import ModelPullPanel from "./ModelPullPanel";
 import Select from "./Select";
 
 interface Props {
@@ -43,7 +44,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
       }
     }
     setBackend(currentBackend);
-    setUrl(loadedUrl || "http://localhost:11434");
+    setUrl(loadedUrl || resolveBackendUrl(currentBackend));
     setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
     setRouterName(localStorage.getItem("nolock.routerName") || "");
     setRouters([]);
@@ -97,7 +98,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
   };
 
   /** Select a router — the router becomes the chat model (`router:{name}`).
-   *  The FITM (completion) model is intentionally left untouched so the user can
+   *  The FIM (completion) model is intentionally left untouched so the user can
    *  configure chat and inline completion independently. */
   const selectRouter = (name: string) => {
     setRouterName(name);
@@ -180,6 +181,8 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
             </>
           )}
 
+          {(backend === "ollama" || backend === "llamacpp") && <ModelPullPanel backend={backend} url={url} />}
+
           {/* DigitalOcean Router Selection */}
           {backend === "digitalocean" && (
             <div style={{ marginTop: 12 }}>
@@ -244,7 +247,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
               <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4 }}>
                 Selecting a router sets it as your chat and completion model (e.g.{" "}
                 <code>router:my-router</code>). You can also type a specific model ID in the Chat
-                Model / FITM Model panels.
+                Model / FIM model panels.
               </span>
             </div>
           )}

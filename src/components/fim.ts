@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// FITM (Fill-In-The-Middle) utility functions for the Hybrid Pipeline.
+// FIM (Fill-In-The-Middle) utility functions for the Hybrid Pipeline.
 //
 // These pure functions handle three concerns:
 //   1. Prompt construction  – wrap prefix/suffix in FIM tokens
@@ -255,7 +255,7 @@ export function truncateAtLogicalBoundary(
 }
 
 /**
- * Full FITM pipeline:
+ * Full FIM pipeline:
  *   1. Build the AI prompt with FIM tokens
  *   2. (called after response) Extract code from response
  *   3. (called after response) Score quality

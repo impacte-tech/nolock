@@ -85,8 +85,8 @@ export function isCloudBackend(backend: string): boolean {
   return backend !== "ollama" && backend !== "llamacpp";
 }
 
-/** The backend used for FITM completion requests. */
-export function getFitmBackend(): string {
+/** The backend used for FIM completion requests. */
+export function getFimBackend(): string {
   return localStorage.getItem("nolock.fitmBackend") || localStorage.getItem("nolock.backend") || "ollama";
 }
 

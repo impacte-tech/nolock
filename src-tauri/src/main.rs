@@ -8,6 +8,7 @@ use regex::Regex;
 
 mod browser;
 mod uploads;
+pub mod model_pulls;
 mod fabric;
 pub mod hooks;
 pub mod linter;
@@ -2253,6 +2254,21 @@ pub struct ModelListItem {
 struct ModelPricing {
     prompt: f64,
     completion: f64,
+}
+
+#[tauri::command]
+async fn start_model_pull(req: model_pulls::PullRequest) -> Result<model_pulls::PullJob, String> {
+    model_pulls::start(req).await
+}
+
+#[tauri::command]
+async fn list_model_pulls(req: model_pulls::PullRequest) -> Result<Vec<model_pulls::PullJob>, String> {
+    model_pulls::list(req).await
+}
+
+#[tauri::command]
+async fn cancel_model_pull(req: model_pulls::PullRequest) -> Result<model_pulls::PullJob, String> {
+    model_pulls::cancel(req).await
 }
 
 #[tauri::command]
@@ -10209,6 +10225,9 @@ pub fn run() {
             get_rlhf_dir,
             get_model_info,
             fetch_models,
+            start_model_pull,
+            list_model_pulls,
+            cancel_model_pull,
             fetch_digitalocean_routers,
             ai_complete,
             ai_chat,

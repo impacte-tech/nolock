@@ -16,6 +16,8 @@ interface TreeDirEntry extends DirEntry {
 }
 
 interface Props {
+  uploadInputRef?: React.RefObject<HTMLInputElement>;
+  onUploadingChange?: (uploading: boolean) => void;
   onFileOpen: (path: string, name: string) => void;
   rootPath: string;
   setRootPath: (p: string) => void;
@@ -53,8 +55,9 @@ function getFileColor(name: string): string {
   return colorMap[ext] || "#6c7086";
 }
 
-export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey, style }: Props) {
-  const uploadInputRef = useRef<HTMLInputElement>(null);
+export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey, style, uploadInputRef: externalUploadInputRef, onUploadingChange }: Props) {
+  const internalUploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadInputRef = externalUploadInputRef ?? internalUploadInputRef;
   const uploadBusyRef = useRef(false);
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
@@ -375,6 +378,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     if (!directory || uploadBusyRef.current || !files.length) return;
     uploadBusyRef.current = true;
     setUploading(true);
+    onUploadingChange?.(true);
     setUploadMessage("");
     const errors: string[] = [];
     let count = 0;
@@ -403,7 +407,8 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     setUploadMessage([count ? `Uploaded ${count} file${count === 1 ? "" : "s"}.` : "", ...errors].filter(Boolean).join(" "));
     uploadBusyRef.current = false;
     setUploading(false);
-  }, [rootPath]);
+    onUploadingChange?.(false);
+  }, [rootPath, onUploadingChange]);
 
   const uploadDestination = (target: EventTarget) => {
     const item = (target as Element).closest('.tree-item');
@@ -595,7 +600,6 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     <div className="file-explorer" style={style}>
       <div className="explorer-header">
         <span>Explorer</span>
-        <button disabled={!rootPath || uploading} onClick={() => uploadInputRef.current?.click()} title="Upload files (up to 10 MB each)">Upload</button>
         <input ref={uploadInputRef} type="file" multiple hidden aria-label="Upload files" onChange={e => {
           const files = Array.from(e.target.files || []);
           e.target.value = "";
