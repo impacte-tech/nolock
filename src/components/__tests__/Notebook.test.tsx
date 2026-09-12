@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, createEvent, act } from "@testing-library/react";
 import { mockInvoke, mockListen, setupLocalStorageMocks } from "../../test/tauri-mock";
 
 // ---- Monaco mock -----------------------------------------------------------
@@ -90,6 +90,88 @@ const ENV = {
   kind: "system",
   version: "Python 3.11.4",
 };
+
+describe("Notebook — cell reordering", () => {
+  async function setup() {
+    setupLocalStorageMocks();
+    setupInvokeMocks({ status: "ok" });
+    monacoState.editors.length = 0;
+    const original = JSON.parse(NOTEBOOK_JSON);
+    original.cells[1].metadata = { tags: ["hide"], custom: "preserved" };
+    original.cells[1].execution_count = 7;
+    original.cells[1].outputs = [{ output_type: "stream", name: "stdout", text: ["saved output"] }];
+    original.cells.push({ id: "cell-raw", cell_type: "raw", metadata: {}, source: ["Raw notes"] });
+    let content = JSON.stringify(original);
+    const onChange = vi.fn((next: string) => { content = next; });
+    const props = { filePath: "/tmp/reorder.ipynb", onChange, onSave: vi.fn(), rootPath: "/tmp" };
+    const view = render(<Notebook {...props} content={content} />);
+    await act(async () => {});
+    const sync = () => view.rerender(<Notebook {...props} content={content} />);
+    const row = (id: string) => view.container.querySelector(`[data-cell-id="${id}"]`)!;
+    const order = () => Array.from(view.container.querySelectorAll(".nb-cell-row"), (el) => el.getAttribute("data-cell-id"));
+    const transfer = { setData: vi.fn(), effectAllowed: "", dropEffect: "" };
+    const drag = (id: string) => fireEvent.dragStart(row(id).querySelector(".nb-drag-handle")!, { dataTransfer: transfer });
+    const dropEvent = (type: "dragOver" | "drop", id: string, before: boolean) => {
+      const event = createEvent[type](row(id), { dataTransfer: transfer });
+      // jsdom has no layout or DragEvent coordinates. The row midpoint is zero.
+      Object.defineProperty(event, "clientY", { value: before ? -1 : 1 });
+      fireEvent(row(id), event);
+    };
+    return { ...view, original, onChange, sync, row, order, drag, dropEvent, saved: () => JSON.parse(content) };
+  }
+
+  it("moves cells in both directions with buttons and disables notebook boundaries", async () => {
+    const t = await setup();
+    expect(t.row("cell-title").querySelector('[title="Move cell up"]')).toBeDisabled();
+    expect(t.row("cell-raw").querySelector('[title="Move cell down"]')).toBeDisabled();
+    fireEvent.click(t.row("cell-abc").querySelector('[title="Move cell up"]')!);
+    t.sync();
+    expect(t.order()).toEqual(["cell-abc", "cell-title", "cell-raw"]);
+    fireEvent.click(t.row("cell-abc").querySelector('[title="Move cell down"]')!);
+    t.sync();
+    expect(t.saved()).toEqual(t.original);
+  });
+
+  it("drags across mixed cell types, preserves edits and outputs, and keeps editors mounted", async () => {
+    const t = await setup();
+    const editor = monacoState.editors[0];
+    act(() => editor._type("print('edited')"));
+    t.sync();
+    t.drag("cell-abc");
+    t.dropEvent("dragOver", "cell-raw", false);
+    expect(t.row("cell-raw")).toHaveClass("nb-drop-after");
+    t.dropEvent("drop", "cell-raw", false);
+    t.sync();
+    expect(t.order()).toEqual(["cell-title", "cell-raw", "cell-abc"]);
+    expect(t.saved().cells[2]).toEqual({ ...t.original.cells[1], source: ["print('edited')"] });
+    expect(t.container.querySelector(".nb-drop-after")).toBeNull();
+    t.drag("cell-abc");
+    t.dropEvent("dragOver", "cell-title", true);
+    expect(t.row("cell-title")).toHaveClass("nb-drop-before");
+    t.dropEvent("drop", "cell-title", true);
+    t.sync();
+    expect(t.order()).toEqual(["cell-abc", "cell-title", "cell-raw"]);
+    expect(monacoState.editors).toHaveLength(1);
+    expect(editor.dispose).not.toHaveBeenCalled();
+    expect(t.saved().metadata).toEqual(t.original.metadata);
+  });
+
+  it("ignores external, self, unchanged and cancelled drops", async () => {
+    const t = await setup();
+    t.onChange.mockClear();
+    t.dropEvent("drop", "cell-raw", false);
+    t.drag("cell-title");
+    t.dropEvent("drop", "cell-title", false);
+    t.drag("cell-title");
+    t.dropEvent("drop", "cell-abc", true);
+    t.drag("cell-title");
+    t.dropEvent("dragOver", "cell-raw", false);
+    fireEvent.dragEnd(t.row("cell-title").querySelector(".nb-drag-handle")!);
+    expect(t.container.querySelector(".nb-drop-after")).toBeNull();
+    t.dropEvent("drop", "cell-raw", false);
+    expect(t.onChange).not.toHaveBeenCalled();
+  });
+});
 
 function setupInvokeMocks(runResult: Record<string, unknown>) {
   mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {

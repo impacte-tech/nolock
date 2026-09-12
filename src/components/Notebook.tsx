@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MutableRefObject } from "react";
+import type { HTMLAttributes, MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { IS_WEB } from "../lib/webEnv";
@@ -433,6 +433,9 @@ function OutputView({ output }: { output: NotebookOutput }) {
 
 interface CellViewProps {
   cell: NotebookCell;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  dragHandleProps: HTMLAttributes<HTMLButtonElement>;
   running: boolean;
   liveOutputs?: NotebookOutput[];
   onSourceChange: (cellId: string, src: string) => void;
@@ -447,6 +450,9 @@ interface CellViewProps {
 
 function CellView({
   cell,
+  canMoveUp,
+  canMoveDown,
+  dragHandleProps,
   running,
   liveOutputs,
   onSourceChange,
@@ -485,6 +491,17 @@ function CellView({
   const actions = (
     <div className="nb-cell-actions">
       <button
+        className="nb-drag-handle"
+        title="Drag to reorder cell"
+        aria-label="Drag to reorder cell"
+        draggable
+        {...dragHandleProps}
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
+          <path d="M3 1h2v2H3zm4 0h2v2H7zM3 5h2v2H3zm4 0h2v2H7zM3 9h2v2H3zm4 0h2v2H7z" />
+        </svg>
+      </button>
+      <button
         title={hidden ? "Hidden from export — click to include" : "Hide this cell from the exported PDF"}
         onClick={() => onToggleHide(cell.id)}
       >
@@ -498,12 +515,12 @@ function CellView({
           </svg>
         )}
       </button>
-      <button title="Move cell up" onClick={() => onMove(cell.id, -1)}>
+      <button title="Move cell up" aria-label="Move cell up" disabled={!canMoveUp} onClick={() => onMove(cell.id, -1)}>
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
           <path d="M8 3l5 5H9v7H7v-7H3z" />
         </svg>
       </button>
-      <button title="Move cell down" onClick={() => onMove(cell.id, 1)}>
+      <button title="Move cell down" aria-label="Move cell down" disabled={!canMoveDown} onClick={() => onMove(cell.id, 1)}>
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
           <path d="M8 13L3 8h4V1h2v7h4z" />
         </svg>
@@ -749,6 +766,15 @@ export interface NotebookProps {
 
 export default function Notebook({ filePath, content, onChange, onSave, rootPath }: NotebookProps) {
   const kernelId = useMemo(() => `nb:${filePath}`, [filePath]);
+  const draggedCellRef = useRef<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; side: "before" | "after" } | null>(null);
+
+  const clearDrag = () => {
+    draggedCellRef.current = null;
+    setDropTarget(null);
+  };
+
+  useEffect(clearDrag, [filePath]);
 
   // --- parsed notebook -----------------------------------------------------
   const { notebook, error: parseError, normalized } = useMemo(
@@ -962,6 +988,21 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
     },
     [emitCells]
   );
+
+  const dropCell = (targetId: string, side: "before" | "after") => {
+    const sourceId = draggedCellRef.current;
+    clearDrag();
+    const nb = nbRef.current;
+    if (!nb || !sourceId || sourceId === targetId) return;
+    const source = nb.cells.find((cell) => cell.id === sourceId);
+    if (!source) return;
+    const next = nb.cells.filter((cell) => cell.id !== sourceId);
+    const targetIndex = next.findIndex((cell) => cell.id === targetId);
+    if (targetIndex < 0) return;
+    next.splice(targetIndex + (side === "after" ? 1 : 0), 0, source);
+    if (next.every((cell, index) => cell === nb.cells[index])) return;
+    emitCells(next);
+  };
 
   // Toggle the "hide" export tag — hidden cells still run, but ⬇ Export
   // skips them (helper definitions, scratch work, ...).
@@ -1358,21 +1399,54 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
       {exportMsg && <div className="nb-export-ok">✔ {exportMsg}</div>}
 
       <div className="nb-cells">
-        {notebook.cells.map((cell) => (
-          <CellView
+        {notebook.cells.map((cell, index) => (
+          <div
             key={cell.id}
-            cell={cell}
-            running={runningCellIds.has(cell.id)}
-            liveOutputs={liveOutputs[cell.id]}
-            onSourceChange={setCellSource}
-            onRun={runCell}
-            onMove={moveCell}
-            onDelete={deleteCell}
-            onToggleHide={toggleCellHide}
-            editorRegistry={editorRegistryRef}
-            pendingFocusRef={pendingFocusRef}
-            onSaveRef={onSaveRef}
-          />
+            data-cell-id={cell.id}
+            className={`nb-cell-row${dropTarget?.id === cell.id ? ` nb-drop-${dropTarget.side}` : ""}`}
+            onDragOver={(event) => {
+              if (!draggedCellRef.current || draggedCellRef.current === cell.id) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              const rect = event.currentTarget.getBoundingClientRect();
+              const side = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+              setDropTarget({ id: cell.id, side });
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
+            }}
+            onDrop={(event) => {
+              if (!draggedCellRef.current) return;
+              event.preventDefault();
+              event.stopPropagation();
+              const rect = event.currentTarget.getBoundingClientRect();
+              dropCell(cell.id, event.clientY < rect.top + rect.height / 2 ? "before" : "after");
+            }}
+          >
+            <CellView
+              cell={cell}
+              canMoveUp={index > 0}
+              canMoveDown={index < notebook.cells.length - 1}
+              dragHandleProps={{
+                onDragStart: (event) => {
+                  draggedCellRef.current = cell.id;
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("application/x-nolock-cell", cell.id);
+                },
+                onDragEnd: clearDrag,
+              }}
+              running={runningCellIds.has(cell.id)}
+              liveOutputs={liveOutputs[cell.id]}
+              onSourceChange={setCellSource}
+              onRun={runCell}
+              onMove={moveCell}
+              onDelete={deleteCell}
+              onToggleHide={toggleCellHide}
+              editorRegistry={editorRegistryRef}
+              pendingFocusRef={pendingFocusRef}
+              onSaveRef={onSaveRef}
+            />
+          </div>
         ))}
       </div>
     </div>

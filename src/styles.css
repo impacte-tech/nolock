@@ -5319,7 +5319,8 @@ select.field-input {
   transition: opacity 0.12s;
 }
 
-.nb-cell:hover .nb-cell-actions {
+.nb-cell:hover .nb-cell-actions,
+.nb-cell:focus-within .nb-cell-actions {
   opacity: 1;
 }
 
@@ -5340,6 +5341,49 @@ select.field-input {
 .nb-cell-actions button:hover {
   background: var(--hover);
   color: var(--text-primary);
+}
+
+.nb-cell-actions button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.nb-cell-actions .nb-drag-handle {
+  cursor: grab;
+}
+
+.nb-cell-actions .nb-drag-handle:active {
+  cursor: grabbing;
+}
+
+.nb-cell-row {
+  position: relative;
+}
+
+.nb-cell-row.nb-drop-before::before,
+.nb-cell-row.nb-drop-after::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--text-link, #569cd6);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.nb-cell-row.nb-drop-before::before {
+  top: -8px;
+}
+
+.nb-cell-row.nb-drop-after::after {
+  bottom: -8px;
+}
+
+@media (hover: none) {
+  .nb-cell-actions {
+    opacity: 1;
+  }
 }
 
 /* --- Outputs --- */
