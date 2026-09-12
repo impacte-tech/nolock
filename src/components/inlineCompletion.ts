@@ -130,7 +130,6 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
 
       const fitmTemperature = localStorage.getItem("nolock.fitmTemperature");
       const fitmMaxTokens = localStorage.getItem("nolock.fitmMaxTokens");
-      const fitmSystemPrompt = localStorage.getItem("nolock.fitmSystemPrompt");
 
       if (!completionModel) {
         console.log("[FIM] no completion model configured");
@@ -161,7 +160,6 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
             apiKey: apiKey || null,
             temperature: fitmTemperature ? parseFloat(fitmTemperature) : undefined,
             max_tokens: fitmMaxTokens ? parseInt(fitmMaxTokens, 10) : undefined,
-            system_prompt: fitmSystemPrompt || undefined,
           },
         });
       };
@@ -225,4 +223,3 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
 
   freeInlineCompletions(): void {}
 }
-

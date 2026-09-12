@@ -446,9 +446,8 @@ describe("FIM E2E — response realism", () => {
 // ===========================================================================
 
 describe("FIM E2E — raw-mode edge cases", () => {
-  it("forwards system_prompt to the backend", async () => {
+  it("does not send a custom system prompt to the backend", async () => {
     mockCompletionResponse("const result = 42;");
-    localStorage.setItem("nolock.fitmSystemPrompt", "You are a Rust expert.");
 
     const provider = new AiInlineCompletionProvider();
     openGate(provider);
@@ -461,12 +460,11 @@ describe("FIM E2E — raw-mode edge cases", () => {
     );
 
     const req = mockInvoke.mock.calls[1][1].req;
-    expect(req.system_prompt).toBe("You are a Rust expert.");
+    expect(req.system_prompt).toBeUndefined();
   });
 
   it("forwards system_prompt as undefined when not set", async () => {
     mockCompletionResponse("const result = 42;");
-    localStorage.removeItem("nolock.fitmSystemPrompt");
 
     const provider = new AiInlineCompletionProvider();
     openGate(provider);

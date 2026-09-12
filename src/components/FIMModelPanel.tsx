@@ -9,31 +9,10 @@ interface Props {
   onClose: () => void;
 }
 
-/**
- * Default system prompt for inline FIM completions. Kept in sync with the
- * Rust default in `src-tauri/src/main.rs` (`ai_complete`).
- */
-const DEFAULT_FIM_SYSTEM_PROMPT = `You are a Python code completion engine. Return ONLY the missing code at <CURSOR>. Never output explanations, Markdown, or any FIM/control token. Preserve indentation and join the text before and after the cursor exactly.
-
-Example 1
-Before: total = sum(values)
-After:
-print(total)
-Output:
-
-
-Example 2
-Before: for item in items: (cursor is after the indented four spaces)
-After: return result
-Output: result.append(item) followed by a newline and four spaces
-
-If no code belongs at the cursor, return an empty response.`;
-
 export default function FIMModelPanel({ visible, onClose }: Props) {
   const [completionModel, setCompletionModel] = useState("");
   const [backend, setBackend] = useState("ollama");
   const [apiKey, setApiKey] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_FIM_SYSTEM_PROMPT);
   const [temperature, setTemperature] = useState(0.2);
   const [maxTokens, setMaxTokens] = useState(64);
 
@@ -41,9 +20,6 @@ export default function FIMModelPanel({ visible, onClose }: Props) {
     if (!visible) return;
     const oldModel = localStorage.getItem("nolock.model");
     setCompletionModel(localStorage.getItem("nolock.completionModel") || oldModel || "");
-    setSystemPrompt(
-      localStorage.getItem("nolock.fitmSystemPrompt") || DEFAULT_FIM_SYSTEM_PROMPT,
-    );
     const savedTemp = localStorage.getItem("nolock.fitmTemperature");
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.2);
     const savedTokens = localStorage.getItem("nolock.fitmMaxTokens");
@@ -63,7 +39,6 @@ export default function FIMModelPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.fitmBackend", backend);
     localStorage.setItem("nolock.completionModel", completionModel);
     localStorage.setItem("nolock.model", completionModel); // legacy sync
-    localStorage.setItem("nolock.fitmSystemPrompt", systemPrompt);
     localStorage.setItem("nolock.fitmTemperature", String(temperature));
     localStorage.setItem("nolock.fitmMaxTokens", String(maxTokens));
     onClose();
@@ -103,20 +78,7 @@ export default function FIMModelPanel({ visible, onClose }: Props) {
             <strong> Qwen2.5-Coder</strong>, <strong>DeepSeek-Coder</strong>, <strong>CodeLlama</strong>, and
             other FIM-trained models. If the model does not understand FIM tokens
             (<code>&lt;|fim_prefix|&gt;...&lt;|fim_middle|&gt;</code>), it may return empty completions.
-            Switch to a raw-prefix-only model or disable the system prompt to troubleshoot.
-          </span>
-
-          <label className="field-label">System Prompt</label>
-          <textarea
-            className="field-input"
-            value={systemPrompt}
-            onChange={(e) => setSystemPrompt(e.target.value)}
-            placeholder="You are a code completion engine..."
-            rows={4}
-            style={{ resize: "vertical", fontFamily: "monospace", fontSize: 12, minHeight: 80 }}
-          />
-          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
-            Instructs the model how to behave for inline completions.
+            Switch to a raw-prefix-only model if the model does not support native FIM tokens.
           </span>
 
           <label className="field-label">

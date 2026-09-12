@@ -230,10 +230,9 @@ describe("AiInlineCompletionProvider - FIM parameter forwarding", () => {
     mockCompletionResponse("const result = 42;");
   });
 
-  it("forwards temperature, max_tokens, and system_prompt to ai_complete", async () => {
+  it("forwards temperature and max_tokens without a custom system prompt", async () => {
     localStorage.setItem("nolock.fitmTemperature", "0.5");
     localStorage.setItem("nolock.fitmMaxTokens", "128");
-    localStorage.setItem("nolock.fitmSystemPrompt", "You are a Rust expert.");
 
     const provider = new AiInlineCompletionProvider();
     openGate(provider);
@@ -251,13 +250,12 @@ describe("AiInlineCompletionProvider - FIM parameter forwarding", () => {
     const req = mockInvoke.mock.calls[1][1].req;
     expect(req.temperature).toBe(0.5);
     expect(req.max_tokens).toBe(128);
-    expect(req.system_prompt).toBe("You are a Rust expert.");
+    expect(req.system_prompt).toBeUndefined();
   });
 
   it("forwards undefined temperature and max_tokens when not set in localStorage", async () => {
     localStorage.removeItem("nolock.fitmTemperature");
     localStorage.removeItem("nolock.fitmMaxTokens");
-    localStorage.removeItem("nolock.fitmSystemPrompt");
 
     const provider = new AiInlineCompletionProvider();
     openGate(provider);
