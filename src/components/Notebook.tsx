@@ -25,6 +25,7 @@ import { listen } from "@tauri-apps/api/event";
 import { IS_WEB } from "../lib/webEnv";
 import { getToken } from "../web/auth";
 import * as monaco from "monaco-editor";
+import { AiInlineCompletionProvider } from "./inlineCompletion";
 import katex from "katex";
 import { marked } from "marked";
 import { MATH_DELIMITERS, protectMath } from "../lib/math";
@@ -297,13 +298,19 @@ function CellEditor({
       guides: { indentation: false, highlightActiveIndentation: false },
       padding: { top: 6, bottom: 6 },
       fixedOverflowWidgets: true,
+      inlineSuggest: { enabled: true },
     });
     editorRef.current = editor;
     editorRegistry.current.set(cellId, editor);
 
+    const provider = new AiInlineCompletionProvider();
+    provider.setEditor(editor);
+    const completionRegistration = monaco.languages.registerInlineCompletionsProvider("python", provider);
+
     // Propagate typing into the notebook state. Without this, code typed in
     // the cell never leaves the Monaco model and runs execute empty sources.
     const contentSub = editor.onDidChangeModelContent(() => {
+      provider.onContentChange();
       cbs.current.onChange(editor.getValue());
     });
 
@@ -317,12 +324,16 @@ function CellEditor({
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => cbs.current.onRunNoAdvance());
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => onSaveRef.current());
 
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Period, () => provider.requestExplicitCompletion());
+
     if (pendingFocusRef.current === cellId) {
       pendingFocusRef.current = null;
       editor.focus();
     }
 
     return () => {
+      completionRegistration.dispose();
+      provider.dispose();
       contentSub.dispose();
       sizeSub.dispose();
       editorRegistry.current.delete(cellId);

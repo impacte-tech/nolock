@@ -9,13 +9,18 @@ interface Props {
   onClose: () => void;
 }
 
+/**
+ * Default system prompt for inline FIM completions. Kept in sync with the
+ * Rust default in `src-tauri/src/main.rs` (`ai_complete`).
+ */
+const DEFAULT_FIM_SYSTEM_PROMPT =
+  "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing.";
+
 export default function FIMModelPanel({ visible, onClose }: Props) {
   const [completionModel, setCompletionModel] = useState("");
   const [backend, setBackend] = useState("ollama");
   const [apiKey, setApiKey] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState(
-    "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
-  );
+  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_FIM_SYSTEM_PROMPT);
   const [temperature, setTemperature] = useState(0.2);
   const [maxTokens, setMaxTokens] = useState(64);
 
@@ -24,8 +29,7 @@ export default function FIMModelPanel({ visible, onClose }: Props) {
     const oldModel = localStorage.getItem("nolock.model");
     setCompletionModel(localStorage.getItem("nolock.completionModel") || oldModel || "");
     setSystemPrompt(
-      localStorage.getItem("nolock.fitmSystemPrompt") ||
-      "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
+      localStorage.getItem("nolock.fitmSystemPrompt") || DEFAULT_FIM_SYSTEM_PROMPT,
     );
     const savedTemp = localStorage.getItem("nolock.fitmTemperature");
     setTemperature(savedTemp ? parseFloat(savedTemp) : 0.2);

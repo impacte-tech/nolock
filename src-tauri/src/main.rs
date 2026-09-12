@@ -8730,7 +8730,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     let temperature = req.temperature.unwrap_or(0.2);
     let max_tokens = req.max_tokens.unwrap_or(64);
     let system_prompt = req.system_prompt.as_deref().unwrap_or(
-        "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
+        "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing.",
     );
 
     let client = reqwest::Client::new();
@@ -11687,7 +11687,7 @@ mod tests {
         let with_suffix = req.suffix.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
         let mut b = serde_json::json!({
             "model": req.model,
-            "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
+            "system": "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing.",
             "prompt": req.prompt,
             "stream": false,
             "options": {
@@ -11734,7 +11734,7 @@ mod tests {
             "temperature": 0.2,
             "stream": false,
             "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
-            "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code."
+            "system": "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing."
         });
         if let Some(ref suffix) = req.suffix {
             if !suffix.is_empty() {
@@ -11776,7 +11776,7 @@ mod tests {
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code."
+                    "content": "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing."
                 },
                 { "role": "user", "content": user_content }
             ],
@@ -11823,7 +11823,7 @@ mod tests {
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code."
+                    "content": "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing."
                 },
                 { "role": "user", "content": user_content }
             ],
@@ -11856,7 +11856,7 @@ mod tests {
 
         let body = serde_json::json!({
             "model": req.model,
-            "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
+            "system": "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing.",
             "prompt": req.prompt,
             "stream": false,
             "options": {
@@ -11913,7 +11913,7 @@ mod tests {
 
         let body = serde_json::json!({
             "model": req.model,
-            "system": "You are a code completion engine. Output ONLY the code that belongs at the cursor — nothing before and nothing after. Be concise: prefer minimal completions. No explanations, no markdown formatting, no conversational text. Never repeat existing code.",
+            "system": "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing.",
             "prompt": req.prompt,
             "stream": false,
             "options": {

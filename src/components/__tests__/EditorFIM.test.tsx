@@ -868,6 +868,7 @@ describe("AiInlineCompletionProvider - debounce timing", () => {
       focus: vi.fn(),
       addCommand: vi.fn(),
       getModel: vi.fn(() => null),
+      hasTextFocus: vi.fn(() => true),
       getValue: vi.fn(() => ""),
       layout: vi.fn(),
       dispose: vi.fn(),
@@ -971,6 +972,7 @@ describe("AiInlineCompletionProvider - debounce timing", () => {
 
     const model = createModel("function add(a, b) {\n  \n}\n");
     const position = new Position(1, 22);
+    editor.getModel.mockReturnValue(model);
     const result = await provider.provideInlineCompletions(
       model, position as any, {} as any, createCancellationToken(),
     );
@@ -1089,11 +1091,48 @@ describe("AiInlineCompletionProvider - debounce timing", () => {
     expect(trigger).toHaveBeenCalledTimes(1);
 
     const model = createModel("const x = ");
+    editor.getModel.mockReturnValue(model);
     const position = new Position(1, 11);
     const result = await provider.provideInlineCompletions(
       model, position as any, {} as any, createCancellationToken(),
     );
     expect(result.items).toHaveLength(1);
     expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe("AiInlineCompletionProvider - editor isolation", () => {
+  it("does not consume a cell's explicit request for another model or an unfocused cell", async () => {
+    mockCompletionResponse("sum(values)");
+    const provider = new AiInlineCompletionProvider();
+    const model = createModel("result = ", "python");
+    const other = createModel("other = ", "python");
+    const editor = { getModel: () => model, hasTextFocus: vi.fn(() => true), trigger: vi.fn() };
+    provider.setEditor(editor as any);
+    provider.requestExplicitCompletion();
+    const complete = (m: any) => provider.provideInlineCompletions(m, new Position(1, 10), {} as any, createCancellationToken());
+    expect((await complete(other)).items).toEqual([]);
+    editor.hasTextFocus.mockReturnValue(false);
+    expect((await complete(model)).items).toEqual([]);
+    expect(mockInvoke).not.toHaveBeenCalled();
+    editor.hasTextFocus.mockReturnValue(true);
+    expect((await complete(model)).items[0].insertText).toBe("sum(values)");
+    provider.dispose();
+  });
+
+  it.each(["edit", "dispose"])("discards a pending completion after %s", async (action) => {
+    let resolve!: (text: string) => void;
+    mockInvoke.mockImplementation((cmd) => cmd === "ai_complete"
+      ? new Promise<string>((done) => { resolve = done; }) : Promise.resolve(null));
+    const provider = new AiInlineCompletionProvider();
+    openGate(provider);
+    const pending = provider.provideInlineCompletions(createModel("result = "), new Position(1, 10), {} as any, createCancellationToken());
+    while (!resolve) await Promise.resolve();
+    if (action === "edit") provider.onContentChange();
+    else provider.dispose();
+    resolve("sum(values)");
+    expect((await pending).items).toEqual([]);
+    provider.dispose();
   });
 });

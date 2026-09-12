@@ -13,6 +13,7 @@ import { mockInvoke, mockListen, setupLocalStorageMocks } from "../../test/tauri
 // Shared registry of created editors so tests can simulate typing.
 const monacoState = vi.hoisted(() => ({
   editors: [] as Array<Record<string, any>>,
+  registrations: [] as Array<{ provider: any; dispose: any }>,
 }));
 
 vi.mock("monaco-editor", () => ({
@@ -47,7 +48,14 @@ vi.mock("monaco-editor", () => ({
       return editor;
     }),
   },
-  KeyMod: { CtrlCmd: 1, Shift: 2 },
+  languages: {
+    registerInlineCompletionsProvider: vi.fn((_language, provider) => {
+      const registration = { provider, dispose: vi.fn() };
+      monacoState.registrations.push(registration);
+      return registration;
+    }),
+  },
+  KeyMod: { CtrlCmd: 256, Shift: 512 },
   KeyCode: { Enter: 3, KeyS: 4, Period: 5 },
   MarkerSeverity: { Error: 8, Warning: 4, Info: 2 },
 }));
@@ -554,4 +562,36 @@ describe("Notebook — run flow shows outputs", () => {
       expect(args.content).not.toContain("SECRET_HELPER");
     });
   });
+});
+
+
+it("wires code cells to debounced FIM and Ctrl+. and disposes registrations", () => {
+  setupLocalStorageMocks();
+  setupInvokeMocks({ status: "ok" });
+  monacoState.editors.length = 0;
+  monacoState.registrations.length = 0;
+  vi.useFakeTimers();
+  try {
+    const { unmount } = render(<Notebook filePath="/tmp/test.ipynb" content={NOTEBOOK_JSON}
+      onChange={vi.fn()} onSave={vi.fn()} rootPath="/tmp" />);
+    // The markdown cell has no FIM registration.
+    expect(monacoState.registrations).toHaveLength(1);
+    const editor = monacoState.editors[0];
+    editor._type("result = ");
+    vi.advanceTimersByTime(499);
+    expect(editor.trigger).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(editor.trigger).toHaveBeenCalledWith("ai", "editor.action.inlineSuggest.trigger", null);
+    const shortcut = editor.addCommand.mock.calls.find(([key]: [number]) => key === (256 | 5));
+    expect(shortcut).toBeDefined();
+    shortcut[1]();
+    expect(editor.trigger).toHaveBeenCalledTimes(2);
+    editor._type("result = sum(");
+    unmount();
+    expect(monacoState.registrations[0].dispose).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(500);
+    expect(editor.trigger).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
 });
