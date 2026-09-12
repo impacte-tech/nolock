@@ -8697,7 +8697,16 @@ fn build_ollama_body(
     max_tokens: u32,
     temperature: f64,
 ) -> serde_json::Value {
-    let raw_prompt = format!("{}\n{}", system_prompt, prompt);
+    // Native FIM models (including Qwen2.5-Coder) expect the prompt to begin
+    // with the FIM prefix token. Putting an instruction before it changes the
+    // distribution and can make the model copy `<|fim_suffix|>` literally.
+    let has_native_fim = prompt.contains("<|fim_prefix|>")
+        && prompt.contains("<|fim_middle|>");
+    let raw_prompt = if has_native_fim {
+        prompt.to_string()
+    } else {
+        format!("{}\n{}", system_prompt, prompt)
+    };
     serde_json::json!({
         "model": model,
         "prompt": raw_prompt,
@@ -8706,7 +8715,7 @@ fn build_ollama_body(
         "options": {
             "num_predict": max_tokens,
             "temperature": temperature,
-            "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
+            "stop": ["<|im_end|>", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|endoftext|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
         }
     })
 }
@@ -8730,7 +8739,7 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     let temperature = req.temperature.unwrap_or(0.2);
     let max_tokens = req.max_tokens.unwrap_or(64);
     let system_prompt = req.system_prompt.as_deref().unwrap_or(
-        "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing.",
+        "You are a Python code completion engine. Return ONLY the missing code at <CURSOR>. Never output explanations, Markdown, or any FIM/control token. Preserve indentation and join the text before and after the cursor exactly.\n\nExample 1\nBefore: total = sum(values)\nAfter: print(total)\nOutput: (empty; the cursor is at the end of the statement)\n\nExample 2\nBefore: for item in items: (cursor is after the indented four spaces)\nAfter: return result\nOutput: result.append(item) followed by a newline and four spaces\n\nIf no code belongs at the cursor, return an empty response.",
     );
 
     let client = reqwest::Client::new();
@@ -8741,8 +8750,8 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
             // (<|fim_prefix|><prefix><|fim_suffix|><suffix><|fim_middle|>).
             // Send it as-is — no separate `suffix` field needed.
             // raw=true bypasses the chat template so FIM tokens are not wrapped
-            // inside chat tags. The system prompt is prepended since raw mode
-            // may drop the separate `system` field.
+            // inside chat tags. Native FIM prompts omit the separate system
+            // instruction in `build_ollama_body`; chat-style fallbacks retain it.
             let body = build_ollama_body(
                 &req.model,
                 system_prompt,
@@ -8772,14 +8781,20 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
         }
         "llamacpp" => {
             // FITM: The frontend wraps the prompt in FIM tokens. Send as-is.
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "prompt": req.prompt,
                 "n_predict": max_tokens,
                 "temperature": temperature,
                 "stream": false,
-                "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
+                "stop": ["<|im_end|>", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|endoftext|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
                 "system": system_prompt
             });
+            // `/completion` is a raw continuation endpoint. Keep native FIM
+            // prompts free of chat-style system text for the same reason as
+            // Ollama above.
+            if req.prompt.contains("<|fim_prefix|>") && req.prompt.contains("<|fim_middle|>") {
+                body.as_object_mut().map(|object| object.remove("system"));
+            }
             eprintln!("[nolock] llamacpp POST {}/completion prompt_len={}", req.url, req.prompt.len());
             let resp = client
                 .post(format!("{}/completion", req.url))
@@ -11945,6 +11960,21 @@ mod tests {
                 "System prompt should be prepended to the raw prompt");
         assert!(prompt.contains("<|fim_middle|>"),
                 "FIM tokens should be in the prompt after the system prompt");
+    }
+
+    #[test]
+    fn test_build_ollama_body_native_fim_starts_at_prefix() {
+        let body = build_ollama_body(
+            "qwen2.5-coder:0.5b",
+            "This instruction must not precede native FIM.",
+            "<|fim_prefix|>x = 1<|fim_suffix|>\nprint(x)<|fim_middle|>",
+            64,
+            0.1,
+        );
+        assert_eq!(
+            body["prompt"].as_str().unwrap(),
+            "<|fim_prefix|>x = 1<|fim_suffix|>\nprint(x)<|fim_middle|>"
+        );
     }
 
     #[test]

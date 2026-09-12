@@ -13,8 +13,21 @@ interface Props {
  * Default system prompt for inline FIM completions. Kept in sync with the
  * Rust default in `src-tauri/src/main.rs` (`ai_complete`).
  */
-const DEFAULT_FIM_SYSTEM_PROMPT =
-  "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing.";
+const DEFAULT_FIM_SYSTEM_PROMPT = `You are a Python code completion engine. Return ONLY the missing code at <CURSOR>. Never output explanations, Markdown, or any FIM/control token. Preserve indentation and join the text before and after the cursor exactly.
+
+Example 1
+Before: total = sum(values)
+After:
+print(total)
+Output:
+
+
+Example 2
+Before: for item in items: (cursor is after the indented four spaces)
+After: return result
+Output: result.append(item) followed by a newline and four spaces
+
+If no code belongs at the cursor, return an empty response.`;
 
 export default function FIMModelPanel({ visible, onClose }: Props) {
   const [completionModel, setCompletionModel] = useState("");

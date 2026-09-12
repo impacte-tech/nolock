@@ -70,8 +70,10 @@ export function extractCodeFromResponse(text: string): string {
   // (e.g. <|fim_middle|>, <|fim_prefix|>, <|fim_suffix|>, <|cursor|>).
   // Strip any leading FIM tokens, and remove <|cursor|> tokens globally.
   cleaned = cleaned
-    .replace(/^(<\|fim_prefix\|>|<\|fim_suffix\|>|<\|fim_middle\|>\s*)*/, "")
+    .replace(/<\|fim\\?_(?:prefix|suffix|middle)\|>/g, "")
     .replace(/<\|cursor\|>?/g, "")
+    // Some small models emit a truncated control token at the end.
+    .replace(/<\|fim\\?_(?:prefix|suffix|middle)\s*$/g, "")
     .trim();
 
   // --- Step 1: Extract from markdown code blocks ---------------------------

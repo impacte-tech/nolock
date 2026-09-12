@@ -97,6 +97,12 @@ describe("extractCodeFromResponse", () => {
     expect(result).toBe("fn main() {\n  println!(\"hello\");\n}");
   });
 
+  it("removes FIM tokens leaked in the middle or at the end", () => {
+    expect(extractCodeFromResponse('print("Hello<|fim_suffix|>")')).toBe('print("Hello")');
+    expect(extractCodeFromResponse('print("Hello<|fim\\_suffix|>")')).toBe('print("Hello")');
+    expect(extractCodeFromResponse('print("Hello<|fim_suffix')).toBe('print("Hello')
+  });
+
   it("strips FIM prefix token if model echoes it back", () => {
     const input = "<|fim_prefix|>const x = 42;";
     const result = extractCodeFromResponse(input);
