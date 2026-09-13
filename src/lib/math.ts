@@ -3,7 +3,9 @@
 // (agent chat, notebook markdown cells, notebook HTML export)
 // ---------------------------------------------------------------------------
 
-import renderMathInElement from "katex/dist/contrib/auto-render.mjs";
+// Vendored copy of katex's contrib auto-render extension
+// (src/assets/katex/README.md) — never deep-import katex/dist from node_modules.
+import renderMathInElement from "../assets/katex/auto-render.mjs";
 
 export interface AutoRenderOptions {
   delimiters?: Array<{ left: string; right: string; display: boolean }>;

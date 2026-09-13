@@ -37,7 +37,36 @@ const webAliases = webTarget
   : {};
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    // Redirect the remaining katex deep imports (katex.min.css / katex.min.js /
+    // contrib/auto-render*) to the vendored copies in src/assets/katex/ so the
+    // app never resolves files inside node_modules/katex/dist — that broke
+    // fresh clones with missing or different-version katex installs.
+    // Notebook.tsx keeps importing the old specifiers; the mapping is here.
+    {
+      name: "vendored-katex",
+      enforce: "pre",
+      resolveId(id) {
+        const vendored = (file: string) =>
+          path.resolve(__dirname, "src/assets/katex", file);
+        switch (id) {
+          case "katex/dist/katex.min.css":
+            return vendored("katex.min.css");
+          case "katex/dist/katex.min.css?raw":
+            return vendored("katex.min.css") + "?raw";
+          case "katex/dist/katex.min.js?raw":
+            return vendored("katex.min.js") + "?raw";
+          case "katex/dist/contrib/auto-render.min.js?raw":
+            return vendored("auto-render.min.js") + "?raw";
+          case "katex/dist/contrib/auto-render.mjs":
+            return vendored("auto-render.mjs");
+          default:
+            return null;
+        }
+      },
+    },
+    react(),
+  ],
   clearScreen: false,
   // Injected only in the web build so shared code can detect the target via
   // `typeof __WEB_TARGET__ !== "undefined" && __WEB_TARGET__` (see src/lib/webEnv.ts).

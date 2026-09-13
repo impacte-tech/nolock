@@ -11,23 +11,8 @@ declare module "*.woff2?inline" {
   export default src;
 }
 
-// katex ships the auto-render extension as a plain ESM file without types
-// (its export is `renderMathInElement as default`).
-declare module "katex/dist/contrib/auto-render.mjs" {
-  export interface AutoRenderOptions {
-    delimiters?: Array<{ left: string; right: string; display: boolean }>;
-    ignoredTags?: string[];
-    ignoredClasses?: string[];
-    throwOnError?: boolean;
-    errorCallback?: (msg: string, err: Error) => void;
-    macros?: Record<string, string>;
-    [key: string]: unknown;
-  }
-  export default function renderMathInElement(
-    element: HTMLElement,
-    options?: AutoRenderOptions,
-  ): void;
-}
+// The katex contrib auto-render module is vendored in src/assets/katex/ and
+// typed by its sibling auto-render.d.mts (no ambient declaration needed).
 
 declare module "*.svg" {
   const content: string;
