@@ -5,28 +5,30 @@
 // fonts/ relative paths that do not exist next to the exported .html file.
 // Without these data URIs, glyphs that only exist in the KaTeX fonts
 // (\neq, \mathbb letters, big operators, ...) print as missing-glyph boxes.
-// Derived from node_modules/katex/dist/fonts — regenerate if katex upgrades.
+// The woff2 files are vendored in src/assets/katex-fonts (copied from
+// katex@0.18.6) so this module never deep-imports from node_modules —
+// regenerate via scripts/gen-katex-fonts.cjs if katex upgrades.
 // ---------------------------------------------------------------------------
-import KaTeX_AMS_Regular_woff2 from "katex/dist/fonts/KaTeX_AMS-Regular.woff2?inline";
-import KaTeX_Caligraphic_Bold_woff2 from "katex/dist/fonts/KaTeX_Caligraphic-Bold.woff2?inline";
-import KaTeX_Caligraphic_Regular_woff2 from "katex/dist/fonts/KaTeX_Caligraphic-Regular.woff2?inline";
-import KaTeX_Fraktur_Bold_woff2 from "katex/dist/fonts/KaTeX_Fraktur-Bold.woff2?inline";
-import KaTeX_Fraktur_Regular_woff2 from "katex/dist/fonts/KaTeX_Fraktur-Regular.woff2?inline";
-import KaTeX_Main_Bold_woff2 from "katex/dist/fonts/KaTeX_Main-Bold.woff2?inline";
-import KaTeX_Main_BoldItalic_woff2 from "katex/dist/fonts/KaTeX_Main-BoldItalic.woff2?inline";
-import KaTeX_Main_Italic_woff2 from "katex/dist/fonts/KaTeX_Main-Italic.woff2?inline";
-import KaTeX_Main_Regular_woff2 from "katex/dist/fonts/KaTeX_Main-Regular.woff2?inline";
-import KaTeX_Math_BoldItalic_woff2 from "katex/dist/fonts/KaTeX_Math-BoldItalic.woff2?inline";
-import KaTeX_Math_Italic_woff2 from "katex/dist/fonts/KaTeX_Math-Italic.woff2?inline";
-import KaTeX_SansSerif_Bold_woff2 from "katex/dist/fonts/KaTeX_SansSerif-Bold.woff2?inline";
-import KaTeX_SansSerif_Italic_woff2 from "katex/dist/fonts/KaTeX_SansSerif-Italic.woff2?inline";
-import KaTeX_SansSerif_Regular_woff2 from "katex/dist/fonts/KaTeX_SansSerif-Regular.woff2?inline";
-import KaTeX_Script_Regular_woff2 from "katex/dist/fonts/KaTeX_Script-Regular.woff2?inline";
-import KaTeX_Size1_Regular_woff2 from "katex/dist/fonts/KaTeX_Size1-Regular.woff2?inline";
-import KaTeX_Size2_Regular_woff2 from "katex/dist/fonts/KaTeX_Size2-Regular.woff2?inline";
-import KaTeX_Size3_Regular_woff2 from "katex/dist/fonts/KaTeX_Size3-Regular.woff2?inline";
-import KaTeX_Size4_Regular_woff2 from "katex/dist/fonts/KaTeX_Size4-Regular.woff2?inline";
-import KaTeX_Typewriter_Regular_woff2 from "katex/dist/fonts/KaTeX_Typewriter-Regular.woff2?inline";
+import KaTeX_AMS_Regular_woff2 from "../assets/katex-fonts/KaTeX_AMS-Regular.woff2?inline";
+import KaTeX_Caligraphic_Bold_woff2 from "../assets/katex-fonts/KaTeX_Caligraphic-Bold.woff2?inline";
+import KaTeX_Caligraphic_Regular_woff2 from "../assets/katex-fonts/KaTeX_Caligraphic-Regular.woff2?inline";
+import KaTeX_Fraktur_Bold_woff2 from "../assets/katex-fonts/KaTeX_Fraktur-Bold.woff2?inline";
+import KaTeX_Fraktur_Regular_woff2 from "../assets/katex-fonts/KaTeX_Fraktur-Regular.woff2?inline";
+import KaTeX_Main_Bold_woff2 from "../assets/katex-fonts/KaTeX_Main-Bold.woff2?inline";
+import KaTeX_Main_BoldItalic_woff2 from "../assets/katex-fonts/KaTeX_Main-BoldItalic.woff2?inline";
+import KaTeX_Main_Italic_woff2 from "../assets/katex-fonts/KaTeX_Main-Italic.woff2?inline";
+import KaTeX_Main_Regular_woff2 from "../assets/katex-fonts/KaTeX_Main-Regular.woff2?inline";
+import KaTeX_Math_BoldItalic_woff2 from "../assets/katex-fonts/KaTeX_Math-BoldItalic.woff2?inline";
+import KaTeX_Math_Italic_woff2 from "../assets/katex-fonts/KaTeX_Math-Italic.woff2?inline";
+import KaTeX_SansSerif_Bold_woff2 from "../assets/katex-fonts/KaTeX_SansSerif-Bold.woff2?inline";
+import KaTeX_SansSerif_Italic_woff2 from "../assets/katex-fonts/KaTeX_SansSerif-Italic.woff2?inline";
+import KaTeX_SansSerif_Regular_woff2 from "../assets/katex-fonts/KaTeX_SansSerif-Regular.woff2?inline";
+import KaTeX_Script_Regular_woff2 from "../assets/katex-fonts/KaTeX_Script-Regular.woff2?inline";
+import KaTeX_Size1_Regular_woff2 from "../assets/katex-fonts/KaTeX_Size1-Regular.woff2?inline";
+import KaTeX_Size2_Regular_woff2 from "../assets/katex-fonts/KaTeX_Size2-Regular.woff2?inline";
+import KaTeX_Size3_Regular_woff2 from "../assets/katex-fonts/KaTeX_Size3-Regular.woff2?inline";
+import KaTeX_Size4_Regular_woff2 from "../assets/katex-fonts/KaTeX_Size4-Regular.woff2?inline";
+import KaTeX_Typewriter_Regular_woff2 from "../assets/katex-fonts/KaTeX_Typewriter-Regular.woff2?inline";
 
 export const KATEX_FONTS: Record<string, string> = {
   "KaTeX_AMS-Regular": KaTeX_AMS_Regular_woff2,

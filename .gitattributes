@@ -1,0 +1,2 @@
+# Vendored binary font assets — never text-normalize these.
+*.woff2 binary
