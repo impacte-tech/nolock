@@ -124,7 +124,7 @@ pub fn list_hooks(root_path: String) -> Result<Vec<HookEntry>, String> {
 /// Read and parse a hook file by its full path.
 #[tauri::command]
 pub fn read_hook(path: String) -> Result<serde_json::Value, String> {
-    let content = std::fs::read_to_string(&path)
+    let content = super::agent_file_policy::read_to_string(&path)
         .map_err(|e| format!("Failed to read hook file {}: {}", path, e))?;
     let config: HookConfig = serde_yaml::from_str(&content)
         .map_err(|e| format!("Failed to parse hook file {}: {}", path, e))?;

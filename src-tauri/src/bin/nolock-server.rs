@@ -326,6 +326,15 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             let a: UploadFileArgs = parse(command, args)?;
             ok(main_impl::web_bridge::upload_file(a.directory, a.name, a.content))
         }
+        "agent_read_file" => {
+            let a: ReadFileArgs = parse(command, args)?;
+            ok(main_impl::agent_file_policy::agent_read_file(a.path))
+        }
+        "agent_check_file_access" => {
+            let a: ReadFileArgs = parse(command, args)?;
+            ok(main_impl::agent_file_policy::agent_check_file_access(a.path))
+        }
+        "credential_provider_availability" => ok(Ok(main_impl::credential_providers::credential_provider_availability())),
         "read_file" => {
             let a: ReadFileArgs = parse(command, args)?;
             ok(main_impl::web_bridge::read_file(a.path))

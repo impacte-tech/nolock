@@ -18,6 +18,8 @@ pub mod pykernel;
 pub mod secrets;
 pub mod switchyard;
 pub mod terminal_memory;
+pub mod agent_file_policy;
+pub mod credential_providers;
 pub mod validation;
 
 /// Public entry points for the headless web server (`bin/nolock-server.rs`).
@@ -355,7 +357,7 @@ fn write_switchyard_config(
 
 #[tauri::command]
 fn read_agent(path: String) -> Result<serde_json::Value, String> {
-    let content = std::fs::read_to_string(&path)
+    let content = agent_file_policy::read_to_string(&path)
         .map_err(|e| format!("Failed to read agent file {}: {}", path, e))?;
 
     if path.ends_with(".json") {
@@ -576,7 +578,7 @@ pub fn load_agent_config(root_path: &str, name: &str) -> Result<AgentConfig, Str
         return Err(format!("Sub-agent '{}' not found in .agents/", name));
     };
 
-    let content = std::fs::read_to_string(&path)
+    let content = agent_file_policy::read_to_string(&path)
         .map_err(|e| format!("Failed to read agent file {}: {}", path.display(), e))?;
 
     let parsed = if path.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -653,7 +655,7 @@ pub fn load_micro_agent_config(root_path: &str, name: &str) -> Result<MicroAgent
         return Err(format!("Micro-agent '{}' not found in .micro-agents/", name));
     };
 
-    let content = std::fs::read_to_string(&path)
+    let content = agent_file_policy::read_to_string(&path)
         .map_err(|e| format!("Failed to read micro-agent file {}: {}", path.display(), e))?;
 
     let parsed = if path.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -808,7 +810,7 @@ fn list_sessions(root_path: String) -> Result<Vec<SessionRecord>, String> {
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let content = std::fs::read_to_string(&path)
+        let content = agent_file_policy::read_to_string(&path)
             .map_err(|e| format!("Failed to read session {}: {}", path.display(), e))?;
         if let Ok(rec) = serde_json::from_str::<SessionRecord>(&content) {
             sessions.push(rec);
@@ -824,7 +826,7 @@ fn list_sessions(root_path: String) -> Result<Vec<SessionRecord>, String> {
 fn read_session(root_path: String, id: String) -> Result<SessionRecord, String> {
     sanitize_session_id(&id)?;
     let path = sessions_dir(&root_path)?.join(format!("{}.json", id));
-    let content = std::fs::read_to_string(&path)
+    let content = agent_file_policy::read_to_string(&path)
         .map_err(|e| format!("Failed to read session {}: {}", id, e))?;
     serde_json::from_str::<SessionRecord>(&content)
         .map_err(|e| format!("Failed to parse session {}: {}", id, e))
@@ -861,7 +863,7 @@ fn delete_session(root_path: String, id: String) -> Result<(), String> {
 fn archive_session(root_path: String, id: String, summary: String) -> Result<(), String> {
     sanitize_session_id(&id)?;
     let path = sessions_dir(&root_path)?.join(format!("{}.json", id));
-    let content = std::fs::read_to_string(&path)
+    let content = agent_file_policy::read_to_string(&path)
         .map_err(|e| format!("Failed to read session {}: {}", id, e))?;
     let mut rec: SessionRecord = serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse session {}: {}", id, e))?;
@@ -1286,7 +1288,7 @@ fn list_tools(root_path: String) -> Result<Vec<CustomToolEntry>, String> {
             if file_name.ends_with(".json") {
                 let stem = file_name.strip_suffix(".json").unwrap_or(&file_name).to_string();
                 // Read the file to get the description
-                let content = std::fs::read_to_string(entry.path())
+                let content = agent_file_policy::read_to_string(entry.path())
                     .unwrap_or_default();
                 let description = serde_json::from_str::<serde_json::Value>(&content)
                     .ok()
@@ -1308,7 +1310,7 @@ fn list_tools(root_path: String) -> Result<Vec<CustomToolEntry>, String> {
 /// Read and parse a custom tool file from `.tools/`.
 #[tauri::command]
 fn read_tool(path: String) -> Result<serde_json::Value, String> {
-    let content = std::fs::read_to_string(&path)
+    let content = agent_file_policy::read_to_string(&path)
         .map_err(|e| format!("Failed to read tool file {}: {}", path, e))?;
     serde_json::from_str(&content)
         .map_err(|e| format!("Failed to parse tool file {}: {}", path, e))
@@ -1321,7 +1323,7 @@ fn run_tool_command(root_path: String, tool_name: String, args: serde_json::Valu
         .join(".tools")
         .join(format!("{}.json", tool_name));
 
-    let content = std::fs::read_to_string(&tool_path)
+    let content = agent_file_policy::read_to_string(&tool_path)
         .map_err(|e| format!("Failed to read tool '{}': {}", tool_name, e))?;
 
     let parsed: serde_json::Value = serde_json::from_str(&content)
@@ -1450,7 +1452,7 @@ fn run_skill_command(root_path: String, skill_name: String) -> Result<SkillComma
         .join(".skills")
         .join(format!("{}.md", skill_name));
 
-    let content = std::fs::read_to_string(&skill_path)
+    let content = agent_file_policy::read_to_string(&skill_path)
         .map_err(|e| format!("Failed to read skill '{}': {}", skill_name, e))?;
 
     // Parse for fenced code blocks tagged with command/sh/bash/shell
@@ -1541,6 +1543,7 @@ const SKIP_DIRS: &[&str] = &[
 
 /// Returns true if the path should be skipped.
 fn should_skip_entry(entry: &std::path::Path, is_dir: bool) -> bool {
+    if entry.is_symlink() || agent_file_policy::check_path(entry).is_err() { return true; }
     // Skip hidden files/dirs
     if let Some(name) = entry.file_name().and_then(|n| n.to_str()) {
         if name.starts_with('.') && name != "." {
@@ -1791,7 +1794,7 @@ fn search_in_files(
                 }
 
                 let file_path_str = path.to_string_lossy().to_string();
-                let content = match std::fs::read_to_string(&path) {
+                let content = match agent_file_policy::read_to_string(&path) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
@@ -1877,7 +1880,7 @@ fn replace_in_files(
                     }
                 }
 
-                let content = match std::fs::read_to_string(&path) {
+                let content = match agent_file_policy::read_to_string(&path) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
@@ -3412,6 +3415,9 @@ pub async fn run_subagent(
     agent_name: &str,
     task: &str,
 ) -> Result<(String, SubAgentTrace), String> {
+    if agent_file_policy::restricted(runner.root_path) {
+        return Err("Delegated execution is disabled to protect secret files and credential-provider sessions.".into());
+    }
     if runner.depth >= MAX_SUBAGENT_DEPTH {
         return Err(format!(
             "Sub-agent nesting depth limit ({}) exceeded",
@@ -3833,6 +3839,9 @@ async fn run_subagent_with_validation(
     agent_name: &str,
     task: &str,
 ) -> Result<(String, SubAgentTrace), String> {
+    if agent_file_policy::restricted(runner.root_path) {
+        return Err("Delegated execution is disabled to protect secret files and credential-provider sessions.".into());
+    }
     let root = runner
         .root_path
         .ok_or("No project folder is open — sub-agents require one")?;
@@ -3897,6 +3906,9 @@ pub async fn run_micro_agent(
     agent_name: &str,
     task: &str,
 ) -> Result<(String, Vec<validation::ValidationResult>, SubAgentTrace), String> {
+    if agent_file_policy::restricted(runner.root_path) {
+        return Err("Delegated execution is disabled to protect secret files and credential-provider sessions.".into());
+    }
     if runner.depth >= MAX_MICRO_AGENT_DEPTH {
         return Err(format!(
             "Micro-agent nesting depth limit ({}) exceeded",
@@ -5628,7 +5640,7 @@ fn build_tool_schemas_inner(
                     if entry.metadata().map(|m| m.is_file()).unwrap_or(false) {
                         let file_name = entry.file_name().to_string_lossy().to_string();
                         if file_name.ends_with(".json") {
-                            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            if let Ok(content) = agent_file_policy::read_to_string(entry.path()) {
                                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
                                     let tool_name = parsed["name"].as_str()
                                         .or_else(|| file_name.strip_suffix(".json"))
@@ -5765,6 +5777,9 @@ fn build_tool_schemas_inner(
         }
     }
 
+    if agent_file_policy::restricted(root_path) {
+        tools.retain(|tool| tool["function"]["name"].as_str().is_some_and(agent_file_policy::automatic_tool_allowed));
+    }
     tools
 }
 
@@ -5813,7 +5828,7 @@ fn compute_file_changes(
             }
             match resolve(path) {
                 Some(abs) => {
-                    let content = match std::fs::read_to_string(&abs) {
+                    let content = match agent_file_policy::read_to_string(&abs) {
                         Ok(c) => c,
                         // The edit tool will fail too — don't report a change.
                         Err(_) => return Vec::new(),
@@ -5876,6 +5891,16 @@ async fn execute_tool(
     root_path: Option<&str>,
     backend: &str,
 ) -> Result<String, String> {
+    if agent_file_policy::restricted(root_path) && !agent_file_policy::automatic_tool_allowed(name) {
+        return Err("Automatic code execution is disabled to protect secret files and credential-provider sessions. Run trusted commands in your terminal.".into());
+    }
+    if matches!(name, "read_file" | "write_file" | "edit" | "grep" | "list_directory") {
+        if let Some(path) = args["path"].as_str() {
+            let path = std::path::Path::new(path);
+            let absolute = if path.is_absolute() { path.to_path_buf() } else { std::path::Path::new(root_path.unwrap_or(".")).join(path) };
+            agent_file_policy::check_path(&absolute)?;
+        }
+    }
     match name {
         "web_fetch" => {
             let url = args["url"]
@@ -5913,7 +5938,7 @@ async fn execute_tool(
                 .ok_or("Missing required parameter: path")?;
             eprintln!("[nolock] tool read_file path={}", path);
             let resolved = resolve_within_root(root_path, path)?;
-            let text = std::fs::read_to_string(&resolved)
+            let text = agent_file_policy::read_to_string(&resolved)
                 .map_err(|e| format!("Failed to read {}: {}", path, e))?;
             // Truncate to avoid overwhelming small models with large files
             let limit = read_file_limit(backend);
@@ -6065,7 +6090,7 @@ async fn execute_tool(
                             }
                         }
 
-                        let content = match std::fs::read_to_string(&path) {
+                        let content = match agent_file_policy::read_to_string(&path) {
                             Ok(c) => c,
                             Err(_) => continue,
                         };
@@ -6159,7 +6184,7 @@ async fn execute_tool(
                 }
             }
 
-            let content = std::fs::read_to_string(&abs_path)
+            let content = agent_file_policy::read_to_string(&abs_path)
                 .map_err(|e| format!("Failed to read {}: {}", path, e))?;
 
             let mut new_content = content.clone();
@@ -6698,7 +6723,7 @@ fn execute_custom_tool(name: &str, args: &serde_json::Value, root_path: &str) ->
         .join(".tools")
         .join(format!("{}.json", name));
 
-    let content = std::fs::read_to_string(&tool_path)
+    let content = agent_file_policy::read_to_string(&tool_path)
         .map_err(|e| format!("Failed to read tool '{}': {}", name, e))?;
 
     let parsed: serde_json::Value = serde_json::from_str(&content)
@@ -9027,6 +9052,19 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     }
 }
 
+/// Explain the enforced credential boundary to the model.
+fn append_restricted_mode_note(messages: &mut Vec<ChatMessage>, _tools: &[serde_json::Value]) {
+    const NOTE: &str = "\n\n[Credential file protection]\nFiles named .env and their variants, credential directories and aliases are excluded from AI context. Automatic code execution (rust_repl, bash, custom commands and delegated agents) is disabled because it can bypass file access checks. Help users prepare commands to copy into their own terminal. Never request vault secrets, passwords, session tokens or secret command output in chat.";
+    if let Some(system) = messages.iter_mut().find(|m| m.role == "system") {
+        system.content.push_str(NOTE);
+    } else {
+        messages.insert(0, ChatMessage {
+            role: "system".to_string(),
+            content: NOTE.trim_start().to_string(),
+        });
+    }
+}
+
 #[tauri::command]
 async fn ai_chat(app_handle: tauri::AppHandle, req: ChatRequest) -> Result<ChatResult, String> {
     let memory = app_handle.state::<SubAgentMemory>();
@@ -9341,6 +9379,9 @@ pub async fn run_chat(
         main_agent_config.as_ref(),
     );
     let has_tools = !tools.is_empty();
+    // Explain credential file protection to the model (all backends share this
+    // system message), so a stripped tool list is never silently confusing.
+    append_restricted_mode_note(&mut messages, &tools);
 
     // Shared sub-agent conversation memory (persists across turns in the same
     // session). Read once and pass the reference down through the runner.
@@ -10246,6 +10287,9 @@ pub fn run() {
             fetch_digitalocean_routers,
             ai_complete,
             ai_chat,
+            agent_file_policy::agent_read_file,
+            agent_file_policy::agent_check_file_access,
+            credential_providers::credential_provider_availability,
             pty_spawn,
             pty_write,
             pty_resize,
@@ -10282,6 +10326,33 @@ fn main() {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn credential_boundary_blocks_tools_attachments_and_previews() {
+        let dir = std::env::temp_dir().join(format!("nolock-context-boundary-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join("production.env.backup");
+        std::fs::write(&secret, "PRIVATE_FIXTURE_VALUE").unwrap();
+        let root = dir.to_str().unwrap();
+        let args = serde_json::json!({"path": secret, "pattern": "PRIVATE", "content": "replacement", "edits": [{"old_text":"PRIVATE_FIXTURE_VALUE", "new_text":"replacement"}]});
+        let client = reqwest::Client::new();
+        for name in ["read_file", "grep", "edit", "write_file"] {
+            let result = execute_tool(name, &args, &client, &HashMap::new(), Some(root), "ollama").await;
+            assert!(result.is_err(), "{name} must reject protected files");
+            assert!(!result.unwrap_err().contains("PRIVATE_FIXTURE_VALUE"));
+        }
+        assert!(compute_file_changes("edit", &args, Some(root)).is_empty());
+        assert!(agent_file_policy::agent_read_file(secret.to_string_lossy().into()).is_err());
+        let search = execute_tool("grep", &serde_json::json!({"path":root,"pattern":"PRIVATE"}), &client, &HashMap::new(), Some(root), "ollama").await.unwrap();
+        assert!(!search.contains("PRIVATE_FIXTURE_VALUE"));
+        // The manual editor still works, and rejected mutations did not touch the file.
+        assert_eq!(read_file(secret.to_string_lossy().into()).unwrap(), "PRIVATE_FIXTURE_VALUE");
+        for name in ["rust_repl", "bash_sandbox", "custom_command", "terminal_cli_aws"] {
+            let result = execute_tool(name, &serde_json::json!({"command":"echo bypass", "code":"println!(\"bypass\");"}), &client, &HashMap::new(), Some(root), "ollama").await;
+            assert!(result.unwrap_err().contains("Automatic code execution is disabled"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use super::*;
 
     // ---- Streaming UTF-8 line splitter ------------------------------------
@@ -10499,30 +10570,13 @@ mod tests {
     }
 
     #[test]
-    fn test_rust_repl_schema_present() {
-        let schemas = build_tool_schemas(&["rust_repl".into()], None);
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0]["function"]["name"], "rust_repl");
-        let required = schemas[0]["function"]["parameters"]["required"]
-            .as_array()
-            .unwrap();
-        assert!(required.iter().any(|v| v == "code"));
-        // dependencies is optional (not in required)
-        assert!(!required.iter().any(|v| v == "dependencies"));
+    fn test_rust_repl_schema_excluded() {
+        assert!(build_tool_schemas(&["rust_repl".into()], None).is_empty());
     }
 
     #[test]
-    fn test_bash_sandbox_schema_present() {
-        let schemas = build_tool_schemas(&["bash_sandbox".into()], None);
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0]["function"]["name"], "bash_sandbox");
-        let required = schemas[0]["function"]["parameters"]["required"]
-            .as_array()
-            .unwrap();
-        assert!(required.iter().any(|v| v == "command"));
-        // timeout and working_directory are optional
-        assert!(!required.iter().any(|v| v == "timeout"));
-        assert!(!required.iter().any(|v| v == "working_directory"));
+    fn test_bash_sandbox_schema_excluded() {
+        assert!(build_tool_schemas(&["bash_sandbox".into()], None).is_empty());
     }
 
     // ---- execute_tool error paths (without network / fs) -----------------
@@ -10532,7 +10586,7 @@ mod tests {
         let args = serde_json::json!({});
         let result = execute_tool("unknown_tool", &args, &client, &HashMap::new(), None, "ollama").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unknown tool"));
+        assert!(result.unwrap_err().contains("Automatic code execution is disabled"));
     }
 
     #[tokio::test]
@@ -10709,192 +10763,18 @@ mod tests {
     }
 
     // ---- rust_repl tests ---------------------------------------------------
-    #[tokio::test]
-    async fn test_execute_tool_rust_repl_missing_code() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({});
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing required parameter"));
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_rust_repl_hello_world() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({
-            "code": "fn main() { println!(\"Hello, world!\"); }"
-        });
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should compile and run, got: {:?}", result);
-        let output = result.unwrap();
-        assert!(
-            output.contains("Hello, world!"),
-            "expected Hello, world! in output, got: {}",
-            output
-        );
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_rust_repl_computation() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({
-            "code": "fn main() { let sum: u64 = (1..=100).sum(); println!(\"Sum = {}\", sum); }"
-        });
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should compile and run, got: {:?}", result);
-        let output = result.unwrap();
-        assert!(
-            output.contains("Sum = 5050"),
-            "expected Sum = 5050, got: {}",
-            output
-        );
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_rust_repl_compile_error() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({
-            "code": "fn main() { let x: i32 = \"not an int\"; println!(\"{}\", x); }"
-        });
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should return compile error, not Err: {:?}", result);
-        let output = result.unwrap();
-        // The output should contain compiler error messages
-        assert!(
-            output.contains("error") || output.contains("mismatched types"),
-            "expected compiler error in output, got: {}",
-            output
-        );
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_rust_repl_with_dependency() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({
-            "code": "fn main() { let mut v = vec![1, 2, 3]; v.sort(); println!(\"sorted: {:?}\", v); }",
-            "dependencies": []
-        });
-        let result = execute_tool("rust_repl", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should compile and run, got: {:?}", result);
-        let output = result.unwrap();
-        assert!(
-            output.contains("sorted: [1, 2, 3]"),
-            "expected sorted output, got: {}",
-            output
-        );
-    }
 
     // ---- bash_sandbox tests ------------------------------------------------
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_missing_command() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({});
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing required parameter"));
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_echo() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({
-            "command": "echo hello from bash"
-        });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should run, got: {:?}", result);
-        let output = result.unwrap();
-        assert!(
-            output.contains("hello from bash"),
-            "expected echo output, got: {}",
-            output
-        );
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_error_exit() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({
-            "command": "echo error_msg >&2; exit 1"
-        });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should return output even on non-zero exit, got: {:?}", result);
-        let output = result.unwrap();
-        assert!(
-            output.contains("error_msg"),
-            "expected stderr output, got: {}",
-            output
-        );
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_pipeline() {
-        let client = reqwest::Client::new();
-        let args = serde_json::json!({
-            "command": "echo -e 'banana\\napple\\ncherry' | sort | head -2"
-        });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should run pipeline, got: {:?}", result);
-        let output = result.unwrap();
-        assert!(
-            output.contains("apple") && output.contains("banana"),
-            "expected sorted head output, got: {}",
-            output
-        );
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_working_directory() {
-        let client = reqwest::Client::new();
-        let dir = std::env::temp_dir().join("nolock_bash_test_dir");
-        let _ = std::fs::create_dir_all(&dir);
-        let args = serde_json::json!({
-            "command": "pwd",
-            "working_directory": dir.to_string_lossy()
-        });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should run in working dir, got: {:?}", result);
-        let output = result.unwrap();
-        assert!(
-            output.contains("nolock_bash_test_dir"),
-            "expected working directory in pwd output, got: {}",
-            output
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_timeout() {
-        let client = reqwest::Client::new();
-        // Use a very short timeout (2s) and a command that sleeps longer
-        let args = serde_json::json!({
-            "command": "sleep 60",
-            "timeout": 2
-        });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), None, "ollama").await;
-        assert!(result.is_ok(), "should return output even on kill, got: {:?}", result);
-        let output = result.unwrap();
-        assert!(
-            output.contains("timeout") || output.contains("Killed"),
-            "expected timeout/killed message, got: {}",
-            output
-        );
-    }
 
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_working_directory_outside_root() {
-        let client = reqwest::Client::new();
-        // When root_path is set, working_directory outside it should be rejected
-        let args = serde_json::json!({
-            "command": "pwd",
-            "working_directory": "/tmp"
-        });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), Some("/home"), "ollama").await;
-        assert!(result.is_err(), "should reject working dir outside root, got: {:?}", result);
-        assert!(
-            result.unwrap_err().contains("outside"),
-            "expected 'outside' in error message"
-        );
-    }
 
     // ---- filesystem tools scoped to the open project folder --------------
     #[test]
@@ -10968,48 +10848,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_command_outside_root() {
-        let client = reqwest::Client::new();
-        let base = std::env::temp_dir().join("nolock_test_sandbox_scope");
-        let project = base.join("project");
-        let outside = base.join("outside");
-        let _ = std::fs::create_dir_all(&project);
-        let _ = std::fs::create_dir_all(&outside);
-        let project_str = project.to_string_lossy().to_string();
-        let outside_str = outside.to_string_lossy().to_string();
 
-        let args = serde_json::json!({ "command": format!("find {} -name '*.txt'", outside_str) });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), Some(&project_str), "ollama")
-            .await;
-        assert!(result.is_err(), "command escaping root should be rejected, got: {:?}", result);
-        assert!(result.unwrap_err().contains("outside the open project folder"));
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[tokio::test]
-    async fn test_execute_tool_bash_sandbox_command_within_root() {
-        let client = reqwest::Client::new();
-        let base = std::env::temp_dir().join("nolock_test_sandbox_within");
-        let project = base.join("project");
-        let _ = std::fs::create_dir_all(&project);
-        let file = project.join("hello.txt");
-        std::fs::write(&file, "hi").unwrap();
-        let project_str = project.to_string_lossy().to_string();
-        let file_str = file.to_string_lossy().to_string();
-
-        let args = serde_json::json!({ "command": format!("cat '{}'", file_str) });
-        let result = execute_tool("bash_sandbox", &args, &client, &HashMap::new(), Some(&project_str), "ollama")
-            .await;
-        assert!(result.is_ok(), "in-root command should run, got: {:?}", result);
-        assert!(
-            result.unwrap().contains("hi"),
-            "expected file content in output"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
 
     // ---- tool_call_id fix: reproducing the bug and confirming the fix ----
     //
@@ -12187,6 +12026,41 @@ mod tests {
         assert_eq!(built[0]["role"], "user");
     }
 
+    // ---- credential file protection guidance -----------------------------
+
+    #[test]
+    fn restricted_mode_note_explains_missing_execution_tools() {
+        let mut msgs = vec![
+            ChatMessage { role: "system".to_string(), content: "base prompt".to_string() },
+            ChatMessage { role: "user".to_string(), content: "hi".to_string() },
+        ];
+        let tools = vec![
+            serde_json::json!({"type":"function","function":{"name":"read_file","description":"","parameters":{}}}),
+        ];
+        append_restricted_mode_note(&mut msgs, &tools);
+        assert!(msgs[0].content.starts_with("base prompt"), "note is appended, not replaced");
+        assert!(msgs[0].content.contains("rust_repl"), "names a disabled execution tool");
+        assert!(msgs[0].content.contains("own terminal"));
+        assert!(msgs[0].content.contains(".env"));
+    }
+
+    #[test]
+    fn restricted_mode_note_always_enforced() {
+        let mut msgs = vec![ChatMessage { role: "system".to_string(), content: "base".to_string() }];
+        append_restricted_mode_note(&mut msgs, &[rust_repl_schema()]);
+        assert!(msgs[0].content.starts_with("base"));
+        assert!(msgs[0].content.contains("Credential file protection"));
+    }
+
+    #[test]
+    fn restricted_mode_note_inserts_system_message_when_absent() {
+        let mut msgs = vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }];
+        append_restricted_mode_note(&mut msgs, &[]);
+        assert_eq!(msgs[0].role, "system");
+        assert!(msgs[0].content.contains("rust_repl"));
+        assert_eq!(msgs[1].role, "user");
+    }
+
     #[test]
     fn build_initial_messages_preserves_spawn_subagent_hint() {
         // spawn_subagent hint must coexist with the generic tool guidance.
@@ -12281,21 +12155,55 @@ mod tests {
         assert_eq!(api_key, "router-key");
     }
 
-    #[test]
-    fn spawn_subagent_tool_is_included_when_agents_exist_in_root() {
+    /// Copy the repo's agent fixture directories into a fresh temp project and
+/// return its path. Schema tests use this instead of the repo root so the
+/// developer's own terminal-tools registration for this repo (approval-required
+/// mode legitimately strips spawn/execution tools there) cannot flake them.
+fn fixture_project(extra_dirs: &[&str]) -> std::path::PathBuf {
+    // CARGO_MANIFEST_DIR is `<repo>/src-tauri`; fixtures live at the repo root.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("CARGO_MANIFEST_DIR has a parent (the repo root)");
+    let unique = format!(
+        "nolock-schema-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    for dir in extra_dirs {
+        let src = repo.join(dir);
+        let dst = root.join(dir);
+        std::fs::create_dir_all(&dst).expect("create fixture dir");
+        if src.exists() {
+            for entry in std::fs::read_dir(&src).expect("read fixture source").flatten() {
+                let target = dst.join(entry.file_name());
+                if entry.metadata().expect("fixture metadata").is_dir() {
+                    std::fs::create_dir_all(&target).expect("create nested fixture dir");
+                } else {
+                    std::fs::copy(entry.path(), &target).expect("copy fixture file");
+                }
+            }
+        }
+    }
+    root
+}
+
+#[test]
+    fn spawn_subagent_tool_is_excluded_even_when_agents_exist() {
         // The sub-agent regression: build_tool_schemas must ALWAYS add the
         // spawn_subagent tool (listing available agents) when the open project
         // has a non-empty `.agents/` directory — otherwise the model can never
         // trigger a sub-agent, even via explicit @ mention.
-        let root = env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri");
-        let tools = build_tool_schemas(&[], Some(root));
+        // Uses a temp copy of the repo's `.agents/` so the developer's own
+        // terminal-tools config for this repo (approval-required mode strips
+        // spawn tools) cannot flake the assertion.
+        let root = fixture_project(&[".agents"]);
+        let tools = build_tool_schemas(&[], Some(root.to_str().unwrap()));
         let spawn = tools
             .iter()
             .find(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
-        assert!(spawn.is_some(), "expected spawn_subagent tool when .agents exists in {:?}", root);
-        let desc = spawn.unwrap()["function"]["description"].as_str().unwrap_or("");
-        assert!(desc.contains("code-reviewer") || desc.contains("researcher"),
-                "spawn_subagent description should list the available agents:\n{}", desc);
+        assert!(spawn.is_none(), "delegation cannot bypass the credential boundary");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ---- Micro-agent config parsing & validation helpers --------------------
@@ -12393,11 +12301,12 @@ Fix the errors."#;
     }
 
     #[test]
-    fn spawn_micro_agent_tool_only_added_when_can_spawn_micro_agents() {
-        let root = env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri");
+    fn spawn_micro_agent_tool_excluded_even_with_delegation_enabled() {
+        let root = fixture_project(&[".micro-agents"]);
+        let root_str = root.to_str().unwrap().to_string();
         // Agent WITHOUT the flag → no spawn_micro_agent tool.
         let plain = AgentConfig { name: "plain".into(), ..Default::default() };
-        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(root), false, Some(&plain));
+        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(&root_str), false, Some(&plain));
         assert!(tools.iter().all(|t| t["function"]["name"].as_str() != Some("spawn_micro_agent")));
 
         // Agent WITH the flag + a .micro-agents dir present → tool added and
@@ -12408,13 +12317,12 @@ Fix the errors."#;
             allowed_micro_agents: vec!["rust-fixer".to_string(), "ts-type-fixer".to_string()],
             ..Default::default()
         };
-        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(root), false, Some(&delegating));
+        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(&root_str), false, Some(&delegating));
         let micro = tools
             .iter()
             .find(|t| t["function"]["name"].as_str() == Some("spawn_micro_agent"));
-        assert!(micro.is_some(), "expected spawn_micro_agent tool for a delegating sub-agent");
-        let desc = micro.unwrap()["function"]["description"].as_str().unwrap_or("");
-        assert!(desc.contains("rust-fixer"), "should list allowed micro-agents: {}", desc);
+        assert!(micro.is_none(), "delegation cannot bypass the credential boundary");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -13003,9 +12911,12 @@ Fix the errors."#;
     fn build_tool_schemas_omits_spawn_subagent_when_disallowed() {
         // Sub-agent tool loops must NOT expose spawn_subagent (prevents the
         // re-spawn cascade where each sub-agent re-delegates to siblings).
+        // Fixture root so the assertion tests the allow_spawn_subagent=false
+        // path, not an accidental restricted-mode strip.
+        let root = fixture_project(&[".agents"]);
         let tools = build_tool_schemas_inner(
             &["read_file".to_string()],
-            Some(env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri")),
+            Some(root.to_str().unwrap()),
             false,
             None,
         );
@@ -13013,21 +12924,26 @@ Fix the errors."#;
             .iter()
             .find(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
         assert!(spawn.is_none(), "sub-agent must not get spawn_subagent tool");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn build_tool_schemas_default_keeps_spawn_subagent_for_main_agent() {
+    fn build_tool_schemas_default_excludes_spawn_subagent_for_main_agent() {
         // The main agent's default build_tool_schemas keeps spawn_subagent.
+        // Temp fixture root: immune to the developer's terminal-tools config
+        // for this repo (approval-required mode strips spawn tools).
+        let root = fixture_project(&[".agents"]);
         let tools = build_tool_schemas_inner(
             &["read_file".to_string()],
-            Some(env!("CARGO_MANIFEST_DIR").trim_end_matches("src-tauri")),
+            Some(root.to_str().unwrap()),
             true,
             None,
         );
         let spawn = tools
             .iter()
             .find(|t| t["function"]["name"].as_str() == Some("spawn_subagent"));
-        assert!(spawn.is_some(), "main agent tool loop must keep spawn_subagent");
+        assert!(spawn.is_none(), "main agent must enforce credential protection");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

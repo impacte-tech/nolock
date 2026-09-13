@@ -1134,3 +1134,19 @@ describe("AiInlineCompletionProvider - editor isolation", () => {
     provider.dispose();
   });
 });
+
+describe("credential file boundary", () => {
+  it.each(["/project/.env", "/project/production.env.backup", "/project/alias.txt"])("never reads or sends editor content when access to %s is rejected", async (path) => {
+    const provider = new AiInlineCompletionProvider(path);
+    const model = createModel("PRIVATE_FIXTURE_VALUE");
+    const read = vi.spyOn(model, "getValueInRange");
+    mockInvoke.mockImplementation((command: string) => command === "agent_check_file_access"
+      ? Promise.reject(new Error("excluded")) : Promise.resolve("unexpected"));
+    provider.requestExplicitCompletion();
+    const result = await provider.provideInlineCompletions(model, new Position(1, 5), {} as monaco.languages.InlineCompletionContext, createCancellationToken());
+    expect(result.items).toEqual([]);
+    expect(read).not.toHaveBeenCalled();
+    expect(mockInvoke.mock.calls).toEqual([["agent_check_file_access", { path }]]);
+    provider.dispose();
+  });
+});

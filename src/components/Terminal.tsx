@@ -4,7 +4,6 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { checkCommandTrigger } from "../lib/hooks";
 
 export interface TerminalInstance {
   id: string;
@@ -18,10 +17,9 @@ interface TerminalViewProps {
   lastCommandRef?: React.MutableRefObject<string>;
 }
 
-export default function TerminalView({ instance, rootPath, lastCommandRef }: TerminalViewProps) {
+export default function TerminalView({ instance, rootPath }: TerminalViewProps) {
   const termRef = useRef<HTMLDivElement>(null);
   const fitAddon = useRef<FitAddon | null>(null);
-  const lineBuffer = useRef<string>("");
 
   useEffect(() => {
     if (!termRef.current) return;
@@ -80,35 +78,8 @@ export default function TerminalView({ instance, rootPath, lastCommandRef }: Ter
       // Always forward keystroke to PTY first (fire-and-forget)
       invoke("pty_write", { id: instance.id, data }).catch(() => {});
 
-      // ---- Track commands for Terminal Memory feature -------------------
-      try {
-        if (data === "\r") {
-          const cmd = lineBuffer.current.trim();
-          if (cmd.length > 0) {
-            invoke("record_command", { command: cmd }).catch(() => {});
-            // Fire command-triggered hooks when the user runs a CLI command.
-            if (rootPath) {
-              void checkCommandTrigger(rootPath, cmd, "terminal");
-            }
-            if (lastCommandRef) {
-              lastCommandRef.current = cmd;
-            }
-          }
-          lineBuffer.current = "";
-        } else if (data === "\x7f") {
-          lineBuffer.current = lineBuffer.current.slice(0, -1);
-        } else if (data === "\x15") {
-          lineBuffer.current = "";
-        } else if (data === "\x03") {
-          lineBuffer.current = "";
-        } else if (data === "\x04") {
-          // Ctrl+D — no effect on buffer
-        } else if (data.length === 1 && data >= " ") {
-          lineBuffer.current += data;
-        }
-      } catch (e) {
-        console.error("[Terminal Memory] tracking error:", e);
-      }
+      // Vault passwords and MFA input must never be captured as command memory.
+
     });
 
     // Resize handler

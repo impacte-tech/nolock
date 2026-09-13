@@ -22,6 +22,7 @@ const DEBOUNCE_MS = 500;
 
 /** @internal exported for testing */
 export class AiInlineCompletionProvider implements monaco.languages.InlineCompletionsProvider {
+  constructor(private readonly filePath?: string) {}
   private _requestCounter = 0;
   private _timer: ReturnType<typeof setTimeout> | null = null;
   private _editor: monaco.editor.IStandaloneCodeEditor | null = null;
@@ -94,6 +95,12 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
 
     // Consume the gate so we don't fire again until next pause
     this._ready = false;
+
+    if (this.filePath) {
+      try { await invoke("agent_check_file_access", { path: this.filePath }); }
+      catch { return { items: [] }; }
+    }
+    if (token.isCancellationRequested) return { items: [] };
 
     // --- Build prefix (code before cursor, last 4000 chars) ---
     const fullPrefix = model.getValueInRange({

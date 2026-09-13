@@ -152,7 +152,7 @@ export default function Editor({ filePath, content, onChange, onSave, revealLine
     editorRef.current = editor;
 
     // Register debounced AI completion provider
-    const provider = new AiInlineCompletionProvider();
+    const provider = new AiInlineCompletionProvider(filePath);
     provider.setEditor(editor);
     const completionRegistration = monaco.languages.registerInlineCompletionsProvider("*", provider);
 

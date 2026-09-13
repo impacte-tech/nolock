@@ -1,3 +1,4 @@
+import AgentFileProtectionNotice from "./AgentFileProtectionNotice";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -2440,7 +2441,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
               if (expandedFilePaths.has(filePath)) continue;
               expandedFilePaths.add(filePath);
               try {
-                const fileContent: string = await invoke("read_file", { path: filePath });
+                const fileContent: string = await invoke("agent_read_file", { path: filePath });
                 const tokenCount = countTokens(fileContent);
                 contextParts.push(`File: ${filePath}\n\`\`\`\n${fileContent}\n\`\`\``);
                 refsWithSize.push({
@@ -2449,7 +2450,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                   _tokenCount: tokenCount,
                 });
               } catch (e) {
-                console.error(`Failed to read referenced file ${filePath}:`, e);
+                window.dispatchEvent(new CustomEvent("nolock:agent-file-blocked", { detail: { path: filePath } }));
               }
             }
           } catch (e) {
@@ -2457,12 +2458,12 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           }
         } else {
           try {
-            const fileContent: string = await invoke("read_file", { path: ref.path });
+            const fileContent: string = await invoke("agent_read_file", { path: ref.path });
             const tokenCount = countTokens(fileContent);
             contextParts.push(`File: ${ref.path}\n\`\`\`\n${fileContent}\n\`\`\``);
             refsWithSize.push({ ...ref, _tokenCount: tokenCount });
           } catch (e) {
-            console.error(`Failed to read referenced file ${ref.path}:`, e);
+            window.dispatchEvent(new CustomEvent("nolock:agent-file-blocked", { detail: { path: ref.path } }));
           }
         }
       }
@@ -2898,6 +2899,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           <button onClick={onClose}>&times;</button>
         </div>
       </div>
+      <AgentFileProtectionNotice key={rootPath} />
       <div className="chat-messages" ref={messagesContainerRef}>
         {messages.length === 0 && (
           <div style={{ color: "var(--text-muted)", fontSize: 13, textAlign: "center", marginTop: 40 }}>

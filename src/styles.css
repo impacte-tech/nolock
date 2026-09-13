@@ -5668,3 +5668,13 @@ select.field-input {
 .model-pull-job progress { display: block; width: 100%; height: 6px; margin: 8px 0; }
 .model-pull-job .btn-secondary { display: block; margin-top: 8px; }
 .model-pull-path { display: block; overflow-wrap: anywhere; font-size: 11px; }
+
+
+.credential-providers { margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
+.credential-providers p, .credential-providers li { line-height: 1.6; overflow-wrap: anywhere; }
+.provider-options { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.provider-options button[aria-pressed="true"] { outline: 2px solid var(--accent, #79b8ff); outline-offset: 2px; }
+.provider-command { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.provider-command pre { flex: 1; min-width: 0; overflow: auto; white-space: pre-wrap; padding: 10px; background: var(--bg-primary); border-radius: 4px; }
+.provider-help { color: var(--text-secondary); font-size: 12px; }
+.provider-protection { border-left: 3px solid var(--accent, #79b8ff); padding: 8px 12px; margin-top: 16px; font-size: 12px; }

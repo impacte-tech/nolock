@@ -246,6 +246,7 @@ function PlayIcon() {
 // ---------------------------------------------------------------------------
 
 interface CellEditorProps {
+  filePath: string;
   cellId: string;
   value: string;
   onChange: (value: string) => void;
@@ -259,6 +260,7 @@ interface CellEditorProps {
 }
 
 function CellEditor({
+  filePath,
   cellId,
   value,
   onChange,
@@ -303,7 +305,7 @@ function CellEditor({
     editorRef.current = editor;
     editorRegistry.current.set(cellId, editor);
 
-    const provider = new AiInlineCompletionProvider();
+    const provider = new AiInlineCompletionProvider(filePath);
     provider.setEditor(editor);
     const completionRegistration = monaco.languages.registerInlineCompletionsProvider("python", provider);
 
@@ -340,7 +342,7 @@ function CellEditor({
       editor.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cellId]);
+  }, [cellId, filePath]);
 
   // Sync external value changes (e.g. undo at notebook level) into the model.
   useEffect(() => {
@@ -432,6 +434,7 @@ function OutputView({ output }: { output: NotebookOutput }) {
 // ---------------------------------------------------------------------------
 
 interface CellViewProps {
+  filePath: string;
   cell: NotebookCell;
   canMoveUp: boolean;
   canMoveDown: boolean;
@@ -449,6 +452,7 @@ interface CellViewProps {
 }
 
 function CellView({
+  filePath,
   cell,
   canMoveUp,
   canMoveDown,
@@ -593,6 +597,7 @@ function CellView({
       {gutter}
       <div className="nb-cell-body">
         <CellEditor
+          filePath={filePath}
           cellId={cell.id}
           value={source}
           onChange={(v) => onSourceChange(cell.id, v)}
@@ -1424,6 +1429,7 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
             }}
           >
             <CellView
+              filePath={filePath}
               cell={cell}
               canMoveUp={index > 0}
               canMoveDown={index < notebook.cells.length - 1}

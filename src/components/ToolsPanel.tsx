@@ -1,3 +1,4 @@
+import CredentialProviders from "./CredentialProviders";
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import NumberField, { parseInt10 } from "./NumberField";
@@ -51,7 +52,6 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
   const [toolsEnabled, setToolsEnabled] = useState<string[]>([]);
   const [toolConfig, setToolConfig] = useState<ToolConfig>({});
   const [maxIterations, setMaxIterations] = useState(10);
-
   // Custom tool management state
   const [customTools, setCustomTools] = useState<CustomToolEntry[]>([]);
   const [showNewToolForm, setShowNewToolForm] = useState(false);
@@ -180,6 +180,7 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
               : "Tool calling is only supported with Ollama, llama.cpp, OpenRouter and DigitalOcean backends."}
           </span>
 
+          <p className="provider-help">Automatic code execution is disabled to protect credential files. Use your terminal for trusted commands.</p>
           {AVAILABLE_TOOLS.map((tool) => (
             <label
               key={tool.id}
@@ -195,9 +196,9 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
             >
               <input
                 type="checkbox"
-                checked={toolsEnabled.includes(tool.id)}
+                checked={!["rust_repl", "bash_sandbox"].includes(tool.id) && toolsEnabled.includes(tool.id)}
                 onChange={() => supportsTools && toggleTool(tool.id)}
-                disabled={!supportsTools}
+                disabled={!supportsTools || ["rust_repl", "bash_sandbox"].includes(tool.id)}
                 style={{ accentColor: "var(--accent)" }}
               />
               <div>
@@ -297,11 +298,12 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
             </div>
           )}
 
+          <CredentialProviders />
           {/* --- Custom Tools (from .tools/) --- */}
           {supportsTools && rootPath && (
             <div style={{ marginTop: 20, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>Custom Tools</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>Custom Tools (execution disabled)</span>
                 {!showNewToolForm && (
                   <button className="btn-secondary" onClick={startCreateTool} style={{ fontSize: 11, padding: "3px 10px" }}>
                     + New Tool
