@@ -1154,7 +1154,11 @@ async fn main() {
         .fallback(get(static_handler))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let bind_ip: std::net::IpAddr = std::env::var("NOLOCK_WEB_BIND")
+        .unwrap_or_else(|_| "0.0.0.0".into())
+        .parse()
+        .expect("NOLOCK_WEB_BIND must be an IPv4 or IPv6 address");
+    let addr = SocketAddr::new(bind_ip, port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("failed to bind {addr}: {e}"));

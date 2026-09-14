@@ -71,6 +71,34 @@ subsequent builds reuse Docker layers (dependency cache) and are much faster.
 
 ## Local dry run
 
+### Choose a listening interface
+
+Set `NOLOCK_WEB_BIND` to the host IP address the server should listen on. It
+accepts an IPv4 or IPv6 address (not a hostname or a port). The default is
+`0.0.0.0`, preserving container deployments that need all IPv4 interfaces.
+`PORT` sets the port independently and defaults to `8080`.
+
+- Local access only: `NOLOCK_WEB_BIND=127.0.0.1`
+- ZeroTier or another private network: use this host's IP on that network.
+- IPv6 loopback: `NOLOCK_WEB_BIND=::1`
+
+The example below uses the documentation-only address `192.0.2.10`.
+Replace it with this host's actual ZeroTier address:
+
+```bash
+NOLOCK_WEB_BIND=192.0.2.10 PORT=8088 NOLOCK_WEB_DIST=../dist \
+  ./target/release/nolock-server
+```
+
+Run this from `src-tauri/` after building. Set `NOLOCK_WEB_TOKEN` in the
+server environment before starting it to require a login token. Binding to a
+private interface does not replace authentication. The selected address must
+already belong to the host; restart the server after changing the setting.
+Other devices on the same network can open `http://192.0.2.10:8088` (substitute
+your host's address). For IPv6 URLs, enclose the address in square brackets.
+
+### Build and run
+
 ```bash
 npm run build:web                                   # frontend → dist/
 cargo build --release --bin nolock-server           # backend (in src-tauri/)
