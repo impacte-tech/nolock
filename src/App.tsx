@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileExplorer from "./components/FileExplorer";
 import MagnifierIcon from "./components/MagnifierIcon";
+import FolderIcon from "./components/FolderIcon";
 import Editor from "./components/Editor";
 import { TerminalPanel, type TerminalInstance, type TerminalStackLayout } from "./components/Terminal";
 import ChatPanel from "./components/ChatPanel";
@@ -1017,7 +1018,8 @@ export default function App() {
         menus={menus}
         logo={<img src={nolockLogo} alt="nolock" className="menubar-logo-img" />}
         mobileControls={<>
-          <button type="button" aria-label="Toggle file explorer" aria-expanded={showExplorer} onClick={() => { setShowExplorer(v => !v); setShowChat(false); }}><MagnifierIcon /></button>
+          <button type="button" aria-label="Toggle file explorer" aria-expanded={showExplorer} onClick={() => { setShowExplorer(v => !v); setShowChat(false); setShowSearch(false); }}><FolderIcon /></button>
+          <button type="button" aria-label="Search in files" aria-expanded={showSearch} onClick={() => { setShowChat(false); setShowExplorer(true); setShowSearch(v => !v); }}><MagnifierIcon /></button>
           <button type="button" aria-label="Toggle chat" aria-expanded={showChat} onClick={() => { setShowChat(v => !v); setShowExplorer(false); }}>Chat</button>
         </>}
       />
@@ -1037,7 +1039,7 @@ export default function App() {
                 uploadInputRef={uploadInputRef}
                 onUploadingChange={setUploadingFiles}
                 onFileOpen={(path, name) => { void openFile(path, name); if (mobileLayout) setShowExplorer(false); }}
-                onCollapse={() => setShowExplorer(false)}
+                onOpenSearch={() => setShowSearch(true)}
                 rootPath={rootPath}
                 setRootPath={setRootPath}
                 visible={true}

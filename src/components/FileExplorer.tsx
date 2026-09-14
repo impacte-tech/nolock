@@ -25,7 +25,8 @@ interface Props {
   visible: boolean;
   refreshKey?: number;
   style?: React.CSSProperties;
-  onCollapse?: () => void;
+  /** Open the advanced cross-file search panel (SearchPanel). */
+  onOpenSearch?: () => void;
 }
 
 interface CtxMenu {
@@ -57,7 +58,7 @@ function getFileColor(name: string): string {
   return colorMap[ext] || "#6c7086";
 }
 
-export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey, style, uploadInputRef: externalUploadInputRef, onUploadingChange, onCollapse }: Props) {
+export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey, style, uploadInputRef: externalUploadInputRef, onUploadingChange, onOpenSearch }: Props) {
   const internalUploadInputRef = useRef<HTMLInputElement>(null);
   const uploadInputRef = externalUploadInputRef ?? internalUploadInputRef;
   const uploadBusyRef = useRef(false);
@@ -601,7 +602,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   return (
     <div className="file-explorer" style={style}>
       <div className="explorer-header">
-        <button type="button" className="explorer-icon" onClick={onCollapse ?? (() => setRootExpanded(v => !v))} title="Collapse file explorer" aria-label="Collapse file explorer"><MagnifierIcon /></button>
+        <button type="button" className="explorer-icon" onClick={() => onOpenSearch?.()} title="Search in files" aria-label="Search in files"><MagnifierIcon /></button>
         <input ref={uploadInputRef} type="file" multiple hidden aria-label="Upload files" onChange={e => {
           const files = Array.from(e.target.files || []);
           e.target.value = "";

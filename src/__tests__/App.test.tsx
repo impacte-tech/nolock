@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 import App from "../App";
 import {
@@ -66,6 +66,27 @@ describe("App", () => {
       directory: "/project", name: "note.txt", content: [104, 101, 108, 108, 111],
     }));
     await screen.findByText("Uploaded 1 file.");
+  });
+
+  it("opens the advanced file search from the magnifier (mobile nav)", () => {
+    render(<App />);
+    const nav = document.querySelector(".mobile-workspace-nav");
+    expect(nav).not.toBeNull();
+    fireEvent.click(within(nav as HTMLElement).getByLabelText("Search in files"));
+    // SearchPanel replaces the FileExplorer in the left panel slot.
+    expect(document.querySelector(".search-panel")).not.toBeNull();
+    // Toggling again returns the explorer.
+    fireEvent.click(within(nav as HTMLElement).getByLabelText("Search in files"));
+    expect(document.querySelector(".search-panel")).toBeNull();
+    expect(document.querySelector(".file-explorer")).not.toBeNull();
+  });
+
+  it("opens the advanced file search from the explorer header magnifier", () => {
+    render(<App />);
+    const header = document.querySelector(".explorer-header");
+    expect(header).not.toBeNull();
+    fireEvent.click(within(header as HTMLElement).getByLabelText("Search in files"));
+    expect(document.querySelector(".search-panel")).not.toBeNull();
   });
 
   it("renders the status bar", () => {
