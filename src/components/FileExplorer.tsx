@@ -610,9 +610,11 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
         }} />
         <button onClick={() => loadDir(rootPath)} title="Refresh">&#x21bb;</button>
       </div>
-      <div className="upload-status" role="status" aria-live="polite">
-        {uploading ? "Uploading…" : uploadMessage || "Drop files into a folder · Up to 10 MB each"}
-      </div>
+      {(uploading || uploadMessage) && (
+        <div className="upload-status" role="status" aria-live="polite">
+          {uploading ? "Uploading…" : uploadMessage}
+        </div>
+      )}
       <div
         className="file-tree"
         onContextMenu={openCtxForWhitespace}
