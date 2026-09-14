@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Researches a topic (web + files) and returns a concise sourced summary
-model: oamazonasgabriel/lfm2.5-8b-a1b:q4_k_m-8gbGPU
+model: oamazonasgabriel/minicpm-2b:q4_k_m
 backend: ollama
 temperature: 0.7
 tools: web_search, web_fetch, read_file, grep

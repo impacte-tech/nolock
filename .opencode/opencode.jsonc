@@ -23,6 +23,14 @@
         "oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU": {
           "name": "Nemotron Nano 9B v2 (Q4_K_M, 16GB GPU)",
           "tools": true
+        },
+        "oamazonasgabriel/minicpm-2b:q4_k_m": {
+          "name": "MiniCPM5 2B (Q4_K_M)",
+          "tools": true
+        },
+        "oamazonasgabriel/minicpm-2b:bf16": {
+          "name": "MiniCPM5 2B (BF16)",
+          "tools": true
         }
       }
     }

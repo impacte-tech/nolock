@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import FileExplorer from "./components/FileExplorer";
+import MagnifierIcon from "./components/MagnifierIcon";
 import Editor from "./components/Editor";
 import { TerminalPanel, type TerminalInstance, type TerminalStackLayout } from "./components/Terminal";
 import ChatPanel from "./components/ChatPanel";
@@ -92,6 +93,14 @@ interface OpenFile {
 let termCounter = 0;
 
 export default function App() {
+  const [mobileLayout, setMobileLayout] = useState(() => window.matchMedia?.("(max-width: 760px)")?.matches ?? false);
+  useEffect(() => {
+    const query = window.matchMedia?.("(max-width: 760px)");
+    if (!query) return;
+    const update = () => setMobileLayout(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
   // --- Files ---
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -1007,6 +1016,10 @@ export default function App() {
       <MenuBar
         menus={menus}
         logo={<img src={nolockLogo} alt="nolock" className="menubar-logo-img" />}
+        mobileControls={<>
+          <button type="button" aria-label="Toggle file explorer" aria-expanded={showExplorer} onClick={() => { setShowExplorer(v => !v); setShowChat(false); }}><MagnifierIcon /></button>
+          <button type="button" aria-label="Toggle chat" aria-expanded={showChat} onClick={() => { setShowChat(v => !v); setShowExplorer(false); }}>Chat</button>
+        </>}
       />
 
       <div className="main-area" ref={mainAreaRef}>
@@ -1023,7 +1036,8 @@ export default function App() {
               <FileExplorer
                 uploadInputRef={uploadInputRef}
                 onUploadingChange={setUploadingFiles}
-                onFileOpen={openFile}
+                onFileOpen={(path, name) => { void openFile(path, name); if (mobileLayout) setShowExplorer(false); }}
+                onCollapse={() => setShowExplorer(false)}
                 rootPath={rootPath}
                 setRootPath={setRootPath}
                 visible={true}

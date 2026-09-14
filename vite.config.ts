@@ -83,7 +83,17 @@ export default defineConfig({
       ? { proxy: { "/api": { target: "http://127.0.0.1:8080", changeOrigin: false } } }
       : {}),
     watch: {
-      ignored: ["**/src-tauri/**"],
+      // Ignore heavy/generated trees. The .venvs/ python environments contain
+      // torch's site-packages (~100k files), which exceeds the kernel's
+      // fs.inotify.max_user_watches limit and crashes the dev server with
+      // ENOSPC. Bytecode caches and build output are noise for HMR anyway.
+      ignored: [
+        "**/src-tauri/**",
+        "**/.venvs/**",
+        "**/__pycache__/**",
+        "**/*.pyc",
+        "**/dist/**",
+      ],
     },
   },
   test: {

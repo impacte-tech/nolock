@@ -1461,7 +1461,8 @@ mod tests {
         let config: SwitchyardConfig = serde_json::from_str(&content)
             .expect("config parses against the SwitchyardConfig schema");
         assert!(validate_switchyard_config(&config).is_ok());
-        assert!(config.enabled);
+        // NOTE: `enabled` is a user runtime preference and may legitimately be
+        // false (router switched off); the guard is schema + route shape only.
         let route = config
             .routes
             .iter()

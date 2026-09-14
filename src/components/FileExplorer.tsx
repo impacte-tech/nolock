@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { uploadFile } from "../lib/uploads";
 import DirectoryPicker from "./DirectoryPicker";
+import MagnifierIcon from "./MagnifierIcon";
 
 interface DirEntry {
   name: string;
@@ -24,6 +25,7 @@ interface Props {
   visible: boolean;
   refreshKey?: number;
   style?: React.CSSProperties;
+  onCollapse?: () => void;
 }
 
 interface CtxMenu {
@@ -55,7 +57,7 @@ function getFileColor(name: string): string {
   return colorMap[ext] || "#6c7086";
 }
 
-export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey, style, uploadInputRef: externalUploadInputRef, onUploadingChange }: Props) {
+export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visible, refreshKey, style, uploadInputRef: externalUploadInputRef, onUploadingChange, onCollapse }: Props) {
   const internalUploadInputRef = useRef<HTMLInputElement>(null);
   const uploadInputRef = externalUploadInputRef ?? internalUploadInputRef;
   const uploadBusyRef = useRef(false);
@@ -599,7 +601,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   return (
     <div className="file-explorer" style={style}>
       <div className="explorer-header">
-        <span>Explorer</span>
+        <button type="button" className="explorer-icon" onClick={onCollapse ?? (() => setRootExpanded(v => !v))} title="Collapse file explorer" aria-label="Collapse file explorer"><MagnifierIcon /></button>
         <input ref={uploadInputRef} type="file" multiple hidden aria-label="Upload files" onChange={e => {
           const files = Array.from(e.target.files || []);
           e.target.value = "";

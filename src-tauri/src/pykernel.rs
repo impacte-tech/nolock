@@ -20,6 +20,11 @@
 // matplotlib figures / PIL images / _repr_html_ outputs, and survives
 // interrupts (SIGINT → KeyboardInterrupt → error result).
 //
+// Magic commands are supported in the bootstrap: `%pip` (runs pip from the
+// RUNNING interpreter so packages land in the selected venv), `!shell` escape,
+// `%who`/`%whos`, `%%bash`/`%%sh` cell magics, and `%lsmagic`. Line magics are
+// transformed into helper calls when the cell would not parse as plain Python.
+//
 // Using loopback TCP (instead of the child's stdout) means stray output from
 // subprocesses spawned by user code can never corrupt the control protocol.
 // ---------------------------------------------------------------------------
@@ -50,14 +55,28 @@ import base64
 import builtins
 import io
 import json
+import os
+import shlex
+import shutil
 import socket
 import struct
+import subprocess
 import sys
+import sysconfig
 import time
 import traceback
 
 PORT = int(sys.argv[1])
 CELL_FILENAME = "<nolock-cell>"
+
+# PEP 668: Debian/Ubuntu system Pythons carry an EXTERNALLY-MANAGED marker in
+# their stdlib and refuse `pip install`. Same check pip performs — including
+# its venv guard: a virtualenv is never externally managed, even when created
+# from a marked interpreter (inside a venv, sysconfig's stdlib path still
+# points at the base installation, so the prefix check is required).
+EXTERNALLY_MANAGED = sys.prefix == getattr(sys, "base_prefix", sys.prefix) and os.path.exists(
+    os.path.join(sysconfig.get_path("stdlib") or "", "EXTERNALLY-MANAGED")
+)
 
 sock = socket.create_connection(("127.0.0.1", PORT))
 _sockfile = sock.makefile("rb")
@@ -84,7 +103,11 @@ def read_frame():
     return json.loads(_recv_exact(length).decode("utf-8"))
 
 
-send({"type": "hello", "python": "%d.%d.%d" % sys.version_info[:3]})
+send({
+    "type": "hello",
+    "python": "%d.%d.%d" % sys.version_info[:3],
+    "externally_managed": EXTERNALLY_MANAGED,
+})
 
 
 class _Stream(io.TextIOBase):
@@ -114,7 +137,160 @@ def _no_input(prompt=""):
 
 builtins.input = _no_input
 
+
+# ---------------------------------------------------------------------------
+# Magic commands (IPython-style, implemented in the bootstrap)
+# ---------------------------------------------------------------------------
+
+class UsageError(Exception):
+    """A magic command is unknown or was used incorrectly."""
+
+
+def _stream_cmd(cmd, shell=False, stdin_text=None, capture=None):
+    """Run a subprocess, streaming its merged output line-by-line to the host
+    (sys.stdout is the live _Stream during a cell). Returns the exit status.
+    Lines are appended to `capture` when a list is passed. The child is killed
+    when the cell is interrupted (SIGINT → KeyboardInterrupt)."""
+    proc = subprocess.Popen(
+        cmd,
+        shell=shell,
+        stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        if stdin_text is not None and proc.stdin is not None:
+            proc.stdin.write(stdin_text)
+            proc.stdin.close()
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                if capture is not None:
+                    capture.append(line)
+                sys.stdout.write(line)
+            proc.stdout.close()
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        raise
+    return proc.wait()
+
+
+def _magic_pip(args):
+    """%pip — run pip from the RUNNING interpreter (sys.executable), so
+    packages install into the notebook's selected virtual environment, not
+    whatever `pip` happens to be on PATH."""
+    try:
+        argv = shlex.split(args)
+    except ValueError as e:
+        raise UsageError("Could not parse pip arguments: %s" % e)
+    if not argv:
+        argv = ["--version"]
+    captured = []
+    rc = _stream_cmd([sys.executable, "-m", "pip"] + argv, capture=captured)
+    if rc != 0:
+        if any("externally-managed-environment" in line for line in captured):
+            sys.stderr.write(
+                "This interpreter is externally managed (PEP 668); pip refused the install.\n"
+                "Pick or create a virtual environment from the notebook toolbar (+ Env),\n"
+                "reconnect, and retry — or re-run with --break-system-packages to override\n"
+                "(this can break your OS Python).\n"
+            )
+        else:
+            sys.stderr.write("pip exited with status %d\n" % rc)
+    elif argv[0] in ("install", "uninstall"):
+        sys.stderr.write("Note: you may need to restart the kernel to use updated packages.\n")
+
+
+def _magic_who(details):
+    names = sorted(k for k in _Namespace if not k.startswith("_"))
+    if not names:
+        return
+    if not details:
+        sys.stdout.write(" ".join(names) + "\n")
+        return
+    for name in names:
+        obj = _Namespace[name]
+        text = repr(obj)
+        if len(text) > 64:
+            text = text[:61] + "..."
+        sys.stdout.write("%-24s %-12s %s\n" % (name, type(obj).__name__, text))
+
+
+def _nolock_shell(cmd):
+    """!command — shell escape, like Jupyter. Output streams live; a non-zero
+    exit is reported on stderr but does not fail the cell."""
+    return _stream_cmd(cmd, shell=True)
+
+
+def _nolock_magic(name, args):
+    """Dispatcher for transformed line magics. Returns None so a magic on the
+    last line never becomes the cell's execute_result."""
+    if name in ("pip", "pip3"):
+        _magic_pip(args)
+    elif name == "who":
+        _magic_who(False)
+    elif name == "whos":
+        _magic_who(True)
+    elif name == "lsmagic":
+        sys.stdout.write("line magics: %pip, %pip3, %who, %whos, %lsmagic, !shell escape\n")
+        sys.stdout.write("cell magics: %%bash, %%sh\n")
+    elif name == "!":
+        _nolock_shell(args)
+    else:
+        raise UsageError(
+            "Line magic %%%s is not supported. Supported: %%pip, %%who, %%whos, %%lsmagic, !shell escape"
+            % name
+        )
+
+
+def _run_cell_magic(first_line, body):
+    spec = first_line.strip()[2:].strip()
+    name, _, _ = spec.partition(" ")
+    if name in ("bash", "sh"):
+        bash = shutil.which("bash") or shutil.which("sh")
+        if bash is None:
+            raise UsageError("%%bash requires bash (or sh) on this system")
+        rc = _stream_cmd([bash], stdin_text=body)
+        if rc != 0:
+            sys.stderr.write("%%bash exited with status %d\n" % rc)
+    else:
+        raise UsageError(
+            "Cell magic %%%s is not supported. Supported: %%%%bash, %%%%sh" % name
+        )
+
+
+def _transform_magics(code):
+    """Rewrite %magic / !shell lines into _nolock_magic(...) calls, preserving
+    indentation and line count (so SyntaxError line numbers stay accurate).
+    Returns the source unchanged when no magic lines are present."""
+    lines = code.split("\n")
+    changed = False
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("%%"):
+            continue  # cell magics are handled before parsing
+        if not (stripped.startswith("%") or stripped.startswith("!")):
+            continue
+        indent = line[: len(line) - len(stripped)]
+        body = stripped[1:].strip()
+        name, _, args = body.partition(" ")
+        if stripped.startswith("!"):
+            name, args = "!", body.strip()
+        if not name:
+            continue
+        lines[i] = "%s_nolock_magic(%r, %r)  # %s" % (indent, name, args.strip(), stripped)
+        changed = True
+    if not changed:
+        return code
+    return "\n".join(lines)
+
+
 _Namespace = {"__name__": "__main__", "__builtins__": builtins}
+_Namespace["_nolock_magic"] = _nolock_magic
+_Namespace["_nolock_shell"] = _nolock_shell
 _exec_count = [0]
 
 
@@ -199,11 +375,30 @@ def run_code(code):
     _exec_count[0] += 1
     count = _exec_count[0]
     try:
+        cell_magic = None
         try:
-            tree = ast.parse(code, mode="exec")
-            last_ast = None
-            if tree.body and isinstance(tree.body[-1], ast.Expr):
-                last_ast = ast.Expression(tree.body.pop().value)
+            if code.lstrip().startswith("%%"):
+                # Cell magic: the first line names it, the rest is its body.
+                first_nl = code.find("\n")
+                first_line = code if first_nl < 0 else code[:first_nl]
+                cell_magic = (first_line, "" if first_nl < 0 else code[first_nl + 1:])
+                tree = ast.parse("", mode="exec")
+                last_ast = None
+            else:
+                try:
+                    tree = ast.parse(code, mode="exec")
+                except SyntaxError:
+                    # Retry once with %magic / !shell lines transformed into
+                    # helper calls. Valid Python that merely starts a line with
+                    # `%` (e.g. a wrapped `x = (5\n% 3)`) parses fine and is
+                    # never transformed.
+                    transformed = _transform_magics(code)
+                    if transformed == code:
+                        raise
+                    tree = ast.parse(transformed, mode="exec")
+                last_ast = None
+                if tree.body and isinstance(tree.body[-1], ast.Expr):
+                    last_ast = ast.Expression(tree.body.pop().value)
         except SyntaxError as e:
             status = "error"
             err = {
@@ -217,13 +412,16 @@ def run_code(code):
             }
         if status == "ok":
             try:
-                if tree.body:
-                    exec(compile(tree, CELL_FILENAME, "exec"), _Namespace)
-                if last_ast is not None:
-                    value = eval(compile(last_ast, CELL_FILENAME, "eval"), _Namespace)
-                    if value is not None:
-                        for mime, data in _mime_bundle(value).items():
-                            out.append({"kind": "result", "mime": mime, "data": data})
+                if cell_magic is not None:
+                    _run_cell_magic(cell_magic[0], cell_magic[1])
+                else:
+                    if tree.body:
+                        exec(compile(tree, CELL_FILENAME, "exec"), _Namespace)
+                    if last_ast is not None:
+                        value = eval(compile(last_ast, CELL_FILENAME, "eval"), _Namespace)
+                        if value is not None:
+                            for mime, data in _mime_bundle(value).items():
+                                out.append({"kind": "result", "mime": mime, "data": data})
                 _flush_pyplot_figs(out)
             except KeyboardInterrupt:
                 status = "error"
@@ -392,6 +590,7 @@ pub struct RunResult {
 pub struct KernelInfo {
     pub pid: u32,
     pub python_version: String,
+    pub externally_managed: bool,
 }
 
 #[derive(Serialize)]
@@ -426,6 +625,9 @@ pub struct KernelProc {
     pub child: Child,
     pub stream: TcpStream,
     pub python_version: String,
+    /// PEP 668: the interpreter carries an EXTERNALLY-MANAGED marker, so
+    /// `%pip install` will refuse until a venv is selected (or overridden).
+    pub externally_managed: bool,
 }
 
 /// Spawn `<python> <kernel.py> <port>` and complete the hello handshake.
@@ -490,6 +692,10 @@ pub fn spawn_kernel(python_path: &str, cwd: &str) -> Result<KernelProc, String> 
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let externally_managed = hello
+        .get("externally_managed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     write_frame(&mut stream, &json!({"type": "hello-ok"}))
         .map_err(|e| format!("Kernel handshake failed: {}", e))?;
     stream.set_read_timeout(None).map_err(|e| e.to_string())?;
@@ -499,6 +705,7 @@ pub fn spawn_kernel(python_path: &str, cwd: &str) -> Result<KernelProc, String> 
         child,
         stream,
         python_version,
+        externally_managed,
     })
 }
 
@@ -733,6 +940,7 @@ pub fn kernel_start(
     let info = KernelInfo {
         pid,
         python_version: proc.python_version,
+        externally_managed: proc.externally_managed,
     };
 
     state.instances.lock().unwrap().insert(
@@ -957,6 +1165,15 @@ mod tests {
         let cwd = std::env::temp_dir().to_string_lossy().to_string();
         let mut proc = spawn_kernel(&python, &cwd).expect("kernel spawn failed");
 
+        // 0. The PEP 668 flag matches pip's own check (marker file + venv guard).
+        let marker = Command::new(&python)
+            .arg("-c")
+            .arg("import os,sys,sysconfig;print(sys.prefix == getattr(sys, 'base_prefix', sys.prefix) and os.path.exists(os.path.join(sysconfig.get_path('stdlib') or '', 'EXTERNALLY-MANAGED')))")
+            .output()
+            .expect("marker probe failed");
+        let expected = String::from_utf8_lossy(&marker.stdout).trim() == "True";
+        assert_eq!(proc.externally_managed, expected);
+
         // 1. stdout + persistent state + trailing expression result
         let mut events: Vec<(String, String)> = Vec::new();
         let result = run_on_conn(
@@ -1013,6 +1230,116 @@ mod tests {
         // 6. kernel still alive after errors
         let result =
             run_on_conn(&mut proc.stream, "r6", "40 + 2", None, |_, _| {}).expect("run 6 failed");
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.outputs[0].data, "42");
+
+        let _ = proc.child.kill();
+    }
+
+    #[test]
+    fn test_kernel_magics() {
+        let Some(python) = find_system_python() else {
+            eprintln!("skipping: no system python found");
+            return;
+        };
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let mut proc = spawn_kernel(&python, &cwd).expect("kernel spawn failed");
+
+        // 1. %pip runs pip from the running interpreter (offline-safe flag).
+        let result = run_on_conn(&mut proc.stream, "m1", "%pip --version", None, |_, _| {})
+            .expect("pip magic failed");
+        assert_eq!(result.status, "ok");
+        assert!(
+            !result.stdout.is_empty() || !result.stderr.is_empty(),
+            "pip magic produced no output"
+        );
+
+        // 2. !shell escape streams output.
+        let result = run_on_conn(
+            &mut proc.stream,
+            "m2",
+            "!echo magic-shell-ok",
+            None,
+            |_, _| {},
+        )
+        .expect("shell escape failed");
+        assert_eq!(result.status, "ok");
+        assert!(result.stdout.contains("magic-shell-ok"));
+
+        // 3. %who lists user variables (helpers stay hidden).
+        run_on_conn(&mut proc.stream, "m3", "magicvar = 41", None, |_, _| {})
+            .expect("assignment failed");
+        let result =
+            run_on_conn(&mut proc.stream, "m4", "%who", None, |_, _| {}).expect("who failed");
+        assert_eq!(result.status, "ok");
+        assert!(result.stdout.contains("magicvar"));
+        assert!(!result.stdout.contains("_nolock_magic"));
+
+        // 4. A magic mixed with code in one cell.
+        let result = run_on_conn(
+            &mut proc.stream,
+            "m5",
+            "%pip --version\nmagicmixed = 7\nmagicmixed",
+            None,
+            |_, _| {},
+        )
+        .expect("mixed cell failed");
+        assert_eq!(result.status, "ok");
+        assert!(result.stdout.contains("pip"));
+        let text = result
+            .outputs
+            .iter()
+            .find(|o| o.mime == "text/plain")
+            .expect("no trailing result");
+        assert_eq!(text.data, "7");
+
+        // 5. Unknown magic → UsageError, kernel survives.
+        let result = run_on_conn(
+            &mut proc.stream,
+            "m6",
+            "%definitely_not_a_magic",
+            None,
+            |_, _| {},
+        )
+        .expect("unknown magic failed");
+        assert_eq!(result.status, "error");
+        assert_eq!(result.error.unwrap().ename, "UsageError");
+
+        // 6. Valid Python that starts a line with `%` is NOT transformed.
+        let result = run_on_conn(&mut proc.stream, "m7", "y = (5\n% 3)\ny", None, |_, _| {})
+            .expect("continuation cell failed");
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.outputs[0].data, "2");
+
+        // 7. %%bash cell magic (skipped when no shell is available).
+        let has_bash = Command::new("bash")
+            .arg("-c")
+            .arg("true")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if has_bash {
+            let result = run_on_conn(
+                &mut proc.stream,
+                "m8",
+                "%%bash\necho bash-cell-ok",
+                None,
+                |_, _| {},
+            )
+            .expect("cell magic failed");
+            assert_eq!(result.status, "ok");
+            assert!(result.stdout.contains("bash-cell-ok"));
+        }
+
+        // 8. Genuine syntax errors are still reported normally.
+        let result =
+            run_on_conn(&mut proc.stream, "m9", "def (:", None, |_, _| {}).expect("run failed");
+        assert_eq!(result.status, "error");
+        assert_eq!(result.error.unwrap().ename, "SyntaxError");
+
+        // 9. Kernel still healthy after all the magic traffic.
+        let result =
+            run_on_conn(&mut proc.stream, "m10", "40 + 2", None, |_, _| {}).expect("run failed");
         assert_eq!(result.status, "ok");
         assert_eq!(result.outputs[0].data, "42");
 

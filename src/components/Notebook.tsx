@@ -284,7 +284,7 @@ function CellEditor({
       value,
       language: "python",
       theme: "nolock-dark",
-      fontSize: 13,
+      fontSize: 14,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
       minimap: { enabled: false },
       lineNumbers: "on",
@@ -770,6 +770,7 @@ export interface NotebookProps {
 }
 
 export default function Notebook({ filePath, content, onChange, onSave, rootPath }: NotebookProps) {
+  const [toolbarExpanded, setToolbarExpanded] = useState(false);
   const kernelId = useMemo(() => `nb:${filePath}`, [filePath]);
   const draggedCellRef = useRef<string | null>(null);
   const [dropTarget, setDropTarget] = useState<{ id: string; side: "before" | "after" } | null>(null);
@@ -811,7 +812,29 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
 
   const loadEnvs = useCallback(async () => {
     try {
-      const list: PythonEnv[] = await invoke("python_list_envs", { rootPath });
+      // Scan the workspace root AND the notebook's own folder — venvs often
+      // live next to the notebook (e.g. <homework>/.venvs/<name>) rather than
+      // at the workspace root, which the backend's one-level scan would miss.
+      const notebookDir = filePath.includes("/")
+        ? filePath.slice(0, filePath.lastIndexOf("/"))
+        : "";
+      const roots = [...new Set([rootPath, notebookDir].filter(Boolean))];
+      const results = await Promise.all(
+        roots.map((root) =>
+          invoke<PythonEnv[]>("python_list_envs", { rootPath: root }).catch(
+            () => [] as PythonEnv[]
+          )
+        )
+      );
+      // Merge, deduping by interpreter path (workspace root wins on ties).
+      const seen = new Set<string>();
+      const list: PythonEnv[] = [];
+      for (const env of results.flat()) {
+        if (!seen.has(env.pythonPath)) {
+          seen.add(env.pythonPath);
+          list.push(env);
+        }
+      }
       setEnvs(list);
       setSelectedEnv((prev) => {
         if (prev && list.some((e) => e.pythonPath === prev)) return prev;
@@ -823,7 +846,7 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
     } catch (e) {
       console.error("[notebook] failed to list python envs:", e);
     }
-  }, [rootPath]);
+  }, [rootPath, filePath]);
 
   useEffect(() => {
     loadEnvs();
@@ -838,6 +861,9 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
   }, []);
   const pidRef = useRef<number | null>(null);
   const [kernelError, setKernelError] = useState<string | null>(null);
+  // PEP 668: the connected interpreter refuses `pip install` (system Python on
+  // Debian/Ubuntu). Surfaced as a toolbar hint so the fix (+ Env) is obvious.
+  const [externallyManaged, setExternallyManaged] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   // In-flight start promise — prevents double-spawn races (e.g. Shift+Enter
   // twice, or run-all while connecting): a second kernel_start would KILL the
@@ -862,13 +888,14 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
       updateKernelStatus("starting");
       console.log("[notebook] starting kernel:", env.pythonPath, "cwd:", cwd);
       try {
-        const info = await invoke<{ pid: number; pythonVersion: string }>("kernel_start", {
+        const info = await invoke<{ pid: number; pythonVersion: string; externallyManaged?: boolean }>("kernel_start", {
           kernelId,
           pythonPath: env.pythonPath,
           cwd,
         });
         pidRef.current = info.pid;
-        console.log("[notebook] kernel ready, pid:", info.pid, "python:", info.pythonVersion);
+        setExternallyManaged(info.externallyManaged === true);
+        console.log("[notebook] kernel ready, pid:", info.pid, "python:", info.pythonVersion, "externallyManaged:", info.externallyManaged);
         updateKernelStatus("ready");
       } catch (e) {
         updateKernelStatus("dead");
@@ -885,6 +912,7 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
 
   const restartKernel = useCallback(async () => {
     setKernelError(null);
+    setExternallyManaged(false);
     try {
       await invoke("kernel_stop", { kernelId });
     } catch {
@@ -1306,7 +1334,10 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
 
   return (
     <div className="notebook">
-      <div className="nb-toolbar">
+      <button type="button" className="nb-toolbar-toggle" aria-expanded={toolbarExpanded} onClick={() => setToolbarExpanded(v => !v)}>
+        <span>Notebook controls</span><span>{toolbarExpanded ? "−" : "+"}</span>
+      </button>
+      <div className={`nb-toolbar${toolbarExpanded ? " nb-toolbar-expanded" : ""}`}>
         <span className={`nb-kernel-dot ${kernelStatus}`} title={`Kernel: ${kernelStatus}`} />
         <Select
           value={selectedEnv}
@@ -1320,6 +1351,14 @@ export default function Notebook({ filePath, content, onChange, onSave, rootPath
         />
         {kernelStatus === "ready" || kernelStatus === "busy" ? (
           <>
+            {externallyManaged && (
+              <span
+                className="nb-env-warning"
+                title="This interpreter is externally managed (PEP 668): %pip install is refused. Create or pick a virtual environment (+ Env), or pass --break-system-packages to override."
+              >
+                ⚠ externally managed
+              </span>
+            )}
             <button
               className="nb-btn"
               onClick={interruptKernel}

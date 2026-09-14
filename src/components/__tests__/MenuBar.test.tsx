@@ -2,11 +2,15 @@
 // Tests for MenuBar component
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import MenuBar from "../MenuBar";
 
 describe("MenuBar", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   const mockMenus = [
     {
       label: "File",
@@ -38,7 +42,7 @@ describe("MenuBar", () => {
 
   it("opens dropdown on click", () => {
     render(<MenuBar menus={mockMenus} />);
-    fireEvent.mouseDown(screen.getByText("File"));
+    fireEvent.click(screen.getByText("File"));
     expect(screen.getByText("Open")).toBeInTheDocument();
     expect(screen.getByText("Save")).toBeInTheDocument();
   });
@@ -49,7 +53,7 @@ describe("MenuBar", () => {
       { label: "File", items: [{ label: "Open", action }] },
     ];
     render(<MenuBar menus={menus} />);
-    fireEvent.mouseDown(screen.getByText("File"));
+    fireEvent.click(screen.getByText("File"));
     fireEvent.click(screen.getByText("Open"));
     expect(action).toHaveBeenCalledOnce();
 
@@ -59,14 +63,14 @@ describe("MenuBar", () => {
 
   it("displays shortcut text when provided", () => {
     render(<MenuBar menus={mockMenus} />);
-    fireEvent.mouseDown(screen.getByText("File"));
+    fireEvent.click(screen.getByText("File"));
     expect(screen.getByText("Ctrl+O")).toBeInTheDocument();
     expect(screen.getByText("Ctrl+S")).toBeInTheDocument();
   });
 
   it("closes dropdown when clicking outside", () => {
     render(<MenuBar menus={mockMenus} />);
-    fireEvent.mouseDown(screen.getByText("File"));
+    fireEvent.click(screen.getByText("File"));
     expect(screen.getByText("Open")).toBeInTheDocument();
 
     // Click outside
@@ -74,16 +78,42 @@ describe("MenuBar", () => {
     expect(screen.queryByText("Open")).not.toBeInTheDocument();
   });
 
-  it("switches menu on hover when another menu is open", () => {
+  // The global test setup stubs matchMedia with matches:false (no hover), so
+  // hover-switching is off. Simulate a desktop (hover-capable) environment.
+  const withHover = () =>
+    vi.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
+      matches: query === "(hover: hover)",
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }));
+
+  it("switches menu on hover when another menu is open (desktop)", () => {
+    withHover();
     render(<MenuBar menus={mockMenus} />);
     // Open File menu
-    fireEvent.mouseDown(screen.getByText("File"));
+    fireEvent.click(screen.getByText("File"));
     expect(screen.getByText("Open")).toBeInTheDocument();
 
     // Hover over Edit — should switch to Edit's dropdown
     fireEvent.mouseEnter(screen.getByText("Edit"));
     expect(screen.queryByText("Open")).not.toBeInTheDocument();
     expect(screen.getByText("Undo")).toBeInTheDocument();
+  });
+
+  it("does not switch menu on hover on touch devices", () => {
+    // Default setup stub: matchMedia reports no hover capability.
+    render(<MenuBar menus={mockMenus} />);
+    fireEvent.click(screen.getByText("File"));
+    expect(screen.getByText("Open")).toBeInTheDocument();
+
+    fireEvent.mouseEnter(screen.getByText("Edit"));
+    expect(screen.getByText("Open")).toBeInTheDocument();
+    expect(screen.queryByText("Undo")).not.toBeInTheDocument();
   });
 
   it("renders empty when menus array is empty", () => {

@@ -804,7 +804,7 @@ fn web_kernel_start(
     }
 
     let proc = main_impl::pykernel::spawn_kernel(&python_path, &cwd)?;
-    let main_impl::pykernel::KernelProc { mut child, stream, python_version } = proc;
+    let main_impl::pykernel::KernelProc { mut child, stream, python_version, externally_managed } = proc;
     let pid = child.id();
 
     // Drain stderr so the pipe never blocks; detect death → kernel-died event.
@@ -826,7 +826,7 @@ fn web_kernel_start(
         });
     }
 
-    let info = main_impl::pykernel::KernelInfo { pid, python_version };
+    let info = main_impl::pykernel::KernelInfo { pid, python_version, externally_managed };
     state.kernels.lock().map_err(|_| "Kernel state poisoned")?.insert(
         kernel_id,
         main_impl::pykernel::KernelInstance {

@@ -7,7 +7,7 @@
  * dialog.
  *
  * A browser cannot browse the SERVER's filesystem, so folder/file picking
- * falls back to a prompt for a server-side path. On a Railway deployment the
+ * uses an in-app selector for a server-side path. On a Railway deployment the
  * interesting paths are whatever the container can see (e.g. a mounted volume
  * at `/data`).
  */
@@ -23,15 +23,10 @@ export interface OpenDialogOptions {
 export async function open(
   options?: OpenDialogOptions,
 ): Promise<string | string[] | null> {
-  const label =
-    options?.title ??
-    (options?.directory
-      ? "Open a server-side folder path"
-      : "Open a server-side file path");
-  const hint = options?.defaultPath ?? "/data";
-  const value = window.prompt(`${label} (e.g. ${hint}):`, hint);
-  if (!value || !value.trim()) return null;
-  return options?.multiple ? [value.trim()] : value.trim();
+  const { selectServerPath } = await import("./PathDialog");
+  const value = await selectServerPath(options);
+  if (!value) return null;
+  return options?.multiple ? [value] : value;
 }
 
 // The desktop dialog plugin also exports these; stub them so any future

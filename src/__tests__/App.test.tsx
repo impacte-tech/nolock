@@ -44,18 +44,18 @@ describe("App", () => {
 
   it("disables Files > Upload until a project is open", () => {
     render(<App />);
-    fireEvent.mouseDown(screen.getByText("Files"));
+    fireEvent.click(screen.getByText("Files"));
     expect(screen.getByText("Upload").closest(".menu-entry")).toHaveAttribute("aria-disabled", "true");
   });
 
   it.each(["Toggle Explorer", "Search in Files"])("uploads from Files when %s is active", async (action) => {
     localStorage.setItem("nolock.lastRootPath", "/project");
     render(<App />);
-    fireEvent.mouseDown(screen.getByText("Files"));
+    fireEvent.click(screen.getByText("Files"));
     fireEvent.click(screen.getByText(action));
     expect(screen.queryByLabelText("Upload files")).not.toBeInTheDocument();
     const picker = vi.spyOn(HTMLInputElement.prototype, "click");
-    fireEvent.mouseDown(screen.getByText("Files"));
+    fireEvent.click(screen.getByText("Files"));
     fireEvent.click(screen.getByText("Upload"));
     expect(picker).toHaveBeenCalledOnce();
     picker.mockRestore();
@@ -70,7 +70,9 @@ describe("App", () => {
 
   it("renders the status bar", () => {
     render(<App />);
-    expect(screen.getByText("Chat")).toBeInTheDocument();
+    // The status bar's Chat toggle (the mobile workspace nav also renders a
+    // "Chat" button, so scope to .status-item).
+    expect(screen.getByText("Chat", { selector: ".status-item" })).toBeInTheDocument();
   });
 
   it("toggles chat panel on Ctrl+A, O chord", () => {
