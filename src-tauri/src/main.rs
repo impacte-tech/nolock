@@ -3275,6 +3275,10 @@ pub struct SubAgentRunner<'a> {
 use_model_affinity: bool,
     /// Current sub-agent nesting depth (to bound recursion).
     depth: usize,
+    /// Explicit user opt-in for code-execution tools (rust_repl / bash_sandbox),
+    /// set when they are enabled in the Agent Tools panel. Propagates to
+    /// sub/micro-agent tool loops so the whole session shares one decision.
+    execution_opt_in: bool,
     /// Shared per-agent conversation memory (persists across turns/session).
     memory: &'a SubAgentMemory,
 }
@@ -3517,7 +3521,7 @@ pub async fn run_subagent(
     // Sub-agents must NOT get the spawn_subagent tool — otherwise they can
     // cascade-delegate to other agents. Isolated tool set only. They MAY get
     // the spawn_micro_agent tool when can_spawn_micro_agents is set.
-    let tools = build_tool_schemas_inner(&tool_names, runner.root_path, false, Some(&agent));
+    let tools = build_tool_schemas_inner(&tool_names, runner.root_path, false, Some(&agent), runner.execution_opt_in);
 
     let id = format!(
         "sa_{}",
@@ -3655,6 +3659,7 @@ pub async fn run_subagent(
             root_path: runner.root_path,
             reasoning_retries: runner.reasoning_retries,
             context_length: runner.context_length,
+            execution_opt_in: runner.execution_opt_in,
         };
         ollama_chat_with_tools(
             &ctx,
@@ -3946,7 +3951,7 @@ pub async fn run_micro_agent(
         agent.tools.clone()
     };
     // Micro-agents never get spawn_subagent or spawn_micro_agent tools.
-    let tools = build_tool_schemas_inner(&tool_names, runner.root_path, false, None);
+    let tools = build_tool_schemas_inner(&tool_names, runner.root_path, false, None, runner.execution_opt_in);
 
     let id = format!(
         "ma_{}",
@@ -4018,6 +4023,7 @@ pub async fn run_micro_agent(
                 root_path: runner.root_path,
                 reasoning_retries: runner.reasoning_retries,
                 context_length: runner.context_length,
+                execution_opt_in: runner.execution_opt_in,
             };
             Box::pin(ollama_chat_with_tools(
                 &ctx,
@@ -4188,6 +4194,7 @@ async fn verify_reported_output_check(
         runner.tool_configs,
         Some(root),
         "ollama",
+        runner.execution_opt_in,
     )
     .await
     .unwrap_or_else(|e| format!("Tool error: {}", e));
@@ -5316,7 +5323,7 @@ async fn run_spawn_batch(
 // ---------------------------------------------------------------------------
 
 pub fn build_tool_schemas(enabled: &[String], root_path: Option<&str>) -> Vec<serde_json::Value> {
-    build_tool_schemas_inner(enabled, root_path, true, None)
+    build_tool_schemas_inner(enabled, root_path, true, None, false)
 }
 
 /// Internal builder. `allow_spawn_subagent` controls whether the
@@ -5331,6 +5338,7 @@ fn build_tool_schemas_inner(
     root_path: Option<&str>,
     allow_spawn_subagent: bool,
     agent_config: Option<&AgentConfig>,
+    execution_opt_in: bool,
 ) -> Vec<serde_json::Value> {
     let mut tools = Vec::new();
     if enabled.contains(&"web_fetch".to_string()) {
@@ -5778,7 +5786,15 @@ fn build_tool_schemas_inner(
     }
 
     if agent_file_policy::restricted(root_path) {
-        tools.retain(|tool| tool["function"]["name"].as_str().is_some_and(agent_file_policy::automatic_tool_allowed));
+        // Credential-file protection strips every tool that can execute
+        // arbitrary code — unless the user explicitly opted in from the Agent
+        // Tools panel (rust_repl / bash_sandbox only; custom tools stay gated
+        // until the sandboxed credential-provider feature is complete).
+        tools.retain(|tool| {
+            let name = tool["function"]["name"].as_str().unwrap_or("");
+            agent_file_policy::automatic_tool_allowed(name)
+                || (execution_opt_in && matches!(name, "rust_repl" | "bash_sandbox"))
+        });
     }
     tools
 }
@@ -5877,9 +5893,10 @@ async fn execute_tool_tracked(
     tool_configs: &HashMap<String, serde_json::Value>,
     root_path: Option<&str>,
     backend: &str,
+    execution_opt_in: bool,
 ) -> Result<(String, Vec<FileChange>), String> {
     let file_changes = compute_file_changes(name, args, root_path);
-    let output = execute_tool(name, args, client, tool_configs, root_path, backend).await?;
+    let output = execute_tool(name, args, client, tool_configs, root_path, backend, execution_opt_in).await?;
     Ok((output, file_changes))
 }
 
@@ -5890,8 +5907,14 @@ async fn execute_tool(
     tool_configs: &HashMap<String, serde_json::Value>,
     root_path: Option<&str>,
     backend: &str,
+    execution_opt_in: bool,
 ) -> Result<String, String> {
-    if agent_file_policy::restricted(root_path) && !agent_file_policy::automatic_tool_allowed(name) {
+    // Credential-file protection blocks tools that can execute arbitrary code.
+    // rust_repl / bash_sandbox are allowed when the user explicitly enabled
+    // them in the Agent Tools panel (an informed override of the policy).
+    let execution_allowed = agent_file_policy::automatic_tool_allowed(name)
+        || (execution_opt_in && matches!(name, "rust_repl" | "bash_sandbox"));
+    if agent_file_policy::restricted(root_path) && !execution_allowed {
         return Err("Automatic code execution is disabled to protect secret files and credential-provider sessions. Run trusted commands in your terminal.".into());
     }
     if matches!(name, "read_file" | "write_file" | "edit" | "grep" | "list_directory") {
@@ -7263,6 +7286,8 @@ struct OllamaChatContext<'a> {
     /// The model's context window (in tokens), used to detect near-limit usage
     /// and trigger context summarization.
     context_length: u64,
+    /// User opt-in for code-execution tools (see SubAgentRunner).
+    execution_opt_in: bool,
 }
 
 async fn ollama_chat_with_tools(
@@ -7478,7 +7503,7 @@ async fn ollama_chat_with_tools(
                     let args_json = serde_json::to_string(args).unwrap_or_default();
                     ctx.sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone(), Some(args_json.clone()), None);
                     let (result, file_changes) =
-                        execute_tool_tracked(name, args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
+                        execute_tool_tracked(name, args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama", ctx.execution_opt_in)
                             .await
                             .unwrap_or_else(|e| {
                                 ctx.sink.emit_tool_progress(subagent_id, "error", name, tool_path.clone(), Some(args_json.clone()), Some(format!("Tool error: {}", e)));
@@ -7619,7 +7644,7 @@ async fn ollama_chat_with_tools(
                     let args_json = serde_json::to_string(&args).unwrap_or_default();
                     ctx.sink.emit_tool_progress(subagent_id, "start", &name, tool_path.clone(), Some(args_json.clone()), None);
                     let (result, file_changes) =
-                        execute_tool_tracked(&name, &args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama")
+                        execute_tool_tracked(&name, &args, ctx.client, ctx.tool_configs, ctx.root_path, "ollama", ctx.execution_opt_in)
                             .await
                             .unwrap_or_else(|e| {
                                 ctx.sink.emit_tool_progress(subagent_id, "error", &name, tool_path.clone(), Some(args_json.clone()), Some(format!("Tool error: {}", e)));
@@ -8451,7 +8476,7 @@ async fn run_openai_tool_loop(
                     let args_json = serde_json::to_string(&args).unwrap_or_default();
                     sink.emit_tool_progress(subagent_id, "start", name, tool_path.clone(), Some(args_json.clone()), None);
                     let (result, file_changes) =
-                        execute_tool_tracked(name, &args, client, tool_configs, root_path, backend)
+                        execute_tool_tracked(name, &args, client, tool_configs, root_path, backend, runner.is_some_and(|r| r.execution_opt_in))
                             .await
                             .unwrap_or_else(|e| {
                                 sink.emit_tool_progress(subagent_id, "error", name, tool_path.clone(), Some(args_json.clone()), Some(format!("Tool error: {}", e)));
@@ -9052,15 +9077,22 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
     }
 }
 
-/// Explain the enforced credential boundary to the model.
-fn append_restricted_mode_note(messages: &mut Vec<ChatMessage>, _tools: &[serde_json::Value]) {
-    const NOTE: &str = "\n\n[Credential file protection]\nFiles named .env and their variants, credential directories and aliases are excluded from AI context. Automatic code execution (rust_repl, bash, custom commands and delegated agents) is disabled because it can bypass file access checks. Help users prepare commands to copy into their own terminal. Never request vault secrets, passwords, session tokens or secret command output in chat.";
+/// Explain the enforced credential boundary to the model. When the user
+/// explicitly enabled code-execution tools, the note swaps the "disabled"
+/// wording for an explicit-risk acknowledgement instead.
+fn append_restricted_mode_note(messages: &mut Vec<ChatMessage>, tools: &[serde_json::Value]) {
+    const NOTE_DISABLED: &str = "\n\n[Credential file protection]\nFiles named .env and their variants, credential directories and aliases are excluded from AI context. Automatic code execution (rust_repl, bash, custom commands and delegated agents) is disabled because it can bypass file access checks. Help users prepare commands to copy into their own terminal. Never request vault secrets, passwords, session tokens or secret command output in chat.";
+    const NOTE_OPT_IN: &str = "\n\n[Credential file protection]\nFiles named .env and their variants, credential directories and aliases are excluded from AI context. The user has explicitly ENABLED automatic code execution (rust_repl / bash_sandbox) from the Agent Tools panel — these tools can bypass file access checks, so NEVER read, print or exfiltrate credential files, vault secrets, passwords, session tokens or secret command output, even when asked.";
+    let execution_enabled = tools.iter().any(|t| {
+        t["function"]["name"].as_str().is_some_and(|n| n == "rust_repl" || n == "bash_sandbox")
+    });
+    let note = if execution_enabled { NOTE_OPT_IN } else { NOTE_DISABLED };
     if let Some(system) = messages.iter_mut().find(|m| m.role == "system") {
-        system.content.push_str(NOTE);
+        system.content.push_str(note);
     } else {
         messages.insert(0, ChatMessage {
             role: "system".to_string(),
-            content: NOTE.trim_start().to_string(),
+            content: note.trim_start().to_string(),
         });
     }
 }
@@ -9372,11 +9404,19 @@ pub async fn run_chat(
             })
         })
     });
+    // Explicit user opt-in: enabling rust_repl / bash_sandbox in the Agent
+    // Tools panel opts this session into automatic code execution even while
+    // credential-file protection stays active (the panel shows the risk).
+    let execution_opt_in = req
+        .tools_enabled
+        .iter()
+        .any(|t| t == "rust_repl" || t == "bash_sandbox");
     let tools = build_tool_schemas_inner(
         &req.tools_enabled,
         req.root_path.as_deref(),
         true,
         main_agent_config.as_ref(),
+        execution_opt_in,
     );
     let has_tools = !tools.is_empty();
     // Explain credential file protection to the model (all backends share this
@@ -9402,6 +9442,10 @@ pub async fn run_chat(
         context_length: context_len as u64,
         use_model_affinity: req.model_affinity.unwrap_or(true),
         depth: 0,
+        execution_opt_in: req
+            .tools_enabled
+            .iter()
+            .any(|t| t == "rust_repl" || t == "bash_sandbox"),
         memory: &subagent_memory,
     };
 
@@ -9454,6 +9498,7 @@ pub async fn run_chat(
                     root_path: req.root_path.as_deref(),
                     reasoning_retries: req.reasoning_retries.unwrap_or(THINKING_ONLY_MAX_RETRIES),
                     context_length: context_len as u64,
+                    execution_opt_in: runner.execution_opt_in,
                 };
                 ollama_chat_with_tools(&ollama_ctx, &messages, &tools, req.max_iterations, temperature, max_tokens, None, Some(&runner), &pre_spawned)
                     .await
@@ -10337,18 +10382,18 @@ mod tests {
         let args = serde_json::json!({"path": secret, "pattern": "PRIVATE", "content": "replacement", "edits": [{"old_text":"PRIVATE_FIXTURE_VALUE", "new_text":"replacement"}]});
         let client = reqwest::Client::new();
         for name in ["read_file", "grep", "edit", "write_file"] {
-            let result = execute_tool(name, &args, &client, &HashMap::new(), Some(root), "ollama").await;
+            let result = execute_tool(name, &args, &client, &HashMap::new(), Some(root), "ollama", false).await;
             assert!(result.is_err(), "{name} must reject protected files");
             assert!(!result.unwrap_err().contains("PRIVATE_FIXTURE_VALUE"));
         }
         assert!(compute_file_changes("edit", &args, Some(root)).is_empty());
         assert!(agent_file_policy::agent_read_file(secret.to_string_lossy().into()).is_err());
-        let search = execute_tool("grep", &serde_json::json!({"path":root,"pattern":"PRIVATE"}), &client, &HashMap::new(), Some(root), "ollama").await.unwrap();
+        let search = execute_tool("grep", &serde_json::json!({"path":root,"pattern":"PRIVATE"}), &client, &HashMap::new(), Some(root), "ollama", false).await.unwrap();
         assert!(!search.contains("PRIVATE_FIXTURE_VALUE"));
         // The manual editor still works, and rejected mutations did not touch the file.
         assert_eq!(read_file(secret.to_string_lossy().into()).unwrap(), "PRIVATE_FIXTURE_VALUE");
         for name in ["rust_repl", "bash_sandbox", "custom_command", "terminal_cli_aws"] {
-            let result = execute_tool(name, &serde_json::json!({"command":"echo bypass", "code":"println!(\"bypass\");"}), &client, &HashMap::new(), Some(root), "ollama").await;
+            let result = execute_tool(name, &serde_json::json!({"command":"echo bypass", "code":"println!(\"bypass\");"}), &client, &HashMap::new(), Some(root), "ollama", false).await;
             assert!(result.unwrap_err().contains("Automatic code execution is disabled"));
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -10579,12 +10624,39 @@ mod tests {
         assert!(build_tool_schemas(&["bash_sandbox".into()], None).is_empty());
     }
 
+    #[test]
+    fn test_execution_tool_schema_opt_in() {
+        // Without the opt-in the public builder strips execution tools…
+        assert!(build_tool_schemas(&["rust_repl".into()], None).is_empty());
+        // …but an explicit Agent Tools opt-in attaches them.
+        let schemas = build_tool_schemas_inner(&["rust_repl".into()], None, true, None, true);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "rust_repl");
+        let schemas = build_tool_schemas_inner(&["bash_sandbox".into()], None, true, None, true);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "bash_sandbox");
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_execution_opt_in() {
+        let client = reqwest::Client::new();
+        // Opt-in bypasses the policy gate: rust_repl proceeds past it and fails
+        // on the missing argument instead (no compile is ever attempted).
+        let result = execute_tool("rust_repl", &serde_json::json!({}), &client, &HashMap::new(), None, "ollama", true).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing required parameter"));
+        // The opt-in is scoped to rust_repl / bash_sandbox — every other
+        // execution tool stays blocked even with the opt-in set.
+        let result = execute_tool("custom_script", &serde_json::json!({"command":"echo hi"}), &client, &HashMap::new(), None, "ollama", true).await;
+        assert!(result.unwrap_err().contains("Automatic code execution is disabled"));
+    }
+
     // ---- execute_tool error paths (without network / fs) -----------------
     #[tokio::test]
     async fn test_execute_tool_unknown_name() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("unknown_tool", &args, &client, &HashMap::new(), None, "ollama").await;
+        let result = execute_tool("unknown_tool", &args, &client, &HashMap::new(), None, "ollama", false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Automatic code execution is disabled"));
     }
@@ -10593,7 +10665,7 @@ mod tests {
     async fn test_execute_tool_web_fetch_missing_url() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({});
-        let result = execute_tool("web_fetch", &args, &client, &HashMap::new(), None, "ollama").await;
+        let result = execute_tool("web_fetch", &args, &client, &HashMap::new(), None, "ollama", false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Missing required parameter"));
     }
@@ -10602,7 +10674,7 @@ mod tests {
     async fn test_execute_tool_read_file_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_file_xyzzy_123.test" });
-        let result = execute_tool("read_file", &args, &client, &HashMap::new(), None, "ollama").await;
+        let result = execute_tool("read_file", &args, &client, &HashMap::new(), None, "ollama", false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read"));
     }
@@ -10611,7 +10683,7 @@ mod tests {
     async fn test_execute_tool_list_directory_nonexistent() {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "path": "/tmp/nonexistent_dir_xyzzy_123" });
-        let result = execute_tool("list_directory", &args, &client, &HashMap::new(), None, "ollama").await;
+        let result = execute_tool("list_directory", &args, &client, &HashMap::new(), None, "ollama", false).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read dir"));
     }
@@ -10631,7 +10703,7 @@ mod tests {
         let args = serde_json::json!({ "path": path_str });
 
         // Local backend keeps the 8KB truncation.
-        let local = execute_tool("read_file", &args, &client, &HashMap::new(), None, "ollama")
+        let local = execute_tool("read_file", &args, &client, &HashMap::new(), None, "ollama", false)
             .await
             .unwrap();
         assert!(
@@ -10642,7 +10714,7 @@ mod tests {
         assert!(local.len() < content.len(), "local result should be truncated");
 
         // Cloud backend returns the full file.
-        let cloud = execute_tool("read_file", &args, &client, &HashMap::new(), None, "digitalocean")
+        let cloud = execute_tool("read_file", &args, &client, &HashMap::new(), None, "digitalocean", false)
             .await
             .unwrap();
         assert_eq!(
@@ -10697,7 +10769,7 @@ mod tests {
                 }),
             ),
         ]);
-        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama")
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama", false)
             .await
             .unwrap();
         assert!(
@@ -10712,7 +10784,7 @@ mod tests {
         let client = reqwest::Client::new();
         let args = serde_json::json!({ "query": "test query" });
         let tool_configs = HashMap::new();
-        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama").await;
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama", false).await;
         // Without tool_configs it defaults to DuckDuckGo. The request will fail
         // because the DuckDuckGo API is reachable but may return no results for
         // "test query" — either way we get a non-error string (not a tool error).
@@ -10740,7 +10812,7 @@ mod tests {
                 }),
             ),
         ]);
-        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama").await;
+        let result = execute_tool("web_search", &args, &client, &tool_configs, None, "ollama", false).await;
         // With a real-looking key the code attempts an HTTP call, which will
         // fail (invalid key) but the error message should come from the Brave
         // Search API path, NOT from DuckDuckGo.
@@ -10820,7 +10892,7 @@ mod tests {
         let secret_str = secret.to_string_lossy().to_string();
 
         let args = serde_json::json!({ "path": secret_str });
-        let result = execute_tool("read_file", &args, &client, &HashMap::new(), Some(&project_str), "ollama")
+        let result = execute_tool("read_file", &args, &client, &HashMap::new(), Some(&project_str), "ollama", false)
             .await;
         assert!(result.is_err(), "read outside root should be rejected, got: {:?}", result);
         assert!(result.unwrap_err().contains("outside the open folder"));
@@ -10840,7 +10912,7 @@ mod tests {
         let outside_str = outside.to_string_lossy().to_string();
 
         let args = serde_json::json!({ "path": outside_str });
-        let result = execute_tool("list_directory", &args, &client, &HashMap::new(), Some(&project_str), "ollama")
+        let result = execute_tool("list_directory", &args, &client, &HashMap::new(), Some(&project_str), "ollama", false)
             .await;
         assert!(result.is_err(), "listing outside root should be rejected, got: {:?}", result);
         assert!(result.unwrap_err().contains("outside the open folder"));
@@ -12306,7 +12378,7 @@ Fix the errors."#;
         let root_str = root.to_str().unwrap().to_string();
         // Agent WITHOUT the flag → no spawn_micro_agent tool.
         let plain = AgentConfig { name: "plain".into(), ..Default::default() };
-        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(&root_str), false, Some(&plain));
+        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(&root_str), false, Some(&plain), false);
         assert!(tools.iter().all(|t| t["function"]["name"].as_str() != Some("spawn_micro_agent")));
 
         // Agent WITH the flag + a .micro-agents dir present → tool added and
@@ -12317,7 +12389,7 @@ Fix the errors."#;
             allowed_micro_agents: vec!["rust-fixer".to_string(), "ts-type-fixer".to_string()],
             ..Default::default()
         };
-        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(&root_str), false, Some(&delegating));
+        let tools = build_tool_schemas_inner(&["read_file".to_string()], Some(&root_str), false, Some(&delegating), false);
         let micro = tools
             .iter()
             .find(|t| t["function"]["name"].as_str() == Some("spawn_micro_agent"));
@@ -12919,6 +12991,7 @@ Fix the errors."#;
             Some(root.to_str().unwrap()),
             false,
             None,
+            false,
         );
         let spawn = tools
             .iter()
@@ -12938,6 +13011,7 @@ Fix the errors."#;
             Some(root.to_str().unwrap()),
             true,
             None,
+            false,
         );
         let spawn = tools
             .iter()

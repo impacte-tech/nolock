@@ -31,16 +31,32 @@ const EXAMPLE_TOOL_FORM = {
   parameters: '{\n  "type": "object",\n  "properties": {\n    "url": {\n      "type": "string",\n      "description": "The URL to request (required)"\n    }\n  },\n  "required": ["url"]\n}',
 };
 
-const AVAILABLE_TOOLS = [
-  { id: "web_search", label: "Web Search", description: "Search the internet to discover relevant URLs before fetching them" },
-  { id: "web_fetch", label: "Web Fetch", description: "Fetch and read web page content from a specific URL" },
-  { id: "grep", label: "Grep", description: "Search file contents for a regex pattern — returns matching lines with file paths and line numbers" },
-  { id: "read_file", label: "Read File", description: "Read file contents from disk (truncated to 8KB for small models)" },
-  { id: "edit", label: "Edit File", description: "Targeted search-and-replace edits — much more token-efficient than rewriting entire files" },
-  { id: "write_file", label: "Write File", description: "Create and overwrite files on disk (prefer Edit for modifications)" },
-  { id: "list_directory", label: "List Directory", description: "Explore project structure" },
-  { id: "rust_repl", label: "Rust REPL", description: "Compile and run Rust code snippets — verify answers, test algorithms, compute results" },
-  { id: "bash_sandbox", label: "Bash Sandbox", description: "Execute shell commands in a sandbox — validate CLI answers, test scripts, run build tools" },
+const TOOL_GROUPS = [
+  {
+    label: "Web",
+    tools: [
+      { id: "web_search", label: "Web Search", description: "Search the internet for relevant URLs" },
+      { id: "web_fetch", label: "Web Fetch", description: "Read a web page's content" },
+    ],
+  },
+  {
+    label: "Files",
+    tools: [
+      { id: "grep", label: "Grep", description: "Regex search across file contents" },
+      { id: "read_file", label: "Read File", description: "Read file contents from disk" },
+      { id: "edit", label: "Edit File", description: "Targeted search-and-replace edits" },
+      { id: "write_file", label: "Write File", description: "Create or overwrite files" },
+      { id: "list_directory", label: "List Directory", description: "Explore project structure" },
+    ],
+  },
+  {
+    label: "Code execution",
+    warning: "Runs arbitrary code on this machine and can bypass credential-file protection. Enable only for trusted projects.",
+    tools: [
+      { id: "rust_repl", label: "Rust REPL", description: "Compile and run Rust snippets to verify answers" },
+      { id: "bash_sandbox", label: "Bash Sandbox", description: "Run shell commands to validate CLI answers" },
+    ],
+  },
 ];
 
 const WEB_SEARCH_PROVIDERS = [
@@ -174,39 +190,52 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
           <button onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
-          <span style={{ fontSize: 12, color: "var(--text-muted)", display: "block", marginBottom: 12, lineHeight: 1.5 }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)", display: "block", marginBottom: 8, lineHeight: 1.5 }}>
             {supportsTools
-              ? "Enable tools the AI agent can use during chat. The model decides when to call them."
+              ? "Choose what the agent may use during chat — the model decides when to call each tool."
               : "Tool calling is only supported with Ollama, llama.cpp, OpenRouter and DigitalOcean backends."}
           </span>
 
-          <p className="provider-help">Automatic code execution is disabled to protect credential files. Use your terminal for trusted commands.</p>
-          {AVAILABLE_TOOLS.map((tool) => (
-            <label
-              key={tool.id}
-              className="tool-toggle"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "6px 0",
-                opacity: supportsTools ? 1 : 0.4,
-                cursor: supportsTools ? "pointer" : "not-allowed",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={!["rust_repl", "bash_sandbox"].includes(tool.id) && toolsEnabled.includes(tool.id)}
-                onChange={() => supportsTools && toggleTool(tool.id)}
-                disabled={!supportsTools || ["rust_repl", "bash_sandbox"].includes(tool.id)}
-                style={{ accentColor: "var(--accent)" }}
-              />
-              <div>
-                <div style={{ fontSize: 13, color: "var(--text-primary)" }}>{tool.label}</div>
-                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{tool.description}</div>
+          {TOOL_GROUPS.map((group) => {
+            const anyEnabled = group.tools.some((t) => toolsEnabled.includes(t.id));
+            return (
+              <div key={group.label} style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--text-muted)", margin: "8px 0 2px" }}>
+                  {group.label}
+                </div>
+                {group.warning && anyEnabled && supportsTools && (
+                  <div style={{ fontSize: 11, lineHeight: 1.4, color: "#e0af68", background: "rgba(224,175,104,0.08)", border: "1px solid rgba(224,175,104,0.25)", borderRadius: 6, padding: "6px 8px", margin: "4px 0" }}>
+                    ⚠ {group.warning}
+                  </div>
+                )}
+                {group.tools.map((tool) => (
+                  <label
+                    key={tool.id}
+                    className="tool-toggle"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "5px 0",
+                      opacity: supportsTools ? 1 : 0.4,
+                      cursor: supportsTools ? "pointer" : "not-allowed",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={toolsEnabled.includes(tool.id)}
+                      onChange={() => supportsTools && toggleTool(tool.id)}
+                      style={{ accentColor: "var(--accent)" }}
+                    />
+                    <div>
+                      <div style={{ fontSize: 13, color: "var(--text-primary)" }}>{tool.label}</div>
+                      <div style={{ fontSize: 10, color: "var(--text-muted)" }}>{tool.description}</div>
+                    </div>
+                  </label>
+                ))}
               </div>
-            </label>
-          ))}
+            );
+          })}
 
           {/* --- Per-tool sub-configuration: web_search --- */}
           {supportsTools && toolsEnabled.includes("web_search") && (
