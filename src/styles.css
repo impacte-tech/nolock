@@ -5679,8 +5679,11 @@ select.field-input {
 .model-pull-path { display: block; overflow-wrap: anywhere; font-size: 11px; }
 
 
-.credential-providers { margin: 16px 0; padding: 16px; border: 1px solid var(--border); border-radius: 8px; }
-.credential-providers p, .credential-providers li { line-height: 1.6; overflow-wrap: anywhere; }
+.credential-providers { margin: 16px 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+.credential-providers h3 { margin: 0 0 6px; font-size: 13px; }
+.credential-providers p, .credential-providers li { line-height: 1.5; font-size: 12px; overflow-wrap: anywhere; }
+.credential-providers ol { margin: 6px 0; padding-left: 20px; }
+.credential-providers code, .credential-providers pre { font-size: 11px; }
 .provider-options { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .provider-options button[aria-pressed="true"] { outline: 2px solid var(--accent, #79b8ff); outline-offset: 2px; }
 .provider-command { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
