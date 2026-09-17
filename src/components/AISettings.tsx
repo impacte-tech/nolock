@@ -384,6 +384,12 @@ export default function AISettings({ visible, onClose }: Props) {
               </label>
             ))}
 
+            {supportsTools && ["rust_repl", "bash_sandbox"].some((t) => config.toolsEnabled.includes(t)) && (
+              <div style={{ fontSize: 11, lineHeight: 1.4, color: "#e0af68", background: "rgba(224,175,104,0.08)", border: "1px solid rgba(224,175,104,0.25)", borderRadius: 6, padding: "6px 8px", margin: "6px 0" }}>
+                ⚠ Code execution tools run arbitrary code and can bypass credential-file protection. Enable only for trusted projects.
+              </div>
+            )}
+
             {/* --- Per-tool sub-configuration: web_search --- */}
             {supportsTools && config.toolsEnabled.includes("web_search") && (
               <div style={{

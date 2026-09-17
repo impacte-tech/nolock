@@ -192,10 +192,24 @@ describe("ToolsPanel", () => {
 
   it("renders tool descriptions", () => {
     render(<ToolsPanel visible={true} onClose={vi.fn()} />);
-    expect(screen.getByText("Search the internet to discover relevant URLs before fetching them")).toBeInTheDocument();
-    expect(screen.getByText("Fetch and read web page content from a specific URL")).toBeInTheDocument();
-    expect(screen.getByText("Read file contents from disk (truncated to 8KB for small models)")).toBeInTheDocument();
+    expect(screen.getByText("Search the internet for relevant URLs")).toBeInTheDocument();
+    expect(screen.getByText("Read a web page's content")).toBeInTheDocument();
+    expect(screen.getByText("Read file contents from disk")).toBeInTheDocument();
     expect(screen.getByText("Explore project structure")).toBeInTheDocument();
+  });
+
+  it("allows enabling code execution tools and shows the risk warning", () => {
+    render(<ToolsPanel visible={true} onClose={vi.fn()} />);
+    const repl = screen.getByRole("checkbox", { name: /Rust REPL/ });
+    const bash = screen.getByRole("checkbox", { name: /Bash Sandbox/ });
+    // The old hard gate is gone: both execution tools are user-toggleable.
+    expect(repl).not.toBeDisabled();
+    expect(bash).not.toBeDisabled();
+    expect(screen.queryByText(/bypass credential-file protection/)).not.toBeInTheDocument();
+    fireEvent.click(repl);
+    expect(screen.getByText(/bypass credential-file protection/)).toBeInTheDocument();
+    fireEvent.click(repl);
+    expect(screen.queryByText(/bypass credential-file protection/)).not.toBeInTheDocument();
   });
 
   it("calls onClose when clicking close button", () => {
