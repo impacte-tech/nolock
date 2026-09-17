@@ -5687,6 +5687,9 @@ select.field-input {
 .provider-command pre { flex: 1; min-width: 0; overflow: auto; white-space: pre-wrap; padding: 10px; background: var(--bg-primary); border-radius: 4px; }
 .provider-help { color: var(--text-secondary); font-size: 12px; }
 .provider-protection { border-left: 3px solid var(--accent, #79b8ff); padding: 8px 12px; margin-top: 16px; font-size: 12px; }
+.provider-protection summary { cursor: pointer; font-weight: 600; color: var(--text-secondary); }
+.provider-protection ul { margin: 8px 0 0; padding-left: 18px; }
+.provider-protection li { margin-bottom: 4px; }
 
 /* Responsive workspace: panels become full-width drawers on small screens. */
 .mobile-workspace-nav, .nb-toolbar-toggle { display: none; }
