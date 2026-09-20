@@ -313,6 +313,16 @@ args!(ModelPullArgs { req: main_impl::model_pulls::PullRequest });
 args!(UploadFileArgs { directory: String, name: String, content: Vec<u8> });
 args!(KernelIdArgs { kernel_id: String });
 args!(CreateEnvArgs { root_path: String, name: String });
+args!(FaqSearchArgs {
+    root_path: String, backend: String, url: String, api_key: String,
+    query: String, config: main_impl::faq::FaqConfig,
+});
+args!(FaqUpsertArgs {
+    root_path: String, backend: String, url: String, api_key: String,
+    question: String, answer: String, config: main_impl::faq::FaqConfig,
+});
+args!(FaqRootArgs { root_path: String });
+args!(FaqDeleteArgs { root_path: String, question: String });
 
 // ---------------------------------------------------------------------------
 // The dispatcher — mirrors `tauri::generate_handler!` one-to-one
@@ -537,6 +547,28 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         "subagent_reset" => {
             state.memory.clear();
             Ok(serde_json::Value::Null)
+        }
+
+        // ----- FAQ learning-mode vector store (same code as desktop IPC)
+        "faq_search" => {
+            let a: FaqSearchArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_search(a.root_path, a.backend, a.url, a.api_key, a.query, a.config).await)
+        }
+        "faq_upsert" => {
+            let a: FaqUpsertArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_upsert(a.root_path, a.backend, a.url, a.api_key, a.question, a.answer, a.config).await)
+        }
+        "faq_list" => {
+            let a: FaqRootArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_list(a.root_path))
+        }
+        "faq_delete" => {
+            let a: FaqDeleteArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_delete(a.root_path, a.question))
+        }
+        "faq_stats" => {
+            let a: FaqRootArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_stats(a.root_path))
         }
 
         // ----- Terminal memory (same TermMemory state, web entry points)

@@ -56,7 +56,7 @@ import {
   composeChatSystemPrompt,
   getChatMode,
 } from "../lib/chatModes";
-import { readFaqReadme } from "../lib/faq";
+import { readFaqReadme, faqSearch, faqUpsert, getFaqConfig } from "../lib/faq";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -1039,6 +1039,22 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Learning mode: persist a completed question → answer exchange into the
+   * `.faq` semantic vector store (SQLite + sqlite-vec). Fire-and-forget — the
+   * chat UI must never block on embedding.
+   */
+  const learnFromExchange = (question: string, answer: string) => {
+    if (chatMode !== "learning" || !rootPath || !question.trim() || !answer.trim()) return;
+    void (async () => {
+      try {
+        await faqUpsert(rootPath, question.trim(), answer.trim(), getFaqConfig());
+      } catch (e) {
+        console.warn("[nolock] could not index the exchange into the .faq store:", e);
+      }
+    })();
+  };
   const sendingRef = useRef(false); // guards against concurrent sendMessage calls
   const stopRequestedRef = useRef(false); // set to true when user clicks stop
   const unlistenRef = useRef<(() => void) | null>(null); // stored stream-token unlisten callback
@@ -2448,21 +2464,43 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       contextParts.push(`Working directory: ${rootPath}`);
     }
 
-    // In Learning mode, surface the .faq knowledge base to the agent so it
-    // teaches toward the questions the user asks most often. The Learning
-    // system prompt directs the chat model to keep this file up to date; here
-    // we just read what it has recorded so far (best-effort — a missing or
-    // not-yet-created .faq simply yields no extra context).
+    // In Learning mode, retrieve the learned question → answer pairs most
+    // relevant to the CURRENT question from the semantic vector store
+    // (SQLite + sqlite-vec) and surface them to the agent so it teaches toward
+    // what the user has previously asked. Falls back to the plain-text
+    // `.faq/README.md` the chat model keeps when no index / embedding backend
+    // is available yet (best-effort — a missing or empty index yields no extra
+    // context).
     if (chatMode === "learning" && rootPath) {
+      let faqContext = "";
       try {
-        const faqKnowledge = (await readFaqReadme(rootPath)).trim();
-        if (faqKnowledge) {
-          contextParts.push(
-            `Ranked FAQ (questions this user asked most often — focus teaching on these):\n${faqKnowledge}`,
-          );
+        const hits = await faqSearch(rootPath, trimmed, getFaqConfig());
+        if (hits.length > 0) {
+          faqContext = hits.map((h) => {
+            const asked = h.similarity != null
+              ? `similarity ${(h.similarity * 100).toFixed(1)}%, asked ${h.frequency}×`
+              : `asked ${h.frequency}×`;
+            return `Q: ${h.question}\nA: ${h.answer}\n[${asked}]`;
+          }).join("\n\n");
         }
       } catch (e) {
-        console.warn("[nolock] failed to load the .faq knowledge base:", e);
+        console.warn("[nolock] learning-mode semantic FAQ search failed:", e);
+      }
+      if (faqContext) {
+        contextParts.push(
+          `Learned knowledge (past Q→A pairs most relevant to the current question — teach toward these and reuse accurate answers):\n${faqContext}`,
+        );
+      } else {
+        try {
+          const faqKnowledge = (await readFaqReadme(rootPath)).trim();
+          if (faqKnowledge) {
+            contextParts.push(
+              `Ranked FAQ (questions this user asked most often — focus teaching on these):\n${faqKnowledge}`,
+            );
+          }
+        } catch (e) {
+          console.warn("[nolock] failed to load the .faq knowledge base:", e);
+        }
       }
     }
 
@@ -2856,6 +2894,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           }
           return msgs;
         });
+        // Learning mode: index this completed Q→A exchange for future retrieval.
+        learnFromExchange(input, responseText);
         scanAgentCommands(result.tool_calls as unknown as HookToolCallLog[]);
       }
     } catch (e: any) {

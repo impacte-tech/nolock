@@ -36,6 +36,11 @@ nemo-fabric-core = "0.2.0"
 # its own transport; libsy only decides the target (see src/switchyard.rs).
 switchyard-libsy = "0.2.0"
 switchyard-protocol = "0.2.0"
+# FAQ/Learning-mode vector store — SQLite + sqlite-vec (embedding similarity
+# search). `bundled` compiles SQLite from source so no system sqlite is needed;
+# sqlite-vec compiles its C extension via cc automatically.
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+sqlite-vec = "=0.1.9"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

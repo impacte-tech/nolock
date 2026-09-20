@@ -196,6 +196,43 @@ pub async fn ai_complete(req: super::CompletionRequest) -> Result<String, String
     super::ai_complete(req).await
 }
 
+// ----- FAQ learning-mode vector store (same code as desktop IPC) -----------
+
+pub async fn faq_search(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    query: String,
+    config: super::faq::FaqConfig,
+) -> Result<Vec<super::faq::FaqEntry>, String> {
+    super::faq_search(root_path, backend, url, api_key, query, config).await
+}
+
+pub async fn faq_upsert(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    question: String,
+    answer: String,
+    config: super::faq::FaqConfig,
+) -> Result<super::faq::FaqEntry, String> {
+    super::faq_upsert(root_path, backend, url, api_key, question, answer, config).await
+}
+
+pub fn faq_list(root_path: String) -> Result<Vec<super::faq::FaqEntry>, String> {
+    super::faq_list(root_path)
+}
+
+pub fn faq_delete(root_path: String, question: String) -> Result<(), String> {
+    super::faq_delete(root_path, question)
+}
+
+pub fn faq_stats(root_path: String) -> Result<super::faq::FaqStats, String> {
+    super::faq_stats(root_path)
+}
+
 pub fn upload_file(directory: String, name: String, content: Vec<u8>) -> Result<String, String> {
     super::upload_file(directory, name, content)
 }
