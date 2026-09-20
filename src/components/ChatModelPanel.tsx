@@ -3,6 +3,12 @@ import ModelSelector from "./ModelSelector";
 import Select from "./Select";
 import NumberField, { parseInt10 } from "./NumberField";
 import { BACKENDS, resolveBackendUrl, getChatBackend, isCloudBackend } from "../lib/backends";
+import {
+  type ChatMode,
+  CHAT_MODES,
+  getChatMode,
+  setChatModeStored,
+} from "../lib/chatModes";
 
 interface Props {
   visible: boolean;
@@ -25,6 +31,10 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   // Reasoning-only retries — how many times nolock re-prompt after a thinking
   // model finishes with only reasoning and no answer / tool call.
   const [reasoningRetries, setReasoningRetries] = useState(8);
+  // Chat mode (Building / Planning / Learning) — the behavior of the main
+  // chat agent. Kept at the far bottom of the panel, right after the Chat
+  // Model settings.
+  const [chatMode, setChatMode] = useState<ChatMode>(() => getChatMode());
 
   useEffect(() => {
     if (!visible) return;
@@ -45,6 +55,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     setBackend(chatBackend);
     setApiKey(localStorage.getItem(`nolock.apiKey.${chatBackend}`) || "");
     setShowThinking(localStorage.getItem("nolock.showThinking") === "true");
+    setChatMode(getChatMode());
   }, [visible]);
 
   const selectBackend = (value: string) => {
@@ -62,6 +73,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.contextLength", String(contextLength));
     localStorage.setItem("nolock.showThinking", String(showThinking));
     localStorage.setItem("nolock.reasoningRetries", String(reasoningRetries));
+    setChatModeStored(chatMode);
     // Notify the bottom bar / any status readers that the chat provider/model
     // changed (a custom event; the `storage` event doesn't fire in the same
     // window in Tauri).
@@ -70,6 +82,8 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   };
 
   if (!visible) return null;
+
+  const isCloud = isCloudBackend(backend);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -134,7 +148,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
             <span>Creative (2.0)</span>
           </div>
 
-          {isCloudBackend(backend) ? (
+          {isCloud ? (
             <>
               <label className="field-label">Cloud Max Tokens</label>
               <NumberField
@@ -221,6 +235,23 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           </label>
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
             Display the model's reasoning trace while it generates a response. Only supported by thinking-capable models (Qwen3, DeepSeek-R1, etc.). Thinking tokens are shown transiently and not saved to the conversation.
+          </span>
+
+          {/* ================= Chat Mode (far bottom) ================= */}
+          <label className="field-label">Chat Mode</label>
+          <Select
+            value={chatMode}
+            onChange={(v) => setChatMode(v as ChatMode)}
+            options={CHAT_MODES.map((m) => ({ value: m.id, label: m.label }))}
+          />
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
+            {CHAT_MODES.find((m) => m.id === chatMode)?.description}
+          </span>
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+            In <strong>Learning</strong> mode the assistant teaches you about the project and
+            maintains a plain-text <code>.faq/</code> directory at the repository root — it
+            creates it, tracks every question you ask and rewrites a ranked README
+            (most-asked first) as the conversation goes.
           </span>
         </div>
         <div className="modal-footer">
