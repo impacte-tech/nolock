@@ -51,6 +51,12 @@ import {
   formatSessionTime,
 } from "../lib/sessions";
 import SessionSummary from "./SessionSummary";
+import {
+  type ChatMode,
+  composeChatSystemPrompt,
+  getChatMode,
+} from "../lib/chatModes";
+import { readFaqReadme } from "../lib/faq";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -1022,6 +1028,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  // Chat mode: "building" (default), "planning", or "learning". Changes the
+  // behavior of the main chat agent (see src/lib/chatModes.ts). Configured in
+  // the Chat Model panel; refreshed here when settings change.
+  const [chatMode, setChatMode] = useState<ChatMode>(() => getChatMode());
+  useEffect(() => {
+    const refresh = () => setChatMode(getChatMode());
+    window.addEventListener("nolock:settings-changed", refresh);
+    return () => window.removeEventListener("nolock:settings-changed", refresh);
+  }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false); // guards against concurrent sendMessage calls
@@ -1900,6 +1915,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         ? localStorage.getItem("nolock.chatCloudMaxTokens")
         : localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
+      // Keep the active mode's behavior block while continuing a response too.
+      const effectiveSystemPrompt = composeChatSystemPrompt(chatSystemPrompt, chatMode);
 
       // Build API messages from existing conversation history — completed hook
       // runs appear as system context so the model can reference what hooks
@@ -1936,7 +1953,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
         maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
         contextLength: maxTokens,
-        systemPrompt: chatSystemPrompt || undefined,
+        systemPrompt: effectiveSystemPrompt || undefined,
         rootPath: rootPath || undefined,
         maxIterations: 1,
         modelAffinity: getDigitalOceanModelAffinity(),
@@ -2033,7 +2050,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         setChatBusy(false);
       }
     }
-  }, [loading, messages, rootPath, showThinking, hookBusy, recordUsage]);
+  }, [loading, messages, rootPath, showThinking, hookBusy, recordUsage, chatMode]);
 
   /** Find the question (user message) that precedes an assistant message at a given index. */
   const findQuestionForAssistant = useCallback((assistantIndex: number): string => {
@@ -2431,6 +2448,24 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       contextParts.push(`Working directory: ${rootPath}`);
     }
 
+    // In Learning mode, surface the .faq knowledge base to the agent so it
+    // teaches toward the questions the user asks most often. The Learning
+    // system prompt directs the chat model to keep this file up to date; here
+    // we just read what it has recorded so far (best-effort — a missing or
+    // not-yet-created .faq simply yields no extra context).
+    if (chatMode === "learning" && rootPath) {
+      try {
+        const faqKnowledge = (await readFaqReadme(rootPath)).trim();
+        if (faqKnowledge) {
+          contextParts.push(
+            `Ranked FAQ (questions this user asked most often — focus teaching on these):\n${faqKnowledge}`,
+          );
+        }
+      } catch (e) {
+        console.warn("[nolock] failed to load the .faq knowledge base:", e);
+      }
+    }
+
     if (fileRefs.length > 0) {
       const expandedFilePaths = new Set<string>();
       for (const ref of fileRefs) {
@@ -2588,6 +2623,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         ? localStorage.getItem("nolock.chatCloudMaxTokens")
         : localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
+      // The current mode's behavior block wraps the user's custom system prompt
+      // (see src/lib/chatModes.ts — "building" injects nothing, so default
+      // behavior stays identical).
+      const effectiveSystemPrompt = composeChatSystemPrompt(chatSystemPrompt, chatMode);
 
       // ---- Check DPO trigger ----
       const dpoSettings = readRlhfSettings();
@@ -2636,7 +2675,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       // output, agent system prompts, and file context — everything the model
       // will actually receive.
       const payloadTokens = apiMessages.reduce((sum, m) => sum + countTokens(m.content), 0)
-        + countTokens(chatSystemPrompt || "");
+        + countTokens(effectiveSystemPrompt || "");
       setAccumulatedContextTokens(payloadTokens);
 
       // Shared request base
@@ -2651,7 +2690,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
         maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
         contextLength: maxTokens,
-        systemPrompt: chatSystemPrompt || undefined,
+        systemPrompt: effectiveSystemPrompt || undefined,
         rootPath: rootPath || undefined,
         maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
         modelAffinity: getDigitalOceanModelAffinity(),
@@ -2856,7 +2895,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         setChatBusy(false);
       }
     }
-  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy, recordUsage]);
+  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy, recordUsage, chatMode]);
 
   return (
     <div className="chat-panel" style={style}>
@@ -2908,7 +2947,14 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             Use <strong>/skill-name</strong> to run a skill command.<br />
             Use <strong>#tool-name</strong> to force the AI to use a specific tool.<br />
             Use <strong>!hook-name</strong> to run a hook.
-
+            {chatMode === "learning" && (
+              <>
+                <br /><br />
+                <strong>Learning mode is on.</strong> The agent will teach you about your
+                code, probe your understanding, and keep a ranked <strong>.faq/</strong>
+                knowledge base in the project root.
+              </>
+            )}
           </div>
         )}
         {messages.map((m, i) => (
