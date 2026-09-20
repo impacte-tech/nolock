@@ -18,6 +18,7 @@ pub mod pykernel;
 pub mod secrets;
 pub mod switchyard;
 pub mod terminal_memory;
+pub mod faq;
 pub mod agent_file_policy;
 pub mod credential_providers;
 pub mod validation;
@@ -36,6 +37,51 @@ pub mod web_bridge;
 #[tauri::command]
 fn upload_file(directory: String, name: String, content: Vec<u8>) -> Result<String, String> {
     uploads::save_upload(&directory, &name, &content)
+}
+
+// ---------------------------------------------------------------------------
+// FAQ learning-mode vector store commands
+// (see faq.rs — SQLite + sqlite-vec persistence for the learning chat mode)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn faq_search(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    query: String,
+    config: faq::FaqConfig,
+) -> Result<Vec<faq::FaqEntry>, String> {
+    faq::search(root_path, backend, url, api_key, query, config).await
+}
+
+#[tauri::command]
+async fn faq_upsert(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    question: String,
+    answer: String,
+    config: faq::FaqConfig,
+) -> Result<faq::FaqEntry, String> {
+    faq::upsert(root_path, backend, url, api_key, question, answer, config).await
+}
+
+#[tauri::command]
+fn faq_list(root_path: String) -> Result<Vec<faq::FaqEntry>, String> {
+    faq::list(root_path)
+}
+
+#[tauri::command]
+fn faq_delete(root_path: String, question: String) -> Result<(), String> {
+    faq::delete(root_path, question)
+}
+
+#[tauri::command]
+fn faq_stats(root_path: String) -> Result<faq::FaqStats, String> {
+    faq::stats(root_path)
 }
 
 #[tauri::command]
@@ -10350,6 +10396,11 @@ pub fn run() {
             secrets::store_secret,
             secrets::get_secret,
             secrets::delete_secret,
+            faq_search,
+            faq_upsert,
+            faq_list,
+            faq_delete,
+            faq_stats,
             notebook::python_list_envs,
             notebook::python_create_env,
             pykernel::kernel_start,
