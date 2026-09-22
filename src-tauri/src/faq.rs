@@ -759,6 +759,17 @@ fn cluster_ids(
     group_idx
 }
 
+/// Condense a question into a category label (short, single line).
+fn truncate_label(text: &str) -> String {
+    let mut out = text.trim().split_whitespace()
+        .collect::<Vec<&str>>().join(" ");
+    if out.chars().count() > 90 {
+        out = out.chars().take(90).collect();
+        out.push('…');
+    }
+    out
+}
+
 fn is_placeholder_category(name: &str) -> bool {
     let lower = name.trim().to_lowercase();
     if lower == "topic" { return true; }
@@ -867,9 +878,10 @@ fn entries_without_category(conn: &Connection) -> Result<Vec<FaqEntry>, String> 
 /// into groups of at most `top_k` similar questions (the "Top K" config),
 /// grouped only when their cosine similarity to the group's representative is
 /// at least `min_similarity` (default 0.85 — user-configurable). Each group
-/// becomes an auto-category with a pending label for the local model to name.
-/// Entries the user placed in ANY category are never re-clustered — they are
-/// treated as curated and stay put. Empty auto-categories are pruned.
+/// becomes an auto-category labeled with its most-asked question; the chat
+/// model's naming pass (needs_name) may later refine that label. Entries the
+/// user placed in ANY category are never re-clustered — they are treated as
+/// curated and stay put. Empty auto-categories are pruned.
 pub fn list_categories(
     root_path: String,
     mut top_k: u32,
@@ -930,7 +942,10 @@ pub fn list_categories(
         let auto_id = if let Some(id) = prior {
             id
         } else {
-            create_auto_category(&conn, &format!("Topic {}", leader.id))?
+            // Immediate, deterministic label: the group's most-asked question.
+            // Never a "Topic N" placeholder — the UI must always show a real
+            // name; the chat-model naming pass only refines it.
+            create_auto_category(&conn, &truncate_label(&leader.question))?
         };
         used_categories.insert(auto_id);
         for id in cluster.iter() {
@@ -1605,6 +1620,9 @@ mod tests {
         assert_eq!(list.categories.len(), 1);
         assert_eq!(list.categories[0].size, 1);
         assert_eq!(list.categories[0].is_auto, true);
+        // The category is labeled immediately with its most-asked question —
+        // never a "Topic N"/"Awaiting category name" placeholder.
+        assert_eq!(list.categories[0].name, "How does the tool loop stop?");
         assert_eq!(list.categories[0].entries.len(), 1);
         assert_eq!(list.categories[0].entries[0].question.as_str(), "How does the tool loop stop?");
         assert_eq!(list.uncategorized.len(), 0);
