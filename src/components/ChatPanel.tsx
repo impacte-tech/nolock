@@ -221,12 +221,24 @@ let globalOpenUrl: ((url: string) => void) | null = null;
 export function MarkdownContent({ text }: { text: string }) {
   const ref = useRef<HTMLDivElement>(null);
   // Mask math spans → parse markdown → restore math (protects \, and _ from
-  // markdown mangling) → KaTeX auto-render typesets the restored spans.
-  const { masked, restore } = protectMath(text);
-  const html = restore(marked.parse(masked) as string);
+  // markdown mangling). Memoized: streaming re-renders every token, and this
+  // keeps protectMath+marked off the hot path for unchanged messages.
+  const html = useMemo(() => {
+    const { masked, restore } = protectMath(text);
+    return restore(marked.parse(masked) as string);
+  }, [text]);
 
   useEffect(() => {
-    if (ref.current) renderMath(ref.current);
+    if (!ref.current || !text.trim()) return;
+    // Coalesce KaTeX while the text streams. Re-running the typesetter per
+    // token makes math flash raw↔typeset (each innerHTML update destroys the
+    // previous KaTeX DOM). A short trailing debounce typesets once the text
+    // settles — during a continuous stream the raw $…$ simply stays visible,
+    // then snaps to typeset math on pause/completion.
+    const timer = setTimeout(() => {
+      if (ref.current) renderMath(ref.current);
+    }, 120);
+    return () => clearTimeout(timer);
   }, [text]);
 
   return (

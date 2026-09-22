@@ -28,7 +28,7 @@ import * as monaco from "monaco-editor";
 import { AiInlineCompletionProvider } from "./inlineCompletion";
 import katex from "katex";
 import { marked } from "marked";
-import { MATH_DELIMITERS, protectMath } from "../lib/math";
+import { MATH_DELIMITERS, protectMath, ensureMathDelimiters } from "../lib/math";
 import "katex/dist/katex.min.css";
 // Inlined into exported HTML so the file is fully self-contained (offline).
 import katexCssRaw from "katex/dist/katex.min.css?raw";
@@ -146,6 +146,10 @@ function renderLatexHtml(latex: string): string {
       displayMode: true,
       throwOnError: false,
       output: "html",
+      // Long formulas (SymPy/latexify, big expressions) easily exceed KaTeX's
+      // default 1000 macro expansions — raise it so they typeset instead of
+      // silently falling back to raw LaTeX.
+      maxExpand: 100_000,
     });
   } catch {
     return escapeHtml(latex);
@@ -667,7 +671,9 @@ function buildExportHtml(nb: NotebookJson): string {
     if (o.output_type === "execute_result" || o.output_type === "display_data") {
       const data = (o.data ?? {}) as Record<string, unknown>;
       if (typeof data["text/latex"] === "string" && data["text/latex"]) {
-        return `<div class="out latex">${escapeHtml(String(data["text/latex"]))}</div>`;
+        // text/latex is delimiter-less TeX (e.g. `a \neq b`) — wrap it so the
+        // exported page's auto-renderer typesets it.
+        return `<div class="out latex">${escapeHtml(ensureMathDelimiters(String(data["text/latex"])))}</div>`;
       }
       if (typeof data["image/png"] === "string" && data["image/png"]) {
         return `<img class="out image" alt="output" src="data:image/png;base64,${data["image/png"]}" />`;
@@ -750,7 +756,7 @@ ${cellsHtml}
 <script>${safeScript(katexJsRaw)}</script>
 <script>${safeScript(katexAutoRenderRaw)}</script>
 <script>
-  renderMathInElement(document.body, { delimiters: ${JSON.stringify(MATH_DELIMITERS)}, throwOnError: false });
+  renderMathInElement(document.body, { delimiters: ${JSON.stringify(MATH_DELIMITERS)}, throwOnError: false, maxExpand: 100000 });
 </script>
 </body>
 </html>`;

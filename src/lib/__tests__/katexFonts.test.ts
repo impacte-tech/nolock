@@ -4,7 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import { inlineKatexFonts, KATEX_FONTS } from "../katexFonts";
-import { protectMath, renderMath } from "../math";
+import { protectMath, renderMath, ensureMathDelimiters } from "../math";
 
 describe("inlineKatexFonts", () => {
   it("replaces every relative font URL with a woff2 data URI", () => {
@@ -51,5 +51,23 @@ describe("protectMath", () => {
     const { masked, restore } = protectMath(src);
     expect(masked).toContain("@@NZMATH0@@");
     expect(restore(masked)).toBe(src);
+  });
+});
+
+describe("ensureMathDelimiters", () => {
+  it("wraps delimiter-less LaTeX such as \\neq in display math", () => {
+    expect(ensureMathDelimiters("a \\neq b")).toBe("$$a \\neq b$$");
+    expect(ensureMathDelimiters("  x^2 ")).toBe("$$x^2$$");
+  });
+
+  it("leaves already-delimited fragments untouched", () => {
+    expect(ensureMathDelimiters("$a \\neq b$")).toBe("$a \\neq b$");
+    expect(ensureMathDelimiters("$$x^2$$")).toBe("$$x^2$$");
+    expect(ensureMathDelimiters("\\[x^2\\]")).toBe("\\[x^2\\]");
+    expect(ensureMathDelimiters("\\(x\\)")).toBe("\\(x\\)");
+  });
+
+  it("empties stay empty", () => {
+    expect(ensureMathDelimiters("   ")).toBe("");
   });
 });

@@ -7133,7 +7133,13 @@ fn build_initial_messages(
                  Do NOT try to compute or simulate it in prose.",
             );
         }
-        let extra = if tool_names.contains(&"web_search") || tool_names.contains(&"web_fetch") {
+        let has_kb = tool_names.contains(&"knowledge_base");
+        let has_web = tool_names.contains(&"web_search") || tool_names.contains(&"web_fetch");
+        let extra = if has_kb {
+            " Consult THIS project's `knowledge_base` FIRST to reuse what has already been \
+             taught about this project. Only fall back to web_search / web_fetch when the \
+             knowledge base has nothing relevant or the topic is external/current."
+        } else if has_web {
             " To answer questions about external or current information, use web_search / web_fetch."
         } else {
             ""
