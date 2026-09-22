@@ -33,6 +33,12 @@ const EXAMPLE_TOOL_FORM = {
 
 const TOOL_GROUPS = [
   {
+    label: "Knowledge",
+    tools: [
+      { id: "knowledge_base", label: "Knowledge Base (.faq)", description: "Search the project's learning index for past question/answer pairs" },
+    ],
+  },
+  {
     label: "Web",
     tools: [
       { id: "web_search", label: "Web Search", description: "Search the internet for relevant URLs" },

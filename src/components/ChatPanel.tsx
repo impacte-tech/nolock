@@ -51,6 +51,12 @@ import {
   formatSessionTime,
 } from "../lib/sessions";
 import SessionSummary from "./SessionSummary";
+import {
+  type ChatMode,
+  composeChatSystemPrompt,
+  getChatMode,
+} from "../lib/chatModes";
+import { readFaqReadme, faqSearch, faqUpsert, getFaqConfig } from "../lib/faq";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -69,6 +75,28 @@ function buildProvidersMap(): Record<string, { url: string; apiKey: string }> {
     };
   }
   return providers;
+}
+
+/**
+ * Seed the per-request `knowledge_base` tool config from the chat provider so
+ * the backend can embed queries against the same endpoint/model the chat uses.
+ */
+function seedKnowledgeBaseToolConfig(
+  toolConfigs: Record<string, Record<string, string>>,
+  toolsEnabled: string[],
+  backend: string,
+  url: string,
+  apiKey: string,
+): Record<string, Record<string, string>> {
+  if (toolsEnabled.includes("knowledge_base")) {
+    toolConfigs.knowledge_base = {
+      backend,
+      url,
+      apiKey: apiKey || "",
+      embeddingModel: getFaqConfig().embeddingModel,
+    };
+  }
+  return toolConfigs;
 }
 
 export interface FileChangeEdit {
@@ -193,12 +221,24 @@ let globalOpenUrl: ((url: string) => void) | null = null;
 export function MarkdownContent({ text }: { text: string }) {
   const ref = useRef<HTMLDivElement>(null);
   // Mask math spans → parse markdown → restore math (protects \, and _ from
-  // markdown mangling) → KaTeX auto-render typesets the restored spans.
-  const { masked, restore } = protectMath(text);
-  const html = restore(marked.parse(masked) as string);
+  // markdown mangling). Memoized: streaming re-renders every token, and this
+  // keeps protectMath+marked off the hot path for unchanged messages.
+  const html = useMemo(() => {
+    const { masked, restore } = protectMath(text);
+    return restore(marked.parse(masked) as string);
+  }, [text]);
 
   useEffect(() => {
-    if (ref.current) renderMath(ref.current);
+    if (!ref.current || !text.trim()) return;
+    // Coalesce KaTeX while the text streams. Re-running the typesetter per
+    // token makes math flash raw↔typeset (each innerHTML update destroys the
+    // previous KaTeX DOM). A short trailing debounce typesets once the text
+    // settles — during a continuous stream the raw $…$ simply stays visible,
+    // then snaps to typeset math on pause/completion.
+    const timer = setTimeout(() => {
+      if (ref.current) renderMath(ref.current);
+    }, 120);
+    return () => clearTimeout(timer);
   }, [text]);
 
   return (
@@ -1022,8 +1062,39 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  // Chat mode: "building" (default), "planning", or "learning". Changes the
+  // behavior of the main chat agent (see src/lib/chatModes.ts). Configured in
+  // the Chat Model panel; refreshed here when settings change.
+  const [chatMode, setChatMode] = useState<ChatMode>(() => getChatMode());
+  useEffect(() => {
+    const refresh = () => setChatMode(getChatMode());
+    window.addEventListener("nolock:settings-changed", refresh);
+    return () => window.removeEventListener("nolock:settings-changed", refresh);
+  }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Learning mode: persist every completed question → answer exchange into the
+   * `.faq` vector store (SQLite + sqlite-vec). Only LEARNING mode accumulates
+   * knowledge — Building/Planning conversations are not indexed. Fire-and-
+   * forget — the chat UI must never block on embedding.
+   */
+  const [kbStatus, setKbStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const learnFromExchange = (question: string, answer: string, model: string, backend: string) => {
+    if (chatMode !== "learning" || !rootPath || !question.trim() || !answer.trim()) return;
+    void (async () => {
+      try {
+        await faqUpsert(rootPath, question.trim(), answer.trim(), model, backend, getFaqConfig());
+        setKbStatus({
+          ok: true,
+          text: `Indexed to Knowledge Base (.faq): "${question.trim().slice(0, 40)}${question.trim().length > 40 ? "…" : ""}"`,
+        });
+      } catch (e: any) {
+        setKbStatus({ ok: false, text: `Knowledge Base error: ${String(e)}` });
+      }
+    })();
+  };
   const sendingRef = useRef(false); // guards against concurrent sendMessage calls
   const stopRequestedRef = useRef(false); // set to true when user clicks stop
   const unlistenRef = useRef<(() => void) | null>(null); // stored stream-token unlisten callback
@@ -1900,6 +1971,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         ? localStorage.getItem("nolock.chatCloudMaxTokens")
         : localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
+      // Keep the active mode's behavior block while continuing a response too.
+      const effectiveSystemPrompt = composeChatSystemPrompt(chatSystemPrompt, chatMode);
 
       // Build API messages from existing conversation history — completed hook
       // runs appear as system context so the model can reference what hooks
@@ -1923,7 +1996,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
       const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
-      const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
+      const toolConfigs = seedKnowledgeBaseToolConfig(
+        JSON.parse(toolConfigRaw) as Record<string, Record<string, string>>,
+        toolsEnabled,
+        backend,
+        url,
+        apiKey || "",
+      );
 
       const reqBase = {
         backend,
@@ -1936,7 +2015,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
         maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
         contextLength: maxTokens,
-        systemPrompt: chatSystemPrompt || undefined,
+        systemPrompt: effectiveSystemPrompt || undefined,
         rootPath: rootPath || undefined,
         maxIterations: 1,
         modelAffinity: getDigitalOceanModelAffinity(),
@@ -2033,7 +2112,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         setChatBusy(false);
       }
     }
-  }, [loading, messages, rootPath, showThinking, hookBusy, recordUsage]);
+  }, [loading, messages, rootPath, showThinking, hookBusy, recordUsage, chatMode]);
 
   /** Find the question (user message) that precedes an assistant message at a given index. */
   const findQuestionForAssistant = useCallback((assistantIndex: number): string => {
@@ -2431,6 +2510,46 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       contextParts.push(`Working directory: ${rootPath}`);
     }
 
+    // In Learning mode, retrieve the learned question → answer pairs most
+    // relevant to the CURRENT question from the semantic vector store
+    // (SQLite + sqlite-vec) and surface them to the agent so it teaches toward
+    // what the user has previously asked. Falls back to the plain-text
+    // `.faq/README.md` the chat model keeps when no index / embedding backend
+    // is available yet (best-effort — a missing or empty index yields no extra
+    // context).
+    if (chatMode === "learning" && rootPath) {
+      let faqContext = "";
+      try {
+        const hits = await faqSearch(rootPath, trimmed, getFaqConfig());
+        if (hits.length > 0) {
+          faqContext = hits.map((h) => {
+            const asked = h.similarity != null
+              ? `similarity ${(h.similarity * 100).toFixed(1)}%, asked ${h.frequency}×`
+              : `asked ${h.frequency}×`;
+            return `Q: ${h.question}\nA: ${h.answer}\n[${asked}]`;
+          }).join("\n\n");
+        }
+      } catch (e) {
+        console.warn("[nolock] learning-mode semantic FAQ search failed:", e);
+      }
+      if (faqContext) {
+        contextParts.push(
+          `Learned knowledge (past Q→A pairs most relevant to the current question — teach toward these and reuse accurate answers):\n${faqContext}`,
+        );
+      } else {
+        try {
+          const faqKnowledge = (await readFaqReadme(rootPath)).trim();
+          if (faqKnowledge) {
+            contextParts.push(
+              `Ranked FAQ (questions this user asked most often — focus teaching on these):\n${faqKnowledge}`,
+            );
+          }
+        } catch (e) {
+          console.warn("[nolock] failed to load the .faq knowledge base:", e);
+        }
+      }
+    }
+
     if (fileRefs.length > 0) {
       const expandedFilePaths = new Set<string>();
       for (const ref of fileRefs) {
@@ -2580,7 +2699,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       // Read per-tool configuration from localStorage (always the most current,
       // written synchronously by setSecret; keychain may hold stale data).
       const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
-      const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
+      const toolConfigs = seedKnowledgeBaseToolConfig(
+        JSON.parse(toolConfigRaw) as Record<string, Record<string, string>>,
+        toolsEnabled,
+        backend,
+        url,
+        apiKey || "",
+      );
 
       // Read chat model parameters from localStorage
       const chatTemperature = localStorage.getItem("nolock.chatTemperature");
@@ -2588,6 +2713,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         ? localStorage.getItem("nolock.chatCloudMaxTokens")
         : localStorage.getItem("nolock.chatMaxTokens");
       const chatSystemPrompt = localStorage.getItem("nolock.chatSystemPrompt");
+      // The current mode's behavior block wraps the user's custom system prompt
+      // (see src/lib/chatModes.ts — "building" injects nothing, so default
+      // behavior stays identical).
+      const effectiveSystemPrompt = composeChatSystemPrompt(chatSystemPrompt, chatMode);
 
       // ---- Check DPO trigger ----
       const dpoSettings = readRlhfSettings();
@@ -2636,7 +2765,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       // output, agent system prompts, and file context — everything the model
       // will actually receive.
       const payloadTokens = apiMessages.reduce((sum, m) => sum + countTokens(m.content), 0)
-        + countTokens(chatSystemPrompt || "");
+        + countTokens(effectiveSystemPrompt || "");
       setAccumulatedContextTokens(payloadTokens);
 
       // Shared request base
@@ -2651,7 +2780,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         temperature: chatTemperature ? parseFloat(chatTemperature) : undefined,
         maxTokens: chatMaxTokens ? parseInt(chatMaxTokens, 10) : undefined,
         contextLength: maxTokens,
-        systemPrompt: chatSystemPrompt || undefined,
+        systemPrompt: effectiveSystemPrompt || undefined,
         rootPath: rootPath || undefined,
         maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
         modelAffinity: getDigitalOceanModelAffinity(),
@@ -2817,6 +2946,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           }
           return msgs;
         });
+        // Learning mode: index this completed Q→A exchange for future retrieval.
+        learnFromExchange(input, responseText, routedModelRef.current || "", backend);
         scanAgentCommands(result.tool_calls as unknown as HookToolCallLog[]);
       }
     } catch (e: any) {
@@ -2856,7 +2987,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         setChatBusy(false);
       }
     }
-  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy, recordUsage]);
+  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy, recordUsage, chatMode]);
 
   return (
     <div className="chat-panel" style={style}>
@@ -2908,7 +3039,17 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             Use <strong>/skill-name</strong> to run a skill command.<br />
             Use <strong>#tool-name</strong> to force the AI to use a specific tool.<br />
             Use <strong>!hook-name</strong> to run a hook.
-
+            {chatMode === "learning" && (
+              <>
+                <br /><br />
+                <strong>Learning mode is on.</strong> The agent will teach you about your
+                code, probe your understanding, and keep a ranked <strong>.faq/</strong>
+                knowledge base in the project root.
+                <br />
+                Every answered exchange is indexed automatically — open{" "}
+                <strong>AI Integrations → Knowledge Base…</strong> to review, group or edit it.
+              </>
+            )}
           </div>
         )}
         {messages.map((m, i) => (
@@ -3312,6 +3453,30 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             <button className="context-warning-action" onClick={() => void startNewSession()}>
               New session
             </button>
+          </div>
+        )}
+
+        {kbStatus && (
+          <div
+            className={`kb-status${kbStatus.ok ? "" : " error"}`}
+            role="status"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 11,
+              padding: "4px 10px",
+              marginBottom: 4,
+              borderRadius: 6,
+              color: kbStatus.ok ? "var(--text-muted)" : "var(--danger, #c0392b)",
+              background: kbStatus.ok ? "var(--bg-secondary)" : "var(--danger-bg, rgba(192,57,43,0.08))",
+              border: kbStatus.ok ? "1px solid var(--border)" : "1px solid rgba(192,57,43,0.3)",
+              maxWidth: "100%",
+              wordBreak: "break-word",
+            }}
+          >
+            <span>{kbStatus.ok ? "✓" : "✕"}</span>
+            <span>{kbStatus.text}</span>
           </div>
         )}
 

@@ -40,6 +40,12 @@ describe("ChatPanel", () => {
     expect(screen.getByText("\u00D7")).toBeInTheDocument(); // close button
   });
 
+  it("announces Learning mode on the empty state when configured", () => {
+    localStorage.setItem("nolock.chatMode", "learning");
+    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
+    expect(screen.getByText(/Learning mode is on/)).toBeInTheDocument();
+  });
+
   it("calls onClose when close button is clicked", () => {
     const onClose = vi.fn();
     render(<ChatPanel onClose={onClose} onOpenUrl={vi.fn()} />);

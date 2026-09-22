@@ -3,6 +3,20 @@ import ModelSelector from "./ModelSelector";
 import Select from "./Select";
 import NumberField, { parseInt10 } from "./NumberField";
 import { BACKENDS, resolveBackendUrl, getChatBackend, isCloudBackend } from "../lib/backends";
+import {
+  type ChatMode,
+  CHAT_MODES,
+  getChatMode,
+  setChatModeStored,
+} from "../lib/chatModes";
+import {
+  getFaqConfig,
+  setFaqConfig,
+  FAQ_RANKING_OPTIONS,
+  DEFAULT_EMBEDDING_MODEL,
+  type FaqLearningConfig,
+  type FaqRanking,
+} from "../lib/faq";
 
 interface Props {
   visible: boolean;
@@ -25,6 +39,13 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   // Reasoning-only retries — how many times nolock re-prompt after a thinking
   // model finishes with only reasoning and no answer / tool call.
   const [reasoningRetries, setReasoningRetries] = useState(8);
+  // Chat mode (Building / Planning / Learning) — the behavior of the main
+  // chat agent. Kept at the far bottom of the panel, right after the Chat
+  // Model settings.
+  const [chatMode, setChatMode] = useState<ChatMode>(() => getChatMode());
+  // Learning-mode retrieval config (embedding model, ranking, topK). Only
+  // surfaced when Chat Mode = Learning.
+  const [faqConfig, setFaqConfigState] = useState<FaqLearningConfig>(() => getFaqConfig());
 
   useEffect(() => {
     if (!visible) return;
@@ -45,6 +66,8 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     setBackend(chatBackend);
     setApiKey(localStorage.getItem(`nolock.apiKey.${chatBackend}`) || "");
     setShowThinking(localStorage.getItem("nolock.showThinking") === "true");
+    setChatMode(getChatMode());
+    setFaqConfigState(getFaqConfig());
   }, [visible]);
 
   const selectBackend = (value: string) => {
@@ -62,6 +85,8 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.contextLength", String(contextLength));
     localStorage.setItem("nolock.showThinking", String(showThinking));
     localStorage.setItem("nolock.reasoningRetries", String(reasoningRetries));
+    setChatModeStored(chatMode);
+    setFaqConfig(faqConfig);
     // Notify the bottom bar / any status readers that the chat provider/model
     // changed (a custom event; the `storage` event doesn't fire in the same
     // window in Tauri).
@@ -70,6 +95,8 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   };
 
   if (!visible) return null;
+
+  const isCloud = isCloudBackend(backend);
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -134,7 +161,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
             <span>Creative (2.0)</span>
           </div>
 
-          {isCloudBackend(backend) ? (
+          {isCloud ? (
             <>
               <label className="field-label">Cloud Max Tokens</label>
               <NumberField
@@ -222,6 +249,98 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
             Display the model's reasoning trace while it generates a response. Only supported by thinking-capable models (Qwen3, DeepSeek-R1, etc.). Thinking tokens are shown transiently and not saved to the conversation.
           </span>
+
+          {/* ================= Chat Mode (far bottom) ================= */}
+          <label className="field-label">Chat Mode</label>
+          <Select
+            value={chatMode}
+            onChange={(v) => setChatMode(v as ChatMode)}
+            options={CHAT_MODES.map((m) => ({ value: m.id, label: m.label }))}
+          />
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
+            {CHAT_MODES.find((m) => m.id === chatMode)?.description}
+          </span>
+          <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+            In <strong>Learning</strong> mode the assistant teaches you about the project and
+            maintains a plain-text <code>.faq/</code> directory at the repository root — it
+            creates it, tracks every question you ask and rewrites a ranked README
+            (most-asked first) as the conversation goes. Every exchange is also indexed
+            in a local SQLite + sqlite-vec vector store so past questions can be retrieved
+            semantically on later turns.
+          </span>
+
+          {/* ============ Learning-mode retrieval config ============ */}
+          {chatMode === "learning" && (
+            <>
+              <label className="field-label">Embedding Model</label>
+              <ModelSelector
+                provider={backend}
+                url={resolveBackendUrl(backend)}
+                apiKey={apiKey}
+                value={faqConfig.embeddingModel}
+                onChange={(v) => setFaqConfigState({ ...faqConfig, embeddingModel: v })}
+                placeholder={DEFAULT_EMBEDDING_MODEL}
+                label="Embedding Model"
+              />
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+                Model used to embed learned exchanges and queries for semantic retrieval.
+                Must be an embedding-capable model on the selected provider
+                (e.g. <code>nomic-embed-text</code> on Ollama). Default{" "}
+                <strong>{DEFAULT_EMBEDDING_MODEL}</strong>.
+              </span>
+
+              <label className="field-label">Ranking</label>
+              <Select
+                value={faqConfig.ranking}
+                onChange={(v) => setFaqConfigState({ ...faqConfig, ranking: v as FaqRanking })}
+                options={FAQ_RANKING_OPTIONS}
+              />
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+                How retrieved past exchanges are ordered before being injected into
+                the conversation: semantic (cosine similarity), frequency (most-asked),
+                or a hybrid blend of both.
+              </span>
+
+              <label className="field-label">Top K (retrieved exchanges)</label>
+              <NumberField
+                value={faqConfig.topK}
+                onChange={(n) => setFaqConfigState({ ...faqConfig, topK: n ?? 3 })}
+                min={1}
+                max={10}
+                step={1}
+                emptyValue={3}
+                parse={parseInt10}
+                style={{ width: 90 }}
+              />
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+                How many matching question → answer pairs are injected into the chat
+                context on each turn in Learning mode.
+              </span>
+
+              <label className="field-label">
+                Category similarity threshold: {faqConfig.minSimilarity.toFixed(2)}
+              </label>
+              <input
+                type="range"
+                min="0.5"
+                max="1"
+                step="0.01"
+                value={faqConfig.minSimilarity}
+                onChange={(e) => setFaqConfigState({ ...faqConfig, minSimilarity: parseFloat(e.target.value) })}
+                style={{ width: "100%", accentColor: "var(--accent)" }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-muted)", marginBottom: 4 }}>
+                <span>Looser (0.50)</span>
+                <span>Stricter (1.00)</span>
+              </div>
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+                Minimum cosine similarity for a question to join a category's auto-group.
+                Questions at or above this threshold (compared with the category's most-asked
+                question) land in the same category; anything below starts a new one.
+                Higher values group fewer, more similar questions.
+              </span>
+            </>
+          )}
         </div>
         <div className="modal-footer">
           <button className="btn-secondary" onClick={onClose}>Cancel</button>

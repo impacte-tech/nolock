@@ -23,15 +23,41 @@ export const MATH_DELIMITERS: Array<{ left: string; right: string; display: bool
 ];
 
 /**
+ * Ensure a LaTeX fragment carries math delimiters the KaTeX auto-renderer will
+ * typeset. Raw `text/latex` outputs (SymPy, latexify, …) ship delimiter-less
+ * TeX such as `a \neq b`; auto-render only triggers inside `$…$`/`$$…$$`/
+ * `\[…\]`/`\(…\)`, so we wrap bare fragments in display `$$…$$` (display math
+ * is the standard for rendered outputs). Already-delimited fragments pass
+ * through untouched.
+ */
+export function ensureMathDelimiters(latex: string): string {
+  const s = latex.trim();
+  if (!s) return s;
+  if (
+    s.startsWith("$$") ||
+    s.startsWith("\\[") ||
+    s.startsWith("$") ||
+    s.startsWith("\\(")
+  ) {
+    return s;
+  }
+  return `$$${s}$$`;
+}
+
+/**
  * Best-effort KaTeX auto-render over a rendered markdown element.
  * Never throws — on any failure the plain markdown stays visible.
  * <code>/<pre> blocks are ignored by default, so `$` in code stays literal.
+ * `maxExpand` is raised well above KaTeX's default (1000) so LONG formulas
+ * (many \frac / \text expansions, e.g. 10%+ more context in a big cell) still
+ * typeset instead of silently falling back to raw LaTeX.
  */
 export function renderMath(element: HTMLElement, options?: AutoRenderOptions): void {
   try {
     renderMathInElement(element, {
       delimiters: MATH_DELIMITERS,
       throwOnError: false,
+      maxExpand: 100_000,
       ...options,
     });
   } catch {

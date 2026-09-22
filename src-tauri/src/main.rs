@@ -18,6 +18,7 @@ pub mod pykernel;
 pub mod secrets;
 pub mod switchyard;
 pub mod terminal_memory;
+pub mod faq;
 pub mod agent_file_policy;
 pub mod credential_providers;
 pub mod validation;
@@ -36,6 +37,103 @@ pub mod web_bridge;
 #[tauri::command]
 fn upload_file(directory: String, name: String, content: Vec<u8>) -> Result<String, String> {
     uploads::save_upload(&directory, &name, &content)
+}
+
+// ---------------------------------------------------------------------------
+// FAQ learning-mode vector store commands
+// (see faq.rs — SQLite + sqlite-vec persistence for the learning chat mode)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn faq_search(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    query: String,
+    config: faq::FaqConfig,
+) -> Result<Vec<faq::FaqEntry>, String> {
+    faq::search(root_path, backend, url, api_key, query, config).await
+}
+
+#[tauri::command]
+async fn faq_upsert(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    question: String,
+    answer: String,
+    model: String,
+    config: faq::FaqConfig,
+) -> Result<faq::FaqEntry, String> {
+    faq::upsert(root_path, backend, url, api_key, question, answer, model, config).await
+}
+
+#[tauri::command]
+fn faq_list(root_path: String) -> Result<Vec<faq::FaqEntry>, String> {
+    faq::list(root_path)
+}
+
+#[tauri::command]
+fn faq_delete(root_path: String, question: String) -> Result<(), String> {
+    faq::delete(root_path, question)
+}
+
+#[tauri::command]
+fn faq_stats(root_path: String) -> Result<faq::FaqStats, String> {
+    faq::stats(root_path)
+}
+
+#[tauri::command]
+fn faq_list_categories(root_path: String, top_k: u32, min_similarity: f64) -> Result<faq::FaqCategoryList, String> {
+    faq::list_categories(root_path, top_k, min_similarity)
+}
+
+#[tauri::command]
+fn faq_create_category(root_path: String, name: String) -> Result<faq::FaqCategory, String> {
+    faq::create_category(root_path, name)
+}
+
+#[tauri::command]
+fn faq_rename_category(root_path: String, id: u64, name: String) -> Result<(), String> {
+    faq::rename_category(root_path, id, name)
+}
+
+#[tauri::command]
+fn faq_delete_category(root_path: String, id: u64) -> Result<(), String> {
+    faq::delete_category(root_path, id)
+}
+
+#[tauri::command]
+fn faq_set_entry_category(
+    root_path: String,
+    entry_id: u64,
+    category_id: Option<u64>,
+) -> Result<(), String> {
+    faq::set_entry_category(root_path, entry_id, category_id)
+}
+
+#[tauri::command]
+async fn faq_update_entry(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    id: u64,
+    question: String,
+    answer: String,
+    category_id: Option<u64>,
+    model: String,
+    config: faq::FaqConfig,
+) -> Result<faq::FaqEntry, String> {
+    faq::update_entry(root_path, backend, url, api_key, id, question, answer, category_id, model, config)
+        .await
+}
+
+#[tauri::command]
+fn faq_delete_entry(root_path: String, id: u64) -> Result<(), String> {
+    faq::delete_entry(root_path, id)
 }
 
 #[tauri::command]
@@ -5417,6 +5515,29 @@ fn build_tool_schemas_inner(
             }
         }));
     }
+    if enabled.contains(&"knowledge_base".to_string()) {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "knowledge_base",
+                "description": "Search THIS project's learning index (.faq) — the past question/answer pairs the user asked and the explanations they were given. Use this to recall what was already taught about this codebase, the user's past questions, and your own prior answers, instead of re-explaining. Returns the most relevant question/answer pairs, ranked.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The question or topic to look up in the project's learning index"
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "How many matching question/answer pairs to return (default 3)"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }));
+    }
     if enabled.contains(&"grep".to_string()) {
         let grep_desc = match root_path {
             Some(rp) => format!(
@@ -6462,6 +6583,71 @@ async fn execute_tool(
                 }
             }
         }
+        "knowledge_base" => {
+            let query = args["query"]
+                .as_str()
+                .ok_or("Missing required parameter: query")?;
+            let top_k = args["top_k"].as_u64().unwrap_or(3);
+            eprintln!("[nolock] tool knowledge_base query={} top_k={}", query, top_k);
+            let root = root_path.unwrap_or("");
+            if root.trim().is_empty() {
+                return Err("The knowledge_base tool needs an open project folder (the .faq learning index is per-project).".into());
+            }
+            let Some(cfg) = tool_configs.get("knowledge_base") else {
+                return Ok("The knowledge_base tool is not configured. Enable 'Knowledge Base' in AI Integrations → Agent Tools and make sure a chat model + embedding model are set.".to_string());
+            };
+            let backend = cfg["backend"].as_str().unwrap_or("ollama");
+            let url = cfg["url"].as_str().unwrap_or("http://localhost:11434");
+            let api_key = cfg["apiKey"].as_str().unwrap_or("");
+            let model = cfg["embeddingModel"].as_str().unwrap_or(faq::DEFAULT_EMBEDDING_MODEL);
+            let config = faq::FaqConfig {
+                embedding_model: model.to_string(),
+                ranking: faq::RANKING_HYBRID.into(),
+                top_k: top_k as u32,
+                min_similarity: faq::DEFAULT_SIMILARITY_THRESHOLD,
+            };
+            let results = faq::search(
+                root.to_string(),
+                backend.to_string(),
+                url.to_string(),
+                api_key.to_string(),
+                query.to_string(),
+                config,
+            )
+            .await?;
+            if results.is_empty() {
+                return Ok("No matching entries in the knowledge base.".to_string());
+            }
+            let mut out: Vec<String> = Vec::new();
+            let mut shown: u32 = 0;
+            for r in results.iter() {
+                if shown >= 8 {
+                    break;
+                }
+                let category = r.category_id.map(|id| format!(" [category id {}]", id));
+                let relevance = r
+                    .similarity
+                    .map(|s| format!(", similarity {:.0}%", s * 100.0))
+                    .unwrap_or_default();
+                let provenance = match (&r.model, &r.backend) {
+                    (Some(m), Some(b)) => format!(", answered by {} ({})", m, b),
+                    (Some(m), None) => format!(", answered by {}", m),
+                    _ => "".to_string(),
+                };
+                out.push(format!(
+                    "{}. Q: {}\n   A: {}{}\n   [asked {}×{}]{}",
+                    shown + 1,
+                    r.question,
+                    r.answer,
+                    category.unwrap_or_default(),
+                    r.frequency,
+                    relevance,
+                    provenance,
+                ));
+                shown += 1;
+            }
+            Ok(format!("Knowledge base results:\n\n{}", out.join("\n\n")))
+        }
         "rust_repl" => {
             let code = args["code"]
                 .as_str()
@@ -6947,7 +7133,13 @@ fn build_initial_messages(
                  Do NOT try to compute or simulate it in prose.",
             );
         }
-        let extra = if tool_names.contains(&"web_search") || tool_names.contains(&"web_fetch") {
+        let has_kb = tool_names.contains(&"knowledge_base");
+        let has_web = tool_names.contains(&"web_search") || tool_names.contains(&"web_fetch");
+        let extra = if has_kb {
+            " Consult THIS project's `knowledge_base` FIRST to reuse what has already been \
+             taught about this project. Only fall back to web_search / web_fetch when the \
+             knowledge base has nothing relevant or the topic is external/current."
+        } else if has_web {
             " To answer questions about external or current information, use web_search / web_fetch."
         } else {
             ""
@@ -10350,6 +10542,18 @@ pub fn run() {
             secrets::store_secret,
             secrets::get_secret,
             secrets::delete_secret,
+            faq_search,
+            faq_upsert,
+            faq_list,
+            faq_delete,
+            faq_stats,
+            faq_list_categories,
+            faq_create_category,
+            faq_rename_category,
+            faq_delete_category,
+            faq_set_entry_category,
+            faq_update_entry,
+            faq_delete_entry,
             notebook::python_list_envs,
             notebook::python_create_env,
             pykernel::kernel_start,
@@ -10597,6 +10801,18 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(required.iter().any(|v| v == "query"));
+    }
+
+    #[test]
+    fn test_knowledge_base_schema_has_query_and_top_k() {
+        let schemas = build_tool_schemas(&["knowledge_base".into()], None);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["function"]["name"], "knowledge_base");
+        let required = schemas[0]["function"]["parameters"]["required"]
+            .as_array()
+            .unwrap();
+        assert!(required.iter().any(|v| v == "query"));
+        assert!(schemas[0]["function"]["parameters"]["properties"]["top_k"].is_object());
     }
 
     #[test]

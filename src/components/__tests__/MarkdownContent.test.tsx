@@ -127,6 +127,23 @@ describe("MarkdownContent", () => {
     expect(screen.getByText("cost = $5")).toBeInTheDocument();
   });
 
+  it("renders the \\neq glyph (not-equal) in inline math", async () => {
+    const { container } = render(<MarkdownContent text={"$a \\neq b$"} />);
+    await waitForCond(() => container.querySelector(".katex") !== null);
+    const mo = Array.from(container.querySelectorAll("math mo"));
+    expect(mo.some((el) => el.textContent === "≠")).toBe(true);
+  });
+
+  it("coalesces KaTeX while the text streams (no per-token re-typeset)", async () => {
+    // The typesetter runs on a trailing debounce so a streaming message with
+    // LaTeX doesn't flash raw↔typeset on every token.
+    const { container } = render(<MarkdownContent text={"$a^2$"} />);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(container.querySelector(".katex")).toBeFalsy();
+    await waitForCond(() => container.querySelector(".katex") !== null);
+    expect(container.querySelector(".katex")).toBeTruthy();
+  });
+
   it("typesets the Lagrange-style formula with _ subscripts and \\, (regression)", async () => {
     const f2 =
       "$\\displaystyle \\mathbb{P}_{x \\sim D}\\left[f(x) \\neq g(x)\\right] = " +

@@ -58,7 +58,7 @@ pub fn agent_check_file_access(path: String) -> Result<(), String> { check_path(
 // file/context exclusions or query an unlocked password-manager session.
 pub fn restricted(_root: Option<&str>) -> bool { true }
 pub fn automatic_tool_allowed(name: &str) -> bool {
-    matches!(name, "read_file" | "write_file" | "edit" | "grep" | "list_directory" | "web_search" | "web_fetch")
+    matches!(name, "read_file" | "write_file" | "edit" | "grep" | "list_directory" | "web_search" | "web_fetch" | "knowledge_base")
 }
 
 #[cfg(test)]

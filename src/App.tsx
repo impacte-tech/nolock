@@ -16,6 +16,7 @@ import FIMModelPanel from "./components/FIMModelPanel";
 import ToolsPanel from "./components/ToolsPanel";
 import RlhfPanel from "./components/RlhfPanel";
 import SwitchyardPanel from "./components/SwitchyardPanel";
+import FaqPanel from "./components/FaqPanel";
 import EditorSettings from "./components/EditorSettings";
 import TerminalMemoryOverlay from "./components/TerminalMemoryOverlay";
 import AgentManager from "./components/AgentManager";
@@ -124,6 +125,7 @@ export default function App() {
 
   // --- Hooks ---
   const [showHooks, setShowHooks] = useState(false);
+  const [showFaq, setShowFaq] = useState(false);
 
   // --- Search ---
   const [showSearch, setShowSearch] = useState(false);
@@ -726,6 +728,12 @@ export default function App() {
             setShowRlhf(true);
             return;
           }
+          if (e.key === "l") {
+            e.preventDefault();
+            setChordPrefix(null);
+            setShowFaq(true);
+            return;
+          }
         }
 
         if (chordPrefix === "B") {
@@ -906,6 +914,7 @@ export default function App() {
         if (showTermMemory) {
           setShowTermMemory(false);
         }
+        if (showFaq) setShowFaq(false);
         return;
       }
     };
@@ -914,7 +923,7 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, showModelProviders, showChatModel, showFIMModel, showTools, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch]);
+  }, [openFolder, refreshFolder, createTerminal, showModelProviders, showChatModel, showFIMModel, showTools, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch, showFaq]);
 
   // --- Menu ---
   const menus = [
@@ -969,6 +978,7 @@ export default function App() {
         { label: "Hooks...", action: () => setShowHooks(true), shortcut: "Ctrl+A, H" },
         { label: "Human Feedback (RLHF)...", action: () => setShowRlhf(true), shortcut: "Ctrl+A, R" },
         { label: "Switchyard Router...", action: () => setShowSwitchyard(true), shortcut: "Ctrl+A, Y" },
+        { label: "Knowledge Base...", action: () => setShowFaq(true), shortcut: "Ctrl+A, L" },
       ],
     },
     {
@@ -1001,7 +1011,7 @@ export default function App() {
       {chordPrefix && (
         <div className="chord-hint">
           {chordPrefix === "A" ? (
-            <>Waiting for second key... (press <strong>O</strong> for Chat, <strong>G</strong> for Agents, <strong>H</strong> for Hooks, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF)</>
+            <>Waiting for second key... (press <strong>O</strong> for Chat, <strong>G</strong> for Agents, <strong>H</strong> for Hooks, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF, <strong>L</strong> for .faq)</>
           ) : chordPrefix === "T" ? (
             <>Waiting for second key... (press <strong>O</strong> for Terminal, <strong>M</strong> for Memory)</>
           ) : chordPrefix === "B" ? (
@@ -1289,6 +1299,7 @@ export default function App() {
       <HooksPanel visible={showHooks} onClose={() => setShowHooks(false)} rootPath={rootPath} />
       <RlhfPanel visible={showRlhf} onClose={() => setShowRlhf(false)} />
       <SwitchyardPanel visible={showSwitchyard} onClose={() => setShowSwitchyard(false)} rootPath={rootPath} />
+      <FaqPanel visible={showFaq} onClose={() => setShowFaq(false)} rootPath={rootPath} />
       <EditorSettings visible={showSettings} onClose={() => setShowSettings(false)} />
 
       <AgentManager

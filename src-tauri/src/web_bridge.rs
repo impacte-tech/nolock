@@ -196,6 +196,88 @@ pub async fn ai_complete(req: super::CompletionRequest) -> Result<String, String
     super::ai_complete(req).await
 }
 
+// ----- FAQ learning-mode vector store (same code as desktop IPC) -----------
+
+pub async fn faq_search(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    query: String,
+    config: super::faq::FaqConfig,
+) -> Result<Vec<super::faq::FaqEntry>, String> {
+    super::faq_search(root_path, backend, url, api_key, query, config).await
+}
+
+pub async fn faq_upsert(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    question: String,
+    answer: String,
+    model: String,
+    config: super::faq::FaqConfig,
+) -> Result<super::faq::FaqEntry, String> {
+    super::faq_upsert(root_path, backend, url, api_key, question, answer, model, config).await
+}
+
+pub fn faq_list(root_path: String) -> Result<Vec<super::faq::FaqEntry>, String> {
+    super::faq_list(root_path)
+}
+
+pub fn faq_delete(root_path: String, question: String) -> Result<(), String> {
+    super::faq_delete(root_path, question)
+}
+
+pub fn faq_stats(root_path: String) -> Result<super::faq::FaqStats, String> {
+    super::faq_stats(root_path)
+}
+
+pub fn faq_list_categories(root_path: String, top_k: u32, min_similarity: f64) -> Result<super::faq::FaqCategoryList, String> {
+    super::faq_list_categories(root_path, top_k, min_similarity)
+}
+
+pub fn faq_create_category(root_path: String, name: String) -> Result<super::faq::FaqCategory, String> {
+    super::faq_create_category(root_path, name)
+}
+
+pub fn faq_rename_category(root_path: String, id: u64, name: String) -> Result<(), String> {
+    super::faq_rename_category(root_path, id, name)
+}
+
+pub fn faq_delete_category(root_path: String, id: u64) -> Result<(), String> {
+    super::faq_delete_category(root_path, id)
+}
+
+pub fn faq_set_entry_category(
+    root_path: String,
+    entry_id: u64,
+    category_id: Option<u64>,
+) -> Result<(), String> {
+    super::faq_set_entry_category(root_path, entry_id, category_id)
+}
+
+pub async fn faq_update_entry(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    id: u64,
+    question: String,
+    answer: String,
+    category_id: Option<u64>,
+    model: String,
+    config: super::faq::FaqConfig,
+) -> Result<super::faq::FaqEntry, String> {
+    super::faq_update_entry(root_path, backend, url, api_key, id, question, answer, category_id, model, config)
+        .await
+}
+
+pub fn faq_delete_entry(root_path: String, id: u64) -> Result<(), String> {
+    super::faq_delete_entry(root_path, id)
+}
+
 pub fn upload_file(directory: String, name: String, content: Vec<u8>) -> Result<String, String> {
     super::upload_file(directory, name, content)
 }
