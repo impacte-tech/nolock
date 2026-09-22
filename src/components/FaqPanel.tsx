@@ -63,6 +63,13 @@ function textMatches(needle: string, ...haystacks: string[]): boolean {
   return haystacks.some((h) => h.toLowerCase().includes(q));
 }
 
+/** Legacy auto-categories were created as "Topic"/"Topic N" placeholders —
+ * while a naming pass is pending, their representative question is shown
+ * instead so the UI never displays a numbered placeholder. */
+function isNumberedTopic(name: string): boolean {
+  return /^(topic(\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten))?)$/i.test(name.trim());
+}
+
 export default function FaqPanel({ visible, onClose, rootPath }: Props) {
   const [list, setList] = useState<FaqCategoryList | null>(null);
   const [stats, setStats] = useState<FaqStats | null>(null);
@@ -213,7 +220,13 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
 
   const categories = (list?.categories ?? []).map((category) => ({
     ...category,
-    name: category.needsName ? "Awaiting category name" : category.name,
+    // Auto-categories carry a real (question-derived) label from creation;
+    // only legacy "Topic N" placeholder rows fall back to their representative
+    // question while the model naming pass is pending. The UI never shows
+    // "Awaiting category name".
+    name: category.needsName && isNumberedTopic(category.name)
+      ? (category.entries[0]?.question ?? category.name)
+      : category.name,
   }));
   const uncategorized = list?.uncategorized ?? [];
   const totalCount = stats?.count ?? 0;
@@ -578,7 +591,7 @@ function CategorySection(props: CategoryProps) {
             <strong style={{ fontSize: 12, flex: 1 }}>{category.name}</strong>
             {category.isAuto ? (
               <span style={{ fontSize: 10, color: "var(--text-muted)", border: "1px solid var(--border)", borderRadius: 4, padding: "1px 5px" }}>
-                Automatic
+                {category.needsName ? "Automatic (naming…)" : "Automatic"}
               </span>
             ) : (
               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>manual</span>
@@ -587,7 +600,7 @@ function CategorySection(props: CategoryProps) {
               {category.size} question{category.size === 1 ? "" : "s"}
             </span>
             <button type="button" className="btn-secondary" onClick={() => {
-              props.setRenameName(category.needsName ? "" : category.name);
+              props.setRenameName(category.name);
               props.setRenaming(category.id);
             }} disabled={props.busy}>
               Rename

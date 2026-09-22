@@ -254,15 +254,18 @@ describe("FaqPanel", () => {
     expect(screen.getByLabelText("Edit question")).toHaveValue("My edited question");
   });
 
-  it("shows pending naming explicitly and reports failures without presenting a numbered topic", async () => {
+  it("labels a pending legacy topic with its question and reports naming failures", async () => {
     const state = setup();
     state.categories[0].name = "Topic 5";
     state.categories[0].needsName = true;
     render(<FaqPanel visible onClose={vi.fn()} rootPath="/repo" />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Select a chat model");
-    expect(screen.getAllByText("Awaiting category name").length).toBeGreaterThan(0);
+    // The pending legacy placeholder shows its representative question — never
+    // a numbered topic and never "Awaiting category name".
+    expect(screen.queryByText("Awaiting category name")).not.toBeInTheDocument();
     expect(screen.queryByText("Topic 5")).not.toBeInTheDocument();
-    expect(screen.getByText("How does the tool loop stop?")).toBeInTheDocument();
+    expect(screen.getAllByText("How does the tool loop stop?").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Automatic \(naming…\)/).length).toBeGreaterThan(0);
   });
 
   it("replaces a pending topic with the main chat model's name without a manual refresh", async () => {
@@ -275,8 +278,8 @@ describe("FaqPanel", () => {
       ? Promise.resolve("Agent execution") : implementation(cmd, args));
     render(<FaqPanel visible onClose={vi.fn()} rootPath="/repo" />);
     await waitFor(() => expect(screen.getAllByText("Agent execution").length).toBeGreaterThan(0));
-    expect(screen.queryByText("Awaiting category name")).not.toBeInTheDocument();
     expect(screen.queryByText("Topic 5")).not.toBeInTheDocument();
+    expect(screen.queryByText("Awaiting category name")).not.toBeInTheDocument();
     expect(mockInvoke).toHaveBeenCalledWith("faq_category_name", { req: expect.objectContaining({ model: "my-chat-model" }) });
   });
 
