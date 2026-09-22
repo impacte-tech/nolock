@@ -978,7 +978,7 @@ export default function App() {
         { label: "Hooks...", action: () => setShowHooks(true), shortcut: "Ctrl+A, H" },
         { label: "Human Feedback (RLHF)...", action: () => setShowRlhf(true), shortcut: "Ctrl+A, R" },
         { label: "Switchyard Router...", action: () => setShowSwitchyard(true), shortcut: "Ctrl+A, Y" },
-        { label: "Learned Knowledge (.faq)...", action: () => setShowFaq(true), shortcut: "Ctrl+A, L" },
+        { label: "Knowledge Base...", action: () => setShowFaq(true), shortcut: "Ctrl+A, L" },
       ],
     },
     {

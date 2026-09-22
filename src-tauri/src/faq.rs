@@ -14,6 +14,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -37,6 +38,8 @@ fn ranking_default() -> String {
 const META_DIM_KEY: &str = "embedding_dim";
 /// Meta key recording the embedding model id used for the stored vectors.
 const META_MODEL_KEY: &str = "embedding_model";
+/// Meta key recording the last indexing failure (diagnostics for the .faq UI).
+const META_LAST_ERROR_KEY: &str = "last_error";
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -53,6 +56,11 @@ pub struct FaqConfig {
     pub ranking: String,
     #[serde(default)]
     pub top_k: u32,
+    /// Minimum cosine similarity (0.0–1.0) for auto-categorization: questions
+    /// more similar than this (to a category's most-asked representative) are
+    /// grouped into the same category. Default 0.85.
+    #[serde(default)]
+    pub min_similarity: f64,
 }
 
 impl FaqConfig {
@@ -61,6 +69,7 @@ impl FaqConfig {
             embedding_model: DEFAULT_EMBEDDING_MODEL.into(),
             ranking: ranking_default(),
             top_k: 3,
+            min_similarity: DEFAULT_SIMILARITY_THRESHOLD,
         }
     }
 
@@ -78,6 +87,9 @@ impl FaqConfig {
         if self.top_k == 0 || self.top_k > 50 {
             self.top_k = 3;
         }
+        if self.min_similarity <= 0.0 || self.min_similarity > 1.0 {
+            self.min_similarity = DEFAULT_SIMILARITY_THRESHOLD;
+        }
     }
 }
 
@@ -92,6 +104,14 @@ pub struct FaqEntry {
     pub frequency: u64,
     pub last_asked: u64,
     pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<u64>,
+    /// Model that produced the answer (switchyard routing etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider/backend the answer came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +125,30 @@ pub struct FaqStats {
     pub dimension: u32,
     pub model: String,
     pub db_path: String,
+    /// Last failed indexing attempt, e.g. the embedding provider rejecting the
+    /// model. Surfaces in the .faq panel so failures are never silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// A category holding learned question → answer pairs. `is_auto` marks clusters
+/// the application creates automatically from the "Top K" config.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaqCategory {
+    pub id: u64,
+    pub name: String,
+    pub is_auto: bool,
+    pub size: u64,
+    pub entries: Vec<FaqEntry>,
+}
+
+/// The full knowledge-base layout: categories plus entries not in any category.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaqCategoryList {
+    pub categories: Vec<FaqCategory>,
+    pub uncategorized: Vec<FaqEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,26 +197,64 @@ fn open_db(root_path: &str) -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Create the text + metadata tables (idempotent).
+/// Create the text + metadata tables (idempotent) and migrate existing
+/// databases (add category/model/backend columns) before building the index
+/// that references them.
 fn ensure_text_schema(conn: &Connection) -> Result<(), String> {
+    // 1) Create the newest table shapes (no-ops on pre-existing databases).
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS faq_meta (
            key   TEXT PRIMARY KEY,
            value TEXT NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS faq_entries (
+         CREATE TABLE IF NOT EXISTS faq_categories (
            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-           question   TEXT NOT NULL UNIQUE,
-           answer     TEXT NOT NULL DEFAULT '',
-           frequency  INTEGER NOT NULL DEFAULT 1,
-           last_asked INTEGER NOT NULL DEFAULT 0,
-           created_at INTEGER NOT NULL DEFAULT 0,
-           updated_at INTEGER NOT NULL DEFAULT 0
+           name       TEXT NOT NULL UNIQUE,
+           is_auto    INTEGER NOT NULL DEFAULT 0,
+           created_at INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS faq_entries (
+           id          INTEGER PRIMARY KEY AUTOINCREMENT,
+           question    TEXT NOT NULL UNIQUE,
+           answer      TEXT NOT NULL DEFAULT '',
+           frequency   INTEGER NOT NULL DEFAULT 1,
+           last_asked  INTEGER NOT NULL DEFAULT 0,
+           created_at  INTEGER NOT NULL DEFAULT 0,
+           updated_at  INTEGER NOT NULL DEFAULT 0,
+           category_id INTEGER REFERENCES faq_categories(id) ON DELETE SET NULL,
+           model       TEXT,
+           backend     TEXT
          );
          CREATE INDEX IF NOT EXISTS idx_faq_entries_frequency
            ON faq_entries (frequency DESC, last_asked DESC);",
     )
-    .map_err(|e| format!("Failed to create FAQ schema: {}", e))
+    .map_err(|e| format!("Failed to create FAQ schema: {}", e))?;
+
+    // 2) Migrate OLD databases that predate a column. Existing tables don't get
+    //    the column from CREATE TABLE IF NOT EXISTS, so add it explicitly.
+    //    "duplicate column name" simply means the column already exists.
+    for (column, ddl) in [
+        ("category_id", "INTEGER REFERENCES faq_categories(id)"),
+        ("model", "TEXT"),
+        ("backend", "TEXT"),
+    ] {
+        if let Err(e) = conn.execute(
+            &format!("ALTER TABLE faq_entries ADD COLUMN {} {}", column, ddl),
+            rusqlite::params!(),
+        ) {
+            if !format!("{}", e).contains("duplicate column") {
+                return Err(format!("Failed to migrate FAQ schema: {}", e));
+            }
+        }
+    }
+
+    // 3) Indexes that depend on the migrated column — created only now.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_faq_entries_category
+           ON faq_entries (category_id);",
+    )
+    .map_err(|e| format!("Failed to create FAQ schema: {}", e))?;
+    Ok(())
 }
 
 fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, String> {
@@ -319,19 +401,34 @@ fn row_to_entry(row: &rusqlite::Row) -> FaqEntry {
         frequency: row.get_unwrap::<usize, i64>(3) as u64,
         last_asked: row.get_unwrap::<usize, i64>(4) as u64,
         updated_at: row.get_unwrap::<usize, i64>(5) as u64,
+        category_id: None,
+        model: None,
+        backend: None,
         similarity: None,
         score: None,
     }
 }
 
 const ENTRY_SELECT: &str =
-    "SELECT id, question, answer, frequency, last_asked, updated_at FROM faq_entries";
+    "SELECT id, question, answer, frequency, last_asked, updated_at, category_id, model, backend FROM faq_entries";
+
+/// Full row mapper including the nullable category/model/backend columns.
+fn row_to_entry_full(row: &rusqlite::Row) -> FaqEntry {
+    let mut entry = row_to_entry(row);
+    entry.category_id = row
+        .get::<usize, Option<i64>>(6)
+        .ok()
+        .and_then(|v| v.map(|c| c as u64));
+    entry.model = row.get::<usize, Option<String>>(7).ok().and_then(|v| v);
+    entry.backend = row.get::<usize, Option<String>>(8).ok().and_then(|v| v);
+    entry
+}
 
 fn entry_by_id(conn: &Connection, id: u64) -> Result<FaqEntry, String> {
     conn.query_row(
         &format!("{} WHERE id = ?", ENTRY_SELECT),
         rusqlite::params!(id as i64),
-        |row| Ok(row_to_entry(row)),
+        |row| Ok(row_to_entry_full(row)),
     )
     .map_err(|e| format!("Failed to read FAQ entry: {}", e))
 }
@@ -346,12 +443,85 @@ fn top_by_frequency(conn: &Connection, limit: u32) -> Result<Vec<FaqEntry>, Stri
     let mut out: Vec<FaqEntry> = Vec::new();
     loop {
         match iter.next() {
-            Ok(Some(row)) => out.push(row_to_entry(row)),
+            Ok(Some(row)) => out.push(row_to_entry_full(row)),
             Ok(None) => break,
             Err(e) => return Err(format!("Failed to iterate FAQ entries: {}", e)),
         }
     }
     Ok(out)
+}
+
+/// Insert or update the plain-text Q→A row (frequency bumps on re-ask).
+/// `model`/`backend` record which provider produced the answer (empty = N/A).
+/// The vector index is optional — learning is never lost when embedding is
+/// temporarily unavailable.
+fn insert_text_entry(
+    conn: &Connection,
+    question: &str,
+    answer: &str,
+    model: &str,
+    backend: &str,
+) -> Result<FaqEntry, String> {
+    ensure_text_schema(conn)?;
+    let now = now_secs();
+    let model_opt: Option<String> = if model.trim().is_empty() {
+        None
+    } else {
+        Some(model.trim().to_string())
+    };
+    let backend_opt: Option<String> = if backend.trim().is_empty() {
+        None
+    } else {
+        Some(backend.trim().to_string())
+    };
+
+    conn.execute(
+        "INSERT INTO faq_entries (question, answer, frequency, last_asked, created_at, updated_at, model, backend)
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+         ON CONFLICT(question) DO UPDATE SET
+           answer       = excluded.answer,
+           frequency    = faq_entries.frequency + 1,
+           last_asked   = excluded.last_asked,
+           updated_at   = excluded.updated_at,
+           category_id  = faq_entries.category_id,
+           model        = excluded.model,
+           backend      = excluded.backend",
+        rusqlite::params!(&question, &answer, now as i64, now as i64, now as i64, &model_opt, &backend_opt),
+    )
+    .map_err(|e| format!("Failed to upsert FAQ entry: {}", e))?;
+
+    let id = conn
+        .query_row(
+            "SELECT id FROM faq_entries WHERE question = ?",
+            rusqlite::params!(&question),
+            |row| Ok(row.get_unwrap::<usize, i64>(0)),
+        )
+        .map_err(|e| format!("Failed to read FAQ entry id: {}", e))?;
+    entry_by_id(conn, id as u64)
+}
+
+/// Index an entry's embedding into the vec0 table (replacing any old vector).
+fn index_vector(
+    conn: &Connection,
+    id: u64,
+    embedding: &Vec<f64>,
+    model: &str,
+) -> Result<(), String> {
+    ensure_vec_schema(conn, embedding)?;
+    if !model.trim().is_empty() {
+        meta_set(conn, META_MODEL_KEY, model.to_string())
+            .map_err(|e| format!("Failed to write FAQ meta: {}", e))?;
+    }
+    let vec_json = vec_to_json(embedding)?;
+    let _ = conn
+        .execute_batch(&format!("DELETE FROM faq_vec WHERE rowid = {}", id))
+        .map_err(|e| format!("Failed to replace FAQ vector: {}", e))?;
+    conn.execute(
+        "INSERT INTO faq_vec (rowid, embedding) VALUES (?, ?)",
+        rusqlite::params!(id as i64, &vec_json),
+    )
+    .map_err(|e| format!("Failed to index FAQ vector: {}", e))
+    .map(|_| ())
 }
 
 /// Persist (or update) a question → answer pair given an already-computed
@@ -362,45 +532,11 @@ fn upsert_embedded(
     answer: &str,
     embedding: &Vec<f64>,
     model: &str,
+    backend: &str,
 ) -> Result<FaqEntry, String> {
-    ensure_text_schema(conn)?;
-    ensure_vec_schema(conn, embedding)?;
-    let now = now_secs();
-
-    conn.execute(
-        "INSERT INTO faq_entries (question, answer, frequency, last_asked, created_at, updated_at)
-         VALUES (?, ?, 1, ?, ?, ?)
-         ON CONFLICT(question) DO UPDATE SET
-           answer       = excluded.answer,
-           frequency    = faq_entries.frequency + 1,
-           last_asked   = excluded.last_asked,
-           updated_at   = excluded.updated_at",
-        rusqlite::params!(&question, &answer, now as i64, now as i64, now as i64),
-    )
-    .map_err(|e| format!("Failed to upsert FAQ entry: {}", e))?;
-    if !model.trim().is_empty() {
-        meta_set(conn, META_MODEL_KEY, model.to_string())
-            .map_err(|e| format!("Failed to write FAQ meta: {}", e))?;
-    }
-
-    let id = conn
-        .query_row(
-            "SELECT id FROM faq_entries WHERE question = ?",
-            rusqlite::params!(&question),
-            |row| Ok(row.get_unwrap::<usize, i64>(0)),
-        )
-        .map_err(|e| format!("Failed to read FAQ entry id: {}", e))?;
-    let vec_json = vec_to_json(embedding)?;
-    let _ = conn
-        .execute_batch(&format!("DELETE FROM faq_vec WHERE rowid = {}", id))
-        .map_err(|e| format!("Failed to replace FAQ vector: {}", e))?;
-    conn.execute(
-        "INSERT INTO faq_vec (rowid, embedding) VALUES (?, ?)",
-        rusqlite::params!(id, &vec_json),
-    )
-    .map_err(|e| format!("Failed to index FAQ vector: {}", e))?;
-
-    entry_by_id(conn, id as u64)
+    let entry = insert_text_entry(conn, question, answer, model, backend)?;
+    index_vector(conn, entry.id, embedding, model)?;
+    Ok(entry)
 }
 
 /// Raw vec0 kNN scan: returns `(rowid, distance)` pairs, nearest first.
@@ -513,6 +649,504 @@ fn scan_limit(top_k: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Clustering (group historically-asked questions in the .faq UI)
+// ---------------------------------------------------------------------------
+
+/// Minimum cosine similarity for a question to join an existing auto-category.
+/// Questions more than this similar (to the category's most-asked
+/// representative) are grouped together; below it, a new category is spawned.
+/// Exposed to the user in the Chat Model panel (Learning mode).
+pub const DEFAULT_SIMILARITY_THRESHOLD: f64 = 0.85;
+
+/// Cosine similarity over stored (unnormalized) vectors — the same metric
+/// vec0 uses behind `distance_metric=cosine`.
+fn cosine_sim(a: &Vec<f64>, b: &Vec<f64>) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0;
+    let mut norm_a = 0.0;
+    let mut norm_b = 0.0;
+    for i in 0..a.len() {
+        let x = a[i];
+        let y = b[i];
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
+/// Load every stored vector (rowid → embedding) via sqlite-vec's `vec_to_json`
+/// helper. Entries embedded before a model/dimension change may be missing; a
+/// store that never vectorized anything simply yields an empty map.
+fn load_all_vectors(conn: &Connection) -> Result<HashMap<u64, Vec<f64>>, String> {
+    let mut stmt = match conn.prepare("SELECT rowid, vec_to_json(embedding) FROM faq_vec") {
+        Ok(stmt) => stmt,
+        Err(e) if format!("{}", e).contains("no such table") => return Ok(HashMap::new()),
+        Err(e) => return Err(format!("Failed to prepare FAQ vector load: {}", e)),
+    };
+    let mut out: HashMap<u64, Vec<f64>> = HashMap::new();
+    let mut iter = stmt
+        .query(rusqlite::params!())
+        .map_err(|e| format!("Failed to run FAQ vector load: {}", e))?;
+    loop {
+        match iter.next() {
+            Ok(Some(row)) => {
+                let id = row.get_unwrap::<usize, i64>(0) as u64;
+                let json = row.get_unwrap::<usize, String>(1);
+                if let Ok(embedding) = serde_json::from_str::<Vec<f64>>(&json) {
+                    out.insert(id, embedding);
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return Err(format!("Failed to iterate FAQ vectors: {}", e)),
+        }
+    }
+    Ok(out)
+}
+
+/// Greedy leader clustering: `entries` (already frequency-sorted so the most
+/// asked question leads a group) is split into clusters of at most `top_k`
+/// members that are cosine-similar (≥ `min_similarity`) to their group
+/// representative. Returns groups of entry ids, leader first.
+fn cluster_ids(
+    entries: &Vec<FaqEntry>,
+    vectors: &HashMap<u64, Vec<f64>>,
+    top_k: u32,
+    min_similarity: f64,
+) -> Vec<Vec<u64>> {
+    let mut group_idx: Vec<Vec<u64>> = Vec::new();
+    let mut group_repr: Vec<Vec<f64>> = Vec::new();
+    for i in 0..entries.len() {
+        let Some(entry) = entries.get(i) else {
+            break;
+        };
+        if !vectors.contains_key(&entry.id) {
+            // Not vectorized (embedding was unavailable) — its own group.
+            group_idx.push(vec![entry.id]);
+            group_repr.push(Vec::new());
+            continue;
+        }
+        let v = vectors.get(&entry.id).unwrap();
+        let mut best_group: usize = group_idx.len();
+        let mut best_sim: f64 = min_similarity;
+        for g in 0..group_idx.len() {
+            if group_idx[g].len() >= top_k as usize {
+                continue; // group is full
+            }
+            if group_repr[g].is_empty() {
+                continue; // leader has no vector
+            }
+            let sim = cosine_sim(v, &group_repr[g]);
+            if sim >= best_sim {
+                best_sim = sim;
+                best_group = g;
+            }
+        }
+        if best_group < group_idx.len() {
+            group_idx[best_group].push(entry.id);
+        } else {
+            group_idx.push(vec![entry.id]);
+            group_repr.push(v.clone());
+        }
+    }
+    group_idx
+}
+
+fn truncate_label(text: &str) -> String {
+    let mut out = text.trim().to_string();
+    if out.len() > 90 {
+        out.truncate(90);
+        out.push('…');
+    }
+    out
+}
+
+fn category_row(conn: &Connection, id: u64) -> Result<(u64, String, bool), String> {
+    conn.query_row(
+        "SELECT id, name, is_auto FROM faq_categories WHERE id = ?",
+        rusqlite::params!(id as i64),
+        |row| Ok((
+            row.get_unwrap::<usize, i64>(0) as u64,
+            row.get_unwrap::<usize, String>(1),
+            row.get_unwrap::<usize, i64>(2) != 0,
+        )),
+    )
+    .map_err(|e| format!("Failed to read FAQ category: {}", e))
+}
+
+fn load_categories(conn: &Connection) -> Result<Vec<(u64, String, bool)>, String> {
+    let mut stmt = conn
+        .prepare("SELECT id, name, is_auto FROM faq_categories ORDER BY name")
+        .map_err(|e| format!("Failed to prepare FAQ category query: {}", e))?;
+    let mut iter = stmt
+        .query(rusqlite::params!())
+        .map_err(|e| format!("Failed to run FAQ category query: {}", e))?;
+    let mut out: Vec<(u64, String, bool)> = Vec::new();
+    loop {
+        match iter.next() {
+            Ok(Some(row)) => out.push((
+                row.get_unwrap::<usize, i64>(0) as u64,
+                row.get_unwrap::<usize, String>(1),
+                row.get_unwrap::<usize, i64>(2) != 0,
+            )),
+            Ok(None) => break,
+            Err(e) => return Err(format!("Failed to iterate FAQ categories: {}", e)),
+        }
+    }
+    Ok(out)
+}
+
+/// Find the auto-category named `label`, creating it if missing.
+fn find_or_create_auto_category(conn: &Connection, label: &str) -> Result<u64, String> {
+    match conn.query_row(
+        "SELECT id FROM faq_categories WHERE name = ?",
+        rusqlite::params!(label),
+        |row| Ok(row.get_unwrap::<usize, i64>(0)),
+    ) {
+        Ok(id) => Ok(id as u64),
+        Err(e) if format!("{}", e).contains("no rows") => {
+            conn.execute(
+                "INSERT INTO faq_categories (name, is_auto, created_at) VALUES (?, 1, ?)",
+                rusqlite::params!(label, now_secs() as i64),
+            )
+            .map_err(|e| format!("Failed to create FAQ category: {}", e))?;
+            conn.query_row(
+                "SELECT id FROM faq_categories WHERE name = ?",
+                rusqlite::params!(label),
+                |row| Ok(row.get_unwrap::<usize, i64>(0)),
+            )
+            .map_err(|e| format!("Failed to read FAQ category id: {}", e))
+            .map(|id| id as u64)
+        }
+        Err(e) => Err(format!("Failed to read FAQ category: {}", e)),
+    }
+}
+
+fn entries_in_category(conn: &Connection, category_id: u64) -> Result<Vec<FaqEntry>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "{} WHERE category_id = ? ORDER BY frequency DESC, last_asked DESC",
+            ENTRY_SELECT
+        ))
+        .map_err(|e| format!("Failed to prepare FAQ category entries query: {}", e))?;
+    let mut iter = stmt
+        .query(rusqlite::params!(category_id as i64))
+        .map_err(|e| format!("Failed to run FAQ category entries query: {}", e))?;
+    let mut out: Vec<FaqEntry> = Vec::new();
+    loop {
+        match iter.next() {
+            Ok(Some(row)) => out.push(row_to_entry_full(row)),
+            Ok(None) => break,
+            Err(e) => return Err(format!("Failed to iterate FAQ category entries: {}", e)),
+        }
+    }
+    Ok(out)
+}
+
+fn entries_without_category(conn: &Connection) -> Result<Vec<FaqEntry>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "{} WHERE category_id IS NULL ORDER BY frequency DESC, last_asked DESC",
+            ENTRY_SELECT
+        ))
+        .map_err(|e| format!("Failed to prepare FAQ uncategorized query: {}", e))?;
+    let mut iter = stmt
+        .query(rusqlite::params!())
+        .map_err(|e| format!("Failed to run FAQ uncategorized query: {}", e))?;
+    let mut out: Vec<FaqEntry> = Vec::new();
+    loop {
+        match iter.next() {
+            Ok(Some(row)) => out.push(row_to_entry_full(row)),
+            Ok(None) => break,
+            Err(e) => return Err(format!("Failed to iterate FAQ uncategorized: {}", e)),
+        }
+    }
+    Ok(out)
+}
+
+/// Full list of categories + uncategorized entries. Auto-categories are
+/// reconciled COOPERATIVELY on every read: uncategorized entries are clustered
+/// into groups of at most `top_k` similar questions (the "Top K" config),
+/// grouped only when their cosine similarity to the group's representative is
+/// at least `min_similarity` (default 0.85 — user-configurable). Each group
+/// becomes (or joins) an auto-category named after the most-asked question.
+/// Entries the user placed in ANY category are never re-clustered — they are
+/// treated as curated and stay put. Empty auto-categories are pruned.
+pub fn list_categories(
+    root_path: String,
+    mut top_k: u32,
+    mut min_similarity: f64,
+) -> Result<FaqCategoryList, String> {
+    if top_k == 0 || top_k > 50 {
+        top_k = 3;
+    }
+    if min_similarity <= 0.0 || min_similarity > 1.0 {
+        min_similarity = DEFAULT_SIMILARITY_THRESHOLD;
+    }
+    let conn = open_db(&root_path)?;
+    ensure_text_schema(&conn)?;
+    // Auto categories are regenerated from the Top K config on every read:
+    // entries currently in an auto category are released back to Unassigned
+    // first, so a Top K change re-groups them. Entries in MANUAL categories
+    // are never touched (user-curated).
+    let _ = conn
+        .execute(
+            "UPDATE faq_entries SET category_id = NULL WHERE category_id IN
+               (SELECT id FROM faq_categories WHERE is_auto = 1)",
+            rusqlite::params!(),
+        )
+        .map_err(|e| format!("Failed to reset auto FAQ categories: {}", e))?;
+    let entries = top_by_frequency(&conn, 1000)?;
+    let vectors = load_all_vectors(&conn)?;
+
+    let mut uncategorized: Vec<FaqEntry> = Vec::new();
+    for entry in entries.iter() {
+        if !entry.category_id.is_some() {
+            uncategorized.push(entry.clone());
+        }
+    }
+    let clusters = cluster_ids(&uncategorized, &vectors, top_k, min_similarity);
+    for cluster in clusters.iter() {
+        if cluster.is_empty() {
+            continue;
+        }
+        let Some(leader) = uncategorized.iter().find(|e| e.id == cluster[0]) else {
+            continue;
+        };
+        let label = truncate_label(&leader.question);
+        let auto_id = find_or_create_auto_category(&conn, &label)?;
+        for id in cluster.iter() {
+            let _ = conn
+                .execute(
+                    "UPDATE faq_entries SET category_id = ? WHERE id = ? AND category_id IS NULL",
+                    rusqlite::params!(auto_id as i64, *id as i64),
+                )
+                .map_err(|e| format!("Failed to assign FAQ category: {}", e))?;
+        }
+    }
+    // Prune auto-categories left with no members.
+    let _ = conn
+        .execute(
+            "DELETE FROM faq_categories WHERE is_auto = 1 AND id NOT IN
+               (SELECT DISTINCT category_id FROM faq_entries WHERE category_id IS NOT NULL)",
+            rusqlite::params!(),
+        )
+        .map_err(|e| format!("Failed to prune FAQ categories: {}", e))?;
+
+    let mut categories: Vec<FaqCategory> = Vec::new();
+    for (id, name, is_auto) in load_categories(&conn)? {
+        let mut member_entries = entries_in_category(&conn, id)?;
+        // Auto categories report each member's similarity to the label.
+        if is_auto && !member_entries.is_empty() {
+            if let Some(lv) = vectors.get(&member_entries[0].id) {
+                for i in 1..member_entries.len() {
+                    if let Some(v) = vectors.get(&member_entries[i].id) {
+                        member_entries[i].similarity = Some(cosine_sim(v, lv));
+                    }
+                }
+            }
+        }
+        categories.push(FaqCategory {
+            id,
+            name,
+            is_auto,
+            size: member_entries.len() as u64,
+            entries: member_entries,
+        });
+    }
+    Ok(FaqCategoryList {
+        categories,
+        uncategorized: entries_without_category(&conn)?,
+    })
+}
+
+/// Create a manual category.
+pub fn create_category(root_path: String, name: String) -> Result<FaqCategory, String> {
+    let normalized = name.trim().to_string();
+    if normalized.is_empty() {
+        return Err("Category name cannot be empty".into());
+    }
+    let conn = open_db(&root_path)?;
+    ensure_text_schema(&conn)?;
+    conn.execute(
+        "INSERT INTO faq_categories (name, is_auto, created_at) VALUES (?, 0, ?)",
+        rusqlite::params!(&normalized, now_secs() as i64),
+    )
+    .map_err(|e| format!("Failed to create FAQ category: {}", e))?;
+    let (id, name, is_auto) = conn
+        .query_row(
+            "SELECT id, name, is_auto FROM faq_categories WHERE name = ?",
+            rusqlite::params!(&normalized),
+            |row| Ok((
+                row.get_unwrap::<usize, i64>(0) as u64,
+                row.get_unwrap::<usize, String>(1),
+                row.get_unwrap::<usize, i64>(2) != 0,
+            )),
+        )
+        .map_err(|e| format!("Failed to read FAQ category: {}", e))?;
+    Ok(FaqCategory {
+        id,
+        name,
+        is_auto,
+        size: 0,
+        entries: Vec::new(),
+    })
+}
+
+/// Rename a MANUAL category. Auto categories are regenerated from the Top K
+/// config, so renaming one would be wiped on the next read — the UI should
+/// steer users to move entries into a manual category instead.
+pub fn rename_category(root_path: String, id: u64, name: String) -> Result<(), String> {
+    let normalized = name.trim().to_string();
+    if normalized.is_empty() {
+        return Err("Category name cannot be empty".into());
+    }
+    let conn = open_db(&root_path)?;
+    ensure_text_schema(&conn)?;
+    let is_auto = match category_row(&conn, id) {
+        Ok((_, _, is_auto)) => is_auto,
+        Err(e) => return Err(e),
+    };
+    if is_auto {
+        return Err("Auto categories are managed automatically from the Top K config. Move its entries to a manual category to take control.".into());
+    }
+    let rows = conn
+        .execute(
+            "UPDATE faq_categories SET name = ? WHERE id = ?",
+            rusqlite::params!(&normalized, id as i64),
+        )
+        .map_err(|e| format!("Failed to rename FAQ category: {}", e))?;
+    if rows == 0 {
+        return Err("Category not found".into());
+    }
+    Ok(())
+}
+
+/// Delete a category; its entries move back to Unassigned (never lost).
+pub fn delete_category(root_path: String, id: u64) -> Result<(), String> {
+    let conn = open_db(&root_path)?;
+    ensure_text_schema(&conn)?;
+    let _ = conn
+        .execute(
+            "UPDATE faq_entries SET category_id = NULL WHERE category_id = ?",
+            rusqlite::params!(id as i64),
+        )
+        .map_err(|e| format!("Failed to unassign FAQ entries: {}", e))?;
+    let _ = conn
+        .execute(
+            "DELETE FROM faq_categories WHERE id = ?",
+            rusqlite::params!(id as i64),
+        )
+        .map_err(|e| format!("Failed to delete FAQ category: {}", e))?;
+    Ok(())
+}
+
+/// Move an entry to a category (`None` = Unassigned).
+pub fn set_entry_category(
+    root_path: String,
+    entry_id: u64,
+    category_id: Option<u64>,
+) -> Result<(), String> {
+    let conn = open_db(&root_path)?;
+    ensure_text_schema(&conn)?;
+    if let Some(cid) = category_id {
+        category_row(&conn, cid)?; // validates existence
+    }
+    let rows = conn
+        .execute(
+            "UPDATE faq_entries SET category_id = ?, updated_at = ? WHERE id = ?",
+            rusqlite::params!(category_id.map(|c| c as i64), now_secs() as i64, entry_id as i64),
+        )
+        .map_err(|e| format!("Failed to move FAQ entry: {}", e))?;
+    if rows == 0 {
+        return Err("FAQ entry not found".into());
+    }
+    Ok(())
+}
+
+/// Edit a question/answer pair (and optionally its category), re-embedding the
+/// question so semantic search + auto-categories stay in sync. A failed embed
+/// is recorded in `last_error` but the edit is never lost.
+pub async fn update_entry(
+    root_path: String,
+    backend: String,
+    url: String,
+    api_key: String,
+    id: u64,
+    question: String,
+    answer: String,
+    category_id: Option<u64>,
+    model: String,
+    mut config: FaqConfig,
+) -> Result<FaqEntry, String> {
+    config.normalize();
+    let q = question.trim().to_string();
+    if q.is_empty() {
+        return Err("Question cannot be empty".into());
+    }
+    let model_opt: Option<String> = if model.trim().is_empty() {
+        None
+    } else {
+        Some(model.trim().to_string())
+    };
+    let backend_opt: Option<String> = if backend.trim().is_empty() {
+        None
+    } else {
+        Some(backend.trim().to_string())
+    };
+    let conn = open_db(&root_path)?;
+    ensure_text_schema(&conn)?;
+    if let Some(cid) = category_id {
+        category_row(&conn, cid)?;
+    }
+    let rows = conn
+        .execute(
+            "UPDATE faq_entries SET question = ?, answer = ?, category_id = ?, model = ?, backend = ?, updated_at = ? WHERE id = ?",
+            rusqlite::params!(&q, &answer, category_id.map(|c| c as i64), &model_opt, &backend_opt, now_secs() as i64, id as i64),
+        )
+        .map_err(|e| format!("Failed to update FAQ entry: {}", e))?;
+    if rows == 0 {
+        return Err("FAQ entry not found".into());
+    }
+    let client = reqwest::Client::new();
+    match embed_text(&client, &backend, &url, &api_key, &config.embedding_model, &q).await {
+        Ok(embedding) => {
+            index_vector(&conn, id, &embedding, &config.embedding_model)
+                .map_err(|e| format!("Failed to re-index FAQ entry: {}", e))?;
+            let _ = meta_set(&conn, META_LAST_ERROR_KEY, "".to_string());
+        }
+        Err(e) => {
+            let _ = meta_set(&conn, META_LAST_ERROR_KEY, e.to_string());
+        }
+    }
+    entry_by_id(&conn, id)
+}
+
+/// Delete a question/answer pair by id (removes its vector too).
+pub fn delete_entry(root_path: String, id: u64) -> Result<(), String> {
+    let conn = open_db(&root_path)?;
+    ensure_text_schema(&conn)?;
+    let _ = conn
+        .execute_batch(&format!("DELETE FROM faq_vec WHERE rowid = {}", id))
+        .map_err(|e| format!("Failed to delete FAQ vector: {}", e))?;
+    let rows = conn
+        .execute(
+            "DELETE FROM faq_entries WHERE id = ?",
+            rusqlite::params!(id as i64),
+        )
+        .map_err(|e| format!("Failed to delete FAQ entry: {}", e))?;
+    if rows == 0 {
+        return Err("FAQ entry not found".into());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Public API — shared by the Tauri commands and the headless web server
 // ---------------------------------------------------------------------------
 
@@ -552,6 +1186,9 @@ pub async fn search(
 }
 
 /// Record a new learned exchange (question → answer), embedding it first.
+/// The plain Q→A record is ALWAYS kept (learning is never lost); when the
+/// embedding provider fails we persist the text entry anyway and record the
+/// error in `last_error` so the .faq UI can surface it.
 pub async fn upsert(
     root_path: String,
     backend: String,
@@ -559,6 +1196,7 @@ pub async fn upsert(
     api_key: String,
     question: String,
     answer: String,
+    model: String,
     mut config: FaqConfig,
 ) -> Result<FaqEntry, String> {
     config.normalize();
@@ -568,7 +1206,7 @@ pub async fn upsert(
     }
     let conn = open_db(&root_path)?;
     let client = reqwest::Client::new();
-    let embedding = embed_text(
+    match embed_text(
         &client,
         &backend,
         &url,
@@ -576,13 +1214,25 @@ pub async fn upsert(
         &config.embedding_model,
         &q,
     )
-    .await?;
-    upsert_embedded(&conn, &q, &answer, &embedding, &config.embedding_model)
-        .map_err(|e| e.to_string())
+    .await {
+        Ok(embedding) => {
+            let entry = upsert_embedded(&conn, &q, &answer, &embedding, &model, &backend)
+                .map_err(|e| e.to_string())?;
+            let _ = meta_set(&conn, META_LAST_ERROR_KEY, "".to_string());
+            Ok(entry)
+        }
+        Err(e) => {
+            let entry = insert_text_entry(&conn, &q, &answer, &model, &backend)
+                .map_err(|e| e.to_string())?;
+            let _ = meta_set(&conn, META_LAST_ERROR_KEY, e.to_string());
+            Ok(entry)
+        }
+    }
 }
 
 /// Record a learned exchange when an embedding is already available (used by
-/// callers/tests that have computed the vector themselves).
+/// callers/tests that have computed the vector themselves). No model/backend
+/// provenance is recorded here.
 pub fn upsert_with_embedding(
     root_path: String,
     question: String,
@@ -590,7 +1240,7 @@ pub fn upsert_with_embedding(
     embedding: Vec<f64>,
 ) -> Result<FaqEntry, String> {
     let conn = open_db(&root_path)?;
-    upsert_embedded(&conn, &question, &answer, &embedding, "")
+    upsert_embedded(&conn, &question, &answer, &embedding, "", "")
         .map_err(|e| e.to_string())
 }
 
@@ -631,10 +1281,14 @@ pub fn stats(root_path: String) -> Result<FaqStats, String> {
     let model = meta_get(&conn, META_MODEL_KEY)
         .map_err(|e| format!("Failed to read FAQ meta: {}", e))?
         .unwrap_or(DEFAULT_EMBEDDING_MODEL.to_string());
+    let last_error = meta_get(&conn, META_LAST_ERROR_KEY)
+        .map_err(|e| format!("Failed to read FAQ meta: {}", e))?
+        .filter(|value| !value.is_empty());
     Ok(FaqStats {
         count: count_entries(&conn),
         dimension: dim,
         model,
+        last_error,
         db_path: faq_db_path(&root_path).to_string_lossy().to_string(),
     })
 }
@@ -732,6 +1386,198 @@ mod tests {
         assert_eq!(list(root.clone()).unwrap().len(), 2);
         delete(root.clone(), Q1.into()).unwrap();
         assert_eq!(list(root.clone()).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_categories_are_created_from_topk_clusters() {
+        let root = test_root("autocat");
+        let _ = std::fs::remove_dir_all(&root);
+        upsert_with_embedding(root.clone(), "How does the agent loop stop?".into(), A1.into(), vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        upsert_with_embedding(root.clone(), "When does the agent loop stop?".into(), A1.into(), vec![0.95, 0.3, 0.0, 0.0]).unwrap();
+        upsert_with_embedding(root.clone(), "What makes the loop finish?".into(), A1.into(), vec![0.9, 0.4, 0.0, 0.0]).unwrap();
+        upsert_with_embedding(root.clone(), "Why cap output tokens?".into(), A2.into(), vec![0.0, 1.0, 0.0, 0.0]).unwrap();
+
+        // top_k = 3 → the three near-identical questions share one auto
+        // category; the unrelated one gets its own; nothing stays uncategorized.
+        let list3 = list_categories(root.clone(), 3, DEFAULT_SIMILARITY_THRESHOLD).unwrap();
+        assert_eq!(list3.categories.len(), 2);
+        assert!(list3.categories.iter().all(|c| c.is_auto));
+        let group = list3.categories.iter().find(|c| c.size == 3).unwrap();
+        assert_eq!(group.entries.len(), 3);
+        assert_eq!(group.entries[0].question.as_str(), "How does the agent loop stop?");
+        // Non-leader members carry their similarity to the group label.
+        assert!(group.entries[1].similarity.unwrap() >= 0.9);
+        assert!(group.entries[2].similarity.unwrap() >= 0.9);
+        assert_eq!(list3.uncategorized.len(), 0);
+
+        // top_k = 2 → the third similar question overflows into its own auto
+        // category.
+        let list2 = list_categories(root.clone(), 2, DEFAULT_SIMILARITY_THRESHOLD).unwrap();
+        assert_eq!(list2.categories.len(), 3);
+
+        // re-reading is idempotent — no endless reshuffling of curated entries.
+        let again = list_categories(root.clone(), 2, DEFAULT_SIMILARITY_THRESHOLD).unwrap();
+        assert_eq!(again.categories.len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manual_category_crud_and_movement() {
+        let root = test_root("catcrud");
+        let _ = std::fs::remove_dir_all(&root);
+        seed(&root);
+
+        let cat = create_category(root.clone(), "Concepts".into()).unwrap();
+        assert_eq!(cat.name.as_str(), "Concepts");
+        assert_eq!(cat.is_auto, false);
+
+        // Move Q1 into the manual category.
+        let entries = list(root.clone()).unwrap();
+        let Some(q1) = entries.iter().find(|e| e.question.as_str() == Q1).cloned() else {
+            panic!("Q1 should exist");
+        };
+        set_entry_category(root.clone(), q1.id, Some(cat.id)).unwrap();
+        let list = list_categories(root.clone(), 3, DEFAULT_SIMILARITY_THRESHOLD).unwrap();
+        let concepts = list.categories.iter().find(|c| c.name.as_str() == "Concepts").unwrap();
+        assert_eq!(concepts.size, 1);
+        assert_eq!(concepts.entries[0].question.as_str(), Q1);
+        // The remaining entry is still auto-categorized (not lost).
+        assert!(list.categories.iter().any(|c| c.is_auto && c.size == 1));
+
+        // Rename + delete category → no trace remains; the entry is either
+        // uncategorized again or re-swept into an auto category by the Top K
+        // reconciliation (automatic re-categorization is by design).
+        rename_category(root.clone(), cat.id, "General".into()).unwrap();
+        let renamed = list_categories(root.clone(), 3, DEFAULT_SIMILARITY_THRESHOLD).unwrap();
+        assert!(renamed.categories.iter().any(|c| c.name.as_str() == "General"));
+        delete_category(root.clone(), cat.id).unwrap();
+        let after = list_categories(root.clone(), 3, DEFAULT_SIMILARITY_THRESHOLD).unwrap();
+        assert!(!after.categories.iter().any(|c| c.name.as_str() == "General"));
+        let q1_again = after
+            .categories
+            .iter()
+            .flat_map(|c| c.entries.iter())
+            .any(|e| e.question.as_str() == Q1)
+            || after.uncategorized.iter().any(|e| e.question.as_str() == Q1);
+        assert!(q1_again);
+
+        // Moving an entry to a missing category must fail.
+        let Err(_) = set_entry_category(root.clone(), q1.id, Some(9_999_999)) else {
+            panic!("moving to a missing category should fail");
+        };
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_entry_by_id_removes_pair_and_vector() {
+        let root = test_root("entrydel");
+        let _ = std::fs::remove_dir_all(&root);
+        seed(&root);
+        let entries = list(root.clone()).unwrap();
+        let Some(q1) = entries.iter().find(|e| e.question.as_str() == Q1).cloned() else {
+            panic!("Q1 should exist");
+        };
+        delete_entry(root.clone(), q1.id).unwrap();
+        assert_eq!(list(root.clone()).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+#[test]
+    fn answers_record_the_model_that_produced_them() {
+        let root = test_root("model");
+        let _ = std::fs::remove_dir_all(&root);
+        upsert_with_embedding(root.clone(), Q1.into(), A1.into(), vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        // Direct write carries provenance when the caller supplies it.
+        let conn = open_db(&root).unwrap();
+        upsert_embedded(&conn, Q2, A2, &vec![0.0, 1.0, 0.0, 0.0], "qwen3:8b", "ollama").unwrap();
+        let listed = list(root.clone()).unwrap();
+        let q2 = listed.iter().find(|e| e.question.as_str() == Q2).unwrap();
+        assert_eq!(q2.model.as_ref().map(|s| s.as_str()), Some("qwen3:8b"));
+        assert_eq!(q2.backend.as_ref().map(|s| s.as_str()), Some("ollama"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn similarity_threshold_controls_auto_category_merging() {
+        let root = test_root("threshold");
+        let _ = std::fs::remove_dir_all(&root);
+        let a = upsert_with_embedding(root.clone(), "A".into(), A1.into(), vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        let b = upsert_with_embedding(root.clone(), "B".into(), A1.into(), vec![0.9, 0.4, 0.0, 0.0]).unwrap();
+        // cosine(a, b) ≈ 0.914.
+
+        // Threshold 0.85 → both questions share one auto-category.
+        let loose = list_categories(root.clone(), 3, 0.85).unwrap();
+        assert_eq!(loose.categories.len(), 1, "0.85 threshold merges 0.914-similar questions");
+        assert_eq!(loose.categories[0].size, 2);
+
+        // Threshold 0.95 → similarity is below it, so each gets its own category.
+        let strict = list_categories(root.clone(), 3, 0.95).unwrap();
+        assert_eq!(strict.categories.len(), 2, "0.95 threshold splits 0.914-similar questions");
+
+        // Moving a question to a manual category still freezes it out of
+        // auto-clustering regardless of the threshold.
+        set_entry_category(root.clone(), b.id, Some(loose.categories[0].id)).unwrap();
+        let frozen = list_categories(root.clone(), 3, 0.95).unwrap();
+        assert_eq!(frozen.categories.len(), 2); // manual keeps A+B label; A alone
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn migrates_a_legacy_database_without_category_columns() {
+        // Regression: an existing DB created before categories existed has no
+        // category_id/model/backend columns. Opening the Knowledge Base must
+        // migrate it in place instead of failing on the category index.
+        let root = test_root("legacy");
+        let _ = std::fs::remove_dir_all(&root);
+        let conn = open_db(&root).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE faq_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO faq_meta (key, value) VALUES ('embedding_dim', '4');
+             CREATE TABLE faq_entries (
+               id         INTEGER PRIMARY KEY AUTOINCREMENT,
+               question   TEXT NOT NULL UNIQUE,
+               answer     TEXT NOT NULL DEFAULT '',
+               frequency  INTEGER NOT NULL DEFAULT 1,
+               last_asked INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL DEFAULT 0,
+               updated_at INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO faq_entries (question, answer, frequency) VALUES ('legacy question?', 'legacy answer.', 1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let listed = list_categories(root.clone(), 3, DEFAULT_SIMILARITY_THRESHOLD).unwrap();
+        assert_eq!(listed.categories.len(), 1, "legacy row must be auto-categorized after migration");
+        assert_eq!(listed.categories[0].entries.len(), 1);
+        assert_eq!(listed.categories[0].entries[0].question.as_str(), "legacy question?");
+        // Columns were actually added and are usable.
+        assert_eq!(listed.categories[0].entries[0].category_id, Some(listed.categories[0].id));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn first_question_creates_a_category_visible_in_the_ui() {
+        // Exactly what happens after the very first exchange: one uncategorized
+        // entry. Opening the Knowledge Base must surface it as an auto-category.
+        let root = test_root("first");
+        let _ = std::fs::remove_dir_all(&root);
+        upsert_with_embedding(
+            root.clone(),
+            "How does the tool loop stop?".into(),
+            A1.into(),
+            vec![1.0, 0.0, 0.0, 0.0],
+        )
+        .unwrap();
+        let list = list_categories(root.clone(), 3, DEFAULT_SIMILARITY_THRESHOLD).unwrap();
+        assert_eq!(list.categories.len(), 1);
+        assert_eq!(list.categories[0].size, 1);
+        assert_eq!(list.categories[0].is_auto, true);
+        assert_eq!(list.categories[0].entries.len(), 1);
+        assert_eq!(list.categories[0].entries[0].question.as_str(), "How does the tool loop stop?");
+        assert_eq!(list.uncategorized.len(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

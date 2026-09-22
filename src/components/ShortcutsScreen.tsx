@@ -46,7 +46,7 @@ const GROUPS: ShortcutGroup[] = [
       { keys: "Ctrl+A, G", description: "Manage AI agents" },
       { keys: "Ctrl+A, K", description: "Manage skills" },
       { keys: "Ctrl+A, R", description: "Human feedback (RLHF)" },
-      { keys: "Ctrl+A, L", description: "Learned knowledge (.faq)" },
+      { keys: "Ctrl+A, L", description: "Open knowledge base (.faq)" },
       { keys: "Ctrl+A, I", description: "Open AI settings" },
     ],
   },

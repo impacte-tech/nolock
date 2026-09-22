@@ -316,6 +316,29 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
                 How many matching question → answer pairs are injected into the chat
                 context on each turn in Learning mode.
               </span>
+
+              <label className="field-label">
+                Category similarity threshold: {faqConfig.minSimilarity.toFixed(2)}
+              </label>
+              <input
+                type="range"
+                min="0.5"
+                max="1"
+                step="0.01"
+                value={faqConfig.minSimilarity}
+                onChange={(e) => setFaqConfigState({ ...faqConfig, minSimilarity: parseFloat(e.target.value) })}
+                style={{ width: "100%", accentColor: "var(--accent)" }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-muted)", marginBottom: 4 }}>
+                <span>Looser (0.50)</span>
+                <span>Stricter (1.00)</span>
+              </div>
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
+                Minimum cosine similarity for a question to join a category's auto-group.
+                Questions at or above this threshold (compared with the category's most-asked
+                question) land in the same category; anything below starts a new one.
+                Higher values group fewer, more similar questions.
+              </span>
             </>
           )}
         </div>

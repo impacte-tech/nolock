@@ -77,6 +77,28 @@ function buildProvidersMap(): Record<string, { url: string; apiKey: string }> {
   return providers;
 }
 
+/**
+ * Seed the per-request `knowledge_base` tool config from the chat provider so
+ * the backend can embed queries against the same endpoint/model the chat uses.
+ */
+function seedKnowledgeBaseToolConfig(
+  toolConfigs: Record<string, Record<string, string>>,
+  toolsEnabled: string[],
+  backend: string,
+  url: string,
+  apiKey: string,
+): Record<string, Record<string, string>> {
+  if (toolsEnabled.includes("knowledge_base")) {
+    toolConfigs.knowledge_base = {
+      backend,
+      url,
+      apiKey: apiKey || "",
+      embeddingModel: getFaqConfig().embeddingModel,
+    };
+  }
+  return toolConfigs;
+}
+
 export interface FileChangeEdit {
   old_text: string;
   new_text: string;
@@ -1041,17 +1063,23 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   /**
-   * Learning mode: persist a completed question → answer exchange into the
-   * `.faq` semantic vector store (SQLite + sqlite-vec). Fire-and-forget — the
-   * chat UI must never block on embedding.
+   * Learning mode: persist every completed question → answer exchange into the
+   * `.faq` vector store (SQLite + sqlite-vec). Only LEARNING mode accumulates
+   * knowledge — Building/Planning conversations are not indexed. Fire-and-
+   * forget — the chat UI must never block on embedding.
    */
-  const learnFromExchange = (question: string, answer: string) => {
+  const [kbStatus, setKbStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const learnFromExchange = (question: string, answer: string, model: string, backend: string) => {
     if (chatMode !== "learning" || !rootPath || !question.trim() || !answer.trim()) return;
     void (async () => {
       try {
-        await faqUpsert(rootPath, question.trim(), answer.trim(), getFaqConfig());
-      } catch (e) {
-        console.warn("[nolock] could not index the exchange into the .faq store:", e);
+        await faqUpsert(rootPath, question.trim(), answer.trim(), model, backend, getFaqConfig());
+        setKbStatus({
+          ok: true,
+          text: `Indexed to Knowledge Base (.faq): "${question.trim().slice(0, 40)}${question.trim().length > 40 ? "…" : ""}"`,
+        });
+      } catch (e: any) {
+        setKbStatus({ ok: false, text: `Knowledge Base error: ${String(e)}` });
       }
     })();
   };
@@ -1956,7 +1984,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
       const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
-      const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
+      const toolConfigs = seedKnowledgeBaseToolConfig(
+        JSON.parse(toolConfigRaw) as Record<string, Record<string, string>>,
+        toolsEnabled,
+        backend,
+        url,
+        apiKey || "",
+      );
 
       const reqBase = {
         backend,
@@ -2653,7 +2687,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       // Read per-tool configuration from localStorage (always the most current,
       // written synchronously by setSecret; keychain may hold stale data).
       const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
-      const toolConfigs: Record<string, Record<string, string>> = JSON.parse(toolConfigRaw);
+      const toolConfigs = seedKnowledgeBaseToolConfig(
+        JSON.parse(toolConfigRaw) as Record<string, Record<string, string>>,
+        toolsEnabled,
+        backend,
+        url,
+        apiKey || "",
+      );
 
       // Read chat model parameters from localStorage
       const chatTemperature = localStorage.getItem("nolock.chatTemperature");
@@ -2895,7 +2935,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           return msgs;
         });
         // Learning mode: index this completed Q→A exchange for future retrieval.
-        learnFromExchange(input, responseText);
+        learnFromExchange(input, responseText, routedModelRef.current || "", backend);
         scanAgentCommands(result.tool_calls as unknown as HookToolCallLog[]);
       }
     } catch (e: any) {
@@ -2993,6 +3033,9 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
                 <strong>Learning mode is on.</strong> The agent will teach you about your
                 code, probe your understanding, and keep a ranked <strong>.faq/</strong>
                 knowledge base in the project root.
+                <br />
+                Every answered exchange is indexed automatically — open{" "}
+                <strong>AI Integrations → Knowledge Base…</strong> to review, group or edit it.
               </>
             )}
           </div>
@@ -3398,6 +3441,30 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             <button className="context-warning-action" onClick={() => void startNewSession()}>
               New session
             </button>
+          </div>
+        )}
+
+        {kbStatus && (
+          <div
+            className={`kb-status${kbStatus.ok ? "" : " error"}`}
+            role="status"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 11,
+              padding: "4px 10px",
+              marginBottom: 4,
+              borderRadius: 6,
+              color: kbStatus.ok ? "var(--text-muted)" : "var(--danger, #c0392b)",
+              background: kbStatus.ok ? "var(--bg-secondary)" : "var(--danger-bg, rgba(192,57,43,0.08))",
+              border: kbStatus.ok ? "1px solid var(--border)" : "1px solid rgba(192,57,43,0.3)",
+              maxWidth: "100%",
+              wordBreak: "break-word",
+            }}
+          >
+            <span>{kbStatus.ok ? "✓" : "✕"}</span>
+            <span>{kbStatus.text}</span>
           </div>
         )}
 

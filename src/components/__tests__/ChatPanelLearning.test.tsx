@@ -96,6 +96,13 @@ describe("ChatPanel learning mode", () => {
     expect(upsertArgs.question).toContain("When does the agent loop stop?");
     expect(upsertArgs.answer).toBe("Let me teach you about that.");
     expect(upsertArgs.config.topK).toBe(3);
+    // Provenance: the model that produced the answer is recorded.
+    expect(typeof upsertArgs.model).toBe("string");
+    expect(upsertArgs.backend).toBe("ollama");
+    // Visible in-chat confirmation that the exchange was indexed.
+    await waitFor(() => {
+      expect(screen.getByText(/Indexed to Knowledge Base/)).toBeInTheDocument();
+    });
   });
 
   it("falls back to the plain-text .faq README when the semantic store is unavailable", async () => {

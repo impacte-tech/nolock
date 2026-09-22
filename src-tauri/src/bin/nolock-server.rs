@@ -319,10 +319,21 @@ args!(FaqSearchArgs {
 });
 args!(FaqUpsertArgs {
     root_path: String, backend: String, url: String, api_key: String,
-    question: String, answer: String, config: main_impl::faq::FaqConfig,
+    question: String, answer: String, model: String, config: main_impl::faq::FaqConfig,
 });
 args!(FaqRootArgs { root_path: String });
 args!(FaqDeleteArgs { root_path: String, question: String });
+args!(FaqTopKArgs { root_path: String, top_k: u32, min_similarity: f64 });
+args!(FaqCategoryNameArgs { root_path: String, name: String });
+args!(FaqCategoryIdArgs { root_path: String, id: u64 });
+args!(FaqRenameCategoryArgs { root_path: String, id: u64, name: String });
+args!(FaqMoveEntryArgs { root_path: String, entry_id: u64, category_id: Option<u64> });
+args!(FaqUpdateEntryArgs {
+    root_path: String, backend: String, url: String, api_key: String,
+    id: u64, question: String, answer: String, category_id: Option<u64>,
+    model: String, config: main_impl::faq::FaqConfig,
+});
+args!(FaqDeleteEntryArgs { root_path: String, id: u64 });
 
 // ---------------------------------------------------------------------------
 // The dispatcher — mirrors `tauri::generate_handler!` one-to-one
@@ -556,7 +567,7 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         }
         "faq_upsert" => {
             let a: FaqUpsertArgs = parse(command, args)?;
-            ok(main_impl::web_bridge::faq_upsert(a.root_path, a.backend, a.url, a.api_key, a.question, a.answer, a.config).await)
+            ok(main_impl::web_bridge::faq_upsert(a.root_path, a.backend, a.url, a.api_key, a.question, a.answer, a.model, a.config).await)
         }
         "faq_list" => {
             let a: FaqRootArgs = parse(command, args)?;
@@ -569,6 +580,36 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         "faq_stats" => {
             let a: FaqRootArgs = parse(command, args)?;
             ok(main_impl::web_bridge::faq_stats(a.root_path))
+        }
+        "faq_list_categories" => {
+            let a: FaqTopKArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_list_categories(a.root_path, a.top_k, a.min_similarity))
+        }
+        "faq_create_category" => {
+            let a: FaqCategoryNameArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_create_category(a.root_path, a.name))
+        }
+        "faq_rename_category" => {
+            let a: FaqRenameCategoryArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_rename_category(a.root_path, a.id, a.name))
+        }
+        "faq_delete_category" => {
+            let a: FaqCategoryIdArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_delete_category(a.root_path, a.id))
+        }
+        "faq_set_entry_category" => {
+            let a: FaqMoveEntryArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_set_entry_category(a.root_path, a.entry_id, a.category_id))
+        }
+        "faq_update_entry" => {
+            let a: FaqUpdateEntryArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_update_entry(
+                a.root_path, a.backend, a.url, a.api_key, a.id, a.question, a.answer, a.category_id, a.model, a.config,
+            ).await)
+        }
+        "faq_delete_entry" => {
+            let a: FaqDeleteEntryArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_delete_entry(a.root_path, a.id))
         }
 
         // ----- Terminal memory (same TermMemory state, web entry points)
