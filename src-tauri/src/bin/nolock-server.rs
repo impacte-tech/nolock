@@ -326,7 +326,7 @@ args!(FaqDeleteArgs { root_path: String, question: String });
 args!(FaqTopKArgs { root_path: String, top_k: u32, min_similarity: f64 });
 args!(FaqCategoryNameArgs { root_path: String, name: String });
 args!(FaqCategoryIdArgs { root_path: String, id: u64 });
-args!(FaqRenameCategoryArgs { root_path: String, id: u64, name: String });
+args!(FaqRenameCategoryArgs { root_path: String, id: u64, name: String, automatic: Option<bool> });
 args!(FaqMoveEntryArgs { root_path: String, entry_id: u64, category_id: Option<u64> });
 args!(FaqUpdateEntryArgs {
     root_path: String, backend: String, url: String, api_key: String,
@@ -581,6 +581,10 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             let a: FaqRootArgs = parse(command, args)?;
             ok(main_impl::web_bridge::faq_stats(a.root_path))
         }
+        "faq_category_name" => {
+            let a: ChatArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::faq_category_name(a.req).await)
+        }
         "faq_list_categories" => {
             let a: FaqTopKArgs = parse(command, args)?;
             ok(main_impl::web_bridge::faq_list_categories(a.root_path, a.top_k, a.min_similarity))
@@ -591,7 +595,7 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         }
         "faq_rename_category" => {
             let a: FaqRenameCategoryArgs = parse(command, args)?;
-            ok(main_impl::web_bridge::faq_rename_category(a.root_path, a.id, a.name))
+            ok(main_impl::web_bridge::faq_rename_category(a.root_path, a.id, a.name, a.automatic))
         }
         "faq_delete_category" => {
             let a: FaqCategoryIdArgs = parse(command, args)?;

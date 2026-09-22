@@ -5784,3 +5784,26 @@ select.field-input {
 .web-path-dialog footer { justify-content: flex-end; margin-top: 16px; }
 .web-path-dialog p { padding: 8px; font-size: 13px; }
 .web-path-dialog [role="alert"] { color: #ffaaaa; }
+
+
+/* Knowledge base: a roomy, readable workspace within the app's modal system. */
+.modal.faq-panel { width: min(1000px, 94vw); max-width: 1000px; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+.faq-panel .modal-body { padding: 20px; overflow-y: auto; min-height: 0; }
+.faq-panel .modal-header, .faq-panel .modal-footer { flex-shrink: 0; }
+.faq-panel .faq-entry > div .field-select { width: auto; flex: 1; max-width: 320px; }
+.faq-panel .modal-header { padding: 16px 20px; }
+.faq-panel .field-input { min-height: 34px; }
+.faq-panel .faq-category { padding: 16px !important; margin-top: 18px !important; }
+.faq-panel .faq-entry { padding: 14px !important; background: var(--bg-secondary); }
+.faq-panel .faq-entry > strong { font-size: 14px !important; line-height: 1.5; overflow-wrap: anywhere; }
+.faq-panel .faq-entry pre { font-family: inherit; font-size: 13px !important; line-height: 1.65; padding: 12px 0; }
+.faq-panel .faq-category > div > strong { font-size: 15px !important; overflow-wrap: anywhere; }
+.faq-panel .btn-secondary { min-height: 30px; }
+.faq-details { margin-top: 8px; overflow-wrap: anywhere; }
+.faq-details summary { cursor: pointer; }
+.faq-error { padding: 12px; margin-bottom: 12px; color: var(--danger, #c0392b); border: 1px solid currentColor; border-radius: 6px; }
+.faq-empty { padding: 20px 0; color: var(--text-muted); line-height: 1.6; }
+@media (max-width: 600px) {
+  .faq-panel .modal-body { padding: 12px; }
+  .faq-panel .faq-category { padding: 10px !important; }
+}

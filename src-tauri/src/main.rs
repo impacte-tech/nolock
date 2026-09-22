@@ -90,14 +90,68 @@ fn faq_list_categories(root_path: String, top_k: u32, min_similarity: f64) -> Re
     faq::list_categories(root_path, top_k, min_similarity)
 }
 
+fn faq_category_endpoint(backend: &str, url: &str) -> Result<String, String> {
+    let base = url.trim_end_matches('/');
+    match backend {
+        "ollama" => Ok(format!("{}/api/chat", base)),
+        "llamacpp" => Ok(format!("{}/chat/completions", if base.ends_with("/v1") { base.to_string() } else { format!("{}/v1", base) })),
+        "openrouter" => Ok("https://openrouter.ai/api/v1/chat/completions".into()),
+        "digitalocean" => Ok("https://inference.do-ai.run/v1/chat/completions".into()),
+        "opencode" => Ok(format!("{}/chat/completions", base)),
+        _ => Err(format!("Unsupported chat provider: {}", backend)),
+    }
+}
+
+fn faq_category_body(req: &ChatRequest) -> serde_json::Value {
+    let mut messages = vec![serde_json::json!({ "role": "system", "content": req.system_prompt.as_deref().unwrap_or_default() })];
+    messages.extend(req.messages.iter().map(|m| serde_json::json!({ "role": m.role, "content": m.content })));
+    let mut body = serde_json::json!({ "model": req.model, "messages": messages, "stream": false });
+    if req.backend == "ollama" {
+        body["think"] = serde_json::json!(false);
+        // Constrain small local models to a label instead of free-form prose.
+        body["format"] = serde_json::json!({
+            "type": "object",
+            "properties": { "category": { "type": "string", "minLength": 1, "maxLength": 60 } },
+            "required": ["category"],
+            "additionalProperties": false
+        });
+        body["options"] = serde_json::json!({ "temperature": 0.1, "num_predict": 2048 });
+    } else {
+        body["temperature"] = serde_json::json!(0.1);
+        body["max_tokens"] = serde_json::json!(2048);
+    };
+    body
+}
+
+/// Isolated, non-streaming inference using the selected chat model.
+/// Category names never emit tokens into the active conversation.
+#[tauri::command]
+async fn faq_category_name(req: ChatRequest) -> Result<String, String> {
+    let endpoint = faq_category_endpoint(&req.backend, &req.url)?;
+    if req.model.trim().is_empty() { return Err("Select a chat model to name categories".into()); }
+    let body = faq_category_body(&req);
+    let mut request = reqwest::Client::new().post(endpoint).json(&body)
+        .timeout(std::time::Duration::from_secs(150));
+    if let Some(key) = req.api_key.filter(|key| !key.is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    let response = request.send().await
+        .map_err(|e| format!("Chat category naming failed: {}", e))?
+        .error_for_status().map_err(|e| format!("Chat category naming failed: {}", e))?
+        .json::<serde_json::Value>().await.map_err(|e| e.to_string())?;
+    let content = if req.backend == "ollama" { &response["message"]["content"] }
+        else { &response["choices"][0]["message"]["content"] };
+    content.as_str().map(str::to_string).ok_or_else(|| "Chat model returned no category name".into())
+}
+
 #[tauri::command]
 fn faq_create_category(root_path: String, name: String) -> Result<faq::FaqCategory, String> {
     faq::create_category(root_path, name)
 }
 
 #[tauri::command]
-fn faq_rename_category(root_path: String, id: u64, name: String) -> Result<(), String> {
-    faq::rename_category(root_path, id, name)
+fn faq_rename_category(root_path: String, id: u64, name: String, automatic: Option<bool>) -> Result<(), String> {
+    if automatic.unwrap_or(false) { faq::name_auto_category(root_path, id, name) } else { faq::rename_category(root_path, id, name) }
 }
 
 #[tauri::command]
@@ -10548,6 +10602,7 @@ pub fn run() {
             faq_delete,
             faq_stats,
             faq_list_categories,
+            faq_category_name,
             faq_create_category,
             faq_rename_category,
             faq_delete_category,
@@ -10575,6 +10630,30 @@ fn main() {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn category_naming_constrains_output_and_allows_reasoning_budget() {
+        let req: super::ChatRequest = serde_json::from_value(serde_json::json!({
+            "backend": "ollama", "url": "http://localhost:11434", "model": "hf.co/impacte/ullr-2.6B-GGUF:latest",
+            "messages": [{ "role": "user", "content": "[\"How do I configure Ollama?\"]" }],
+            "systemPrompt": "Return a category as JSON"
+        })).unwrap();
+        let body = super::faq_category_body(&req);
+        assert_eq!(body["options"]["num_predict"], 2048);
+        assert_eq!(body["format"]["required"][0], "category");
+        assert_eq!(body["format"]["properties"]["category"]["maxLength"], 60);
+        assert_eq!(body["messages"][0]["content"], "Return a category as JSON");
+        assert_eq!(body["model"], "hf.co/impacte/ullr-2.6B-GGUF:latest");
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
+    fn category_naming_uses_chat_provider_endpoints() {
+        assert_eq!(super::faq_category_endpoint("llamacpp", "http://localhost:8080/").unwrap(), "http://localhost:8080/v1/chat/completions");
+        assert_eq!(super::faq_category_endpoint("llamacpp", "http://localhost:8080/v1/").unwrap(), "http://localhost:8080/v1/chat/completions");
+        assert_eq!(super::faq_category_endpoint("ollama", "http://localhost:11434/").unwrap(), "http://localhost:11434/api/chat");
+        assert_eq!(super::faq_category_endpoint("openrouter", "").unwrap(), "https://openrouter.ai/api/v1/chat/completions");
+    }
+
 
     #[tokio::test]
     async fn credential_boundary_blocks_tools_attachments_and_previews() {
