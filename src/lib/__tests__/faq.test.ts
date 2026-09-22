@@ -1,5 +1,6 @@
+import { nameFaqCategories, parseFaqCategoryName } from "../faq";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mockInvoke } from "../../test/tauri-mock";
+import { mockInvoke, resetTauriMocks } from "../../test/tauri-mock";
 import {
   faqDir,
   faqJsonPath,
@@ -213,5 +214,85 @@ describe("faq command wrappers", () => {
     mockInvoke.mockResolvedValue(null);
     await faqDeleteEntry("/repo", 42);
     expect(mockInvoke).toHaveBeenCalledWith("faq_delete_entry", { rootPath: "/repo", id: 42 });
+  });
+});
+
+describe("chat category names", () => {
+  const pending = () => ({ categories: [{ id: 1, name: "Topic 1", isAuto: true, needsName: true, size: 1,
+    entries: [{ id: 1, question: "How do I reset my password?", answer: "", frequency: 1, lastAsked: 0, updatedAt: 0 }] }], uncategorized: [] });
+  beforeEach(() => { resetTauriMocks(); localStorage.clear(); });
+  it("prompts the local model and persists its concise label", async () => {
+    localStorage.setItem("nolock.chatBackend", "ollama");
+    localStorage.setItem("nolock.chatModel", "qwen3:8b");
+    mockInvoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "faq_category_name" ? "Account access" : null));
+    await nameFaqCategories("/repo", pending());
+    expect(mockInvoke).toHaveBeenCalledWith("faq_category_name", { req: expect.objectContaining({
+      backend: "ollama", model: "qwen3:8b", toolsEnabled: [], systemPrompt: expect.stringContaining("2–5 words"),
+    }) });
+    expect(mockInvoke).toHaveBeenCalledWith("faq_rename_category", { rootPath: "/repo", id: 1, name: "Account access", automatic: true });
+  });
+  it("uses the main chat provider and model, never the configured FIM model", async () => {
+    localStorage.setItem("nolock.chatBackend", "openrouter");
+    localStorage.setItem("nolock.chatModel", "main-chat-model");
+    localStorage.setItem("nolock.fitmBackend", "ollama");
+    localStorage.setItem("nolock.completionModel", "fim-only-model");
+    mockInvoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "faq_category_name" ? "Account access" : null));
+    await nameFaqCategories("/repo", pending());
+    expect(mockInvoke).toHaveBeenCalledWith("faq_category_name", { req: expect.objectContaining({ backend: "openrouter", model: "main-chat-model" }) });
+  });
+  it("does not silently substitute FIM or legacy models when chat is unset", async () => {
+    localStorage.setItem("nolock.completionModel", "fim-only-model");
+    localStorage.setItem("nolock.model", "legacy-fim-model");
+    await expect(nameFaqCategories("/repo", pending())).rejects.toThrow("Select a chat model");
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+  it("does not let one failed category prevent later names from being generated", async () => {
+    localStorage.setItem("nolock.chatModel", "qwen3:8b");
+    const data = pending();
+    data.categories.push({ ...data.categories[0], id: 2 });
+    let attempt = 0;
+    mockInvoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "faq_category_name" ? (++attempt <= 2 ? "Topic five" : "Account access") : null));
+    await expect(nameFaqCategories("/repo", data)).rejects.toThrow("Could not name 1 category");
+    expect(mockInvoke).toHaveBeenCalledWith("faq_rename_category", { rootPath: "/repo", id: 2, name: "Account access", automatic: true });
+    expect(mockInvoke.mock.calls.some((c) => c[0] === "faq_rename_category" && (c[1] as any).id === 1)).toBe(false);
+  });
+  it("rejects the question itself and leaves the category available for retry", async () => {
+    localStorage.setItem("nolock.chatModel", "qwen3:8b");
+    mockInvoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "faq_category_name" ? "How do I reset my password?" : null));
+    await expect(nameFaqCategories("/repo", pending())).rejects.toThrow("after two attempts");
+    expect(mockInvoke.mock.calls.some((c) => c[0] === "faq_rename_category")).toBe(false);
+  });
+});
+
+
+describe("category response parsing", () => {
+  it.each([
+    ['{"category":"Account access"}', "Account access"],
+    ['```json\n{"category":"Account access"}\n```', "Account access"],
+    ['<think>Consider the subject.</think>\n{"category":"Account access"}', "Account access"],
+    ['Category: "Account access"\nThese questions concern signing in.', "Account access"],
+    ['**Account access**', "Account access"],
+    ['Managing access to shared team accounts', "Managing access to shared team accounts"],
+  ])("extracts a usable label from %s", (response, expected) => {
+    expect(parseFaqCategoryName(response, ["How do I sign in?"])).toBe(expected);
+  });
+  it.each(['', '<think>Still thinking', 'Topic five', '{"category":42}',
+    '{"category":"How do I sign in?"}', 'First choice\nSecond choice', 'x'.repeat(61)])("rejects unusable output %s", (response) => {
+    expect(parseFaqCategoryName(response, ["How do I sign in?"])).toBeNull();
+  });
+  it("corrects invalid output once and persists the returned JSON label", async () => {
+    resetTauriMocks();
+    localStorage.clear();
+    localStorage.setItem("nolock.chatModel", "hf.co/impacte/ullr-2.6B-GGUF:latest");
+    let attempt = 0;
+    mockInvoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "faq_category_name"
+      ? (++attempt === 1 ? "Here is a detailed answer to your questions about signing in and resetting passwords." : '{"category":"Account access"}') : null));
+    await nameFaqCategories("/repo", { categories: [{ id: 5, name: "Topic 5", isAuto: true, needsName: true, size: 1,
+      entries: [{ id: 1, question: "How do I sign in?", answer: "", frequency: 1, lastAsked: 0, updatedAt: 0 }] }], uncategorized: [] });
+    expect(attempt).toBe(2);
+    const requests = mockInvoke.mock.calls.filter((c) => c[0] === "faq_category_name");
+    expect((requests[1][1] as any).req.messages).toHaveLength(3);
+    expect((requests[1][1] as any).req.messages[2].content).toContain('Return only {"category"');
+    expect(mockInvoke).toHaveBeenCalledWith("faq_rename_category", { rootPath: "/repo", id: 5, name: "Account access", automatic: true });
   });
 });
