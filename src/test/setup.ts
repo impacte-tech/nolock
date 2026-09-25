@@ -2,7 +2,7 @@
 // Vitest global setup – runs before every test file.
 // ---------------------------------------------------------------------------
 
-import { vi } from "vitest";
+import { beforeEach, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import "./tauri-mock";
 
@@ -38,3 +38,6 @@ if (typeof globalThis.ResizeObserver !== "function") {
   }
   globalThis.ResizeObserver = ResizeObserverMock as unknown as typeof ResizeObserver;
 }
+
+import { clearSecretSession } from "../lib/secrets";
+beforeEach(() => clearSecretSession());

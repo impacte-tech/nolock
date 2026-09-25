@@ -57,7 +57,18 @@ export interface SessionUsageEntry {
   cost?: number | null;
 }
 
+export interface AgentSessionInfo {
+  name: string;
+  terminalId: string;
+  cwd: string;
+  pid: number;
+  exitCode: number | null;
+  transcriptTruncated: boolean;
+  recordingFailed?: boolean;
+  interrupted?: boolean;
+}
 export interface SessionRecord {
+  agent?: AgentSessionInfo;
   id: string;
   summary: string;
   status: SessionStatus;

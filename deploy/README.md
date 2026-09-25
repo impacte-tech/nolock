@@ -40,14 +40,13 @@ root `/deploy/llamacpp` and its own `Dockerfile`. Keep the root `Dockerfile` and
 5. Set the public domain: **Settings → Networking → Generate Domain** (or add a
    custom domain). Railway routes HTTPS traffic to the container's `$PORT`.
 6. Add a **volume** mounted at `/data` and set the variable
-   `NOLOCK_DATA_DIR=/data/nolock` so secrets, RLHF logs and any opened
+   `NOLOCK_DATA_DIR=/data/nolock` so RLHF logs and any opened
    project folders survive redeploys. Without the volume, all server-side
    state is lost on every redeploy.
-7. (Recommended for public URLs) Set `NOLOCK_WEB_TOKEN=<random secret>`. The
-   web app now shows a **login page** — paste the token there (or open
-   `https://<domain>/?token=<secret>` to sign in automatically; the token is
-   then remembered for that browser tab). The token is stored in the browser
-   and sent as a `Bearer` header on every API call.
+7. Set `NOLOCK_WEB_BIND=0.0.0.0` and `NOLOCK_WEB_TOKEN=<random secret>` for
+   Railway. Public/non-loopback bindings require authentication. The web app
+   shows a **login page** — enter the token there, not in a URL. Use HTTPS.
+   The token is sent as a `Bearer` header on API calls.
 
 First build takes a while (full Rust release build of the tauri crate stack);
 subsequent builds reuse Docker layers (dependency cache) and are much faster.
@@ -63,9 +62,12 @@ subsequent builds reuse Docker layers (dependency cache) and are much faster.
 - **Terminal** — real PTY in the container (bash).
 - **Notebooks** — work if `python3` + `ipykernel` are available; create envs
   from the Notebook panel (they land in the project's `.venvs/`).
-- **Secrets** — stored in a 0600 file under `NOLOCK_DATA_DIR` instead of the
-  OS keychain (no keyring service in a container). The frontend's localStorage
-  dual-write still works exactly as on desktop.
+- **Model-provider authentication** — use the host OS keychain when available. In headless containers
+  without a keychain, credentials stay in browser memory for the current app
+  session, with a visible warning; re-enter them after reload. No new plaintext
+  browser or server secret files are written. Older `secrets.json` files are not
+  imported automatically: migrate any needed values securely and remove the
+  old file and backups yourself. Credential actions are desktop-only.
 - **Browser panel** — desktop-only (native webview); it reports a friendly
   error on the web. The web app already runs in a browser.
 
@@ -75,7 +77,8 @@ subsequent builds reuse Docker layers (dependency cache) and are much faster.
 
 Set `NOLOCK_WEB_BIND` to the host IP address the server should listen on. It
 accepts an IPv4 or IPv6 address (not a hostname or a port). The default is
-`0.0.0.0`, preserving container deployments that need all IPv4 interfaces.
+`127.0.0.1`. Container/public deployments must explicitly set
+`NOLOCK_WEB_BIND=0.0.0.0` and a nonempty `NOLOCK_WEB_TOKEN`.
 `PORT` sets the port independently and defaults to `8080`.
 
 - Local access only: `NOLOCK_WEB_BIND=127.0.0.1`

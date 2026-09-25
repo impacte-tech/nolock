@@ -23,7 +23,9 @@ regex = "=1.11.1"
 portable-pty = "=0.8.1"
 keyring = "=2.3.3"
 libc = "0.2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
+sha2 = "=0.10.9"
+chrono = "=0.4.45"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util", "process"] }
 # Web deployment (nolock-server binary): serves the same command surface the
 # Tauri IPC exposes over HTTP + SSE so the identical frontend runs in a browser.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
@@ -43,6 +45,7 @@ rusqlite = { version = "=0.40.2", features = ["bundled"] }
 sqlite-vec = "=0.1.9"
 
 [dev-dependencies]
+http = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]

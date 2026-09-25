@@ -26,7 +26,7 @@ interface RouterItem {
   description: string;
 }
 
-/** Per-tool configuration (provider, api keys, etc.). Stored in localStorage as nolock.toolConfig. */
+/** Per-tool configuration (provider, api keys, etc.). Stored in the host secret store. */
 interface ToolConfig {
   [toolId: string]: {
     provider?: string;
@@ -79,21 +79,15 @@ export default function AISettings({ visible, onClose }: Props) {
 
     const oldModel = localStorage.getItem("nolock.model");
     const toolsRaw = localStorage.getItem("nolock.toolsEnabled");
-    const toolConfigRaw = localStorage.getItem("nolock.toolConfig");
+
 
     // Set state synchronously from localStorage first (for immediate render)
     const backend = localStorage.getItem("nolock.backend") || "ollama";
     const apiKeys: Record<string, string> = {};
     // Load per-backend API keys
     for (const b of ["openrouter", "opencode", "digitalocean"]) {
-      apiKeys[b] = localStorage.getItem(`nolock.apiKey.${b}`) || "";
+      apiKeys[b] = "";
     }
-    // Migration: if old single key exists, copy to current backend if that slot is empty
-    if (!apiKeys[backend]) {
-      const oldKey = localStorage.getItem("nolock.apiKey") || "";
-      if (oldKey) apiKeys[backend] = oldKey;
-    }
-
     setConfig({
       backend,
       url: localStorage.getItem("nolock.url") || "http://localhost:11434",
@@ -103,7 +97,7 @@ export default function AISettings({ visible, onClose }: Props) {
       toolsEnabled: toolsRaw ? JSON.parse(toolsRaw) : [],
       routerName: localStorage.getItem("nolock.routerName") || "",
     });
-    setToolConfig(toolConfigRaw ? JSON.parse(toolConfigRaw) : {});
+    void getSecret("toolConfig").then((raw) => setToolConfig(raw ? JSON.parse(raw) : {}));
 
     // Then asynchronously upgrade from OS keychain if available
     (async () => {
@@ -120,9 +114,6 @@ export default function AISettings({ visible, onClose }: Props) {
           apiKeys: { ...prev.apiKeys, ...keychainUpdates },
         }));
       }
-      // toolConfig is read from localStorage above (line 64); it is always the
-      // most current copy because setSecret writes to localStorage synchronously.
-      // Do NOT overwrite with (potentially stale) keychain data here.
     })();
   }, [visible]);
 
@@ -183,7 +174,7 @@ export default function AISettings({ visible, onClose }: Props) {
       localStorage.setItem("nolock.routerName", config.routerName);
     }
 
-    // Store per-backend API keys in OS keychain + localStorage (dual-write)
+    // Store credentials in the host secret store; failures stay session-only.
     // Fire-and-forget: close modal immediately, keychain writes happen async
     for (const [backend, key] of Object.entries(config.apiKeys)) {
       setSecret(`apiKey.${backend}`, key);

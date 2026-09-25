@@ -18,9 +18,14 @@ pub mod pykernel;
 pub mod secrets;
 pub mod switchyard;
 pub mod terminal_memory;
+pub mod terminal_sessions;
+pub mod workspace_git;
 pub mod faq;
 pub mod agent_file_policy;
-pub mod credential_providers;
+pub mod redaction;
+pub mod mcp_servers;
+pub mod terminal_agents;
+pub mod agent_usage;
 pub mod validation;
 
 /// Public entry points for the headless web server (`bin/nolock-server.rs`).
@@ -910,7 +915,18 @@ fn list_sessions(root_path: String) -> Result<Vec<SessionRecord>, String> {
         }
         let content = agent_file_policy::read_to_string(&path)
             .map_err(|e| format!("Failed to read session {}: {}", path.display(), e))?;
-        if let Ok(rec) = serde_json::from_str::<SessionRecord>(&content) {
+        if let Ok(mut rec) = serde_json::from_str::<SessionRecord>(&content) {
+            #[cfg(unix)]
+            if rec.status == "active" {
+                if let Some(agent) = rec.agent.as_mut() {
+                    if let Some(pid) = agent.get("pid").and_then(|v| v.as_i64()).filter(|pid| *pid > 0 && *pid <= i32::MAX as i64) {
+                        if unsafe { libc::kill(pid as i32, 0) } != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                            rec.status = "finished".into();
+                            agent["interrupted"] = serde_json::json!(true);
+                        }
+                    }
+                }
+            }
             sessions.push(rec);
         }
     }
@@ -949,6 +965,7 @@ fn save_session(root_path: String, session: SessionRecord) -> Result<(), String>
 fn delete_session(root_path: String, id: String) -> Result<(), String> {
     sanitize_session_id(&id)?;
     let path = sessions_dir(&root_path)?.join(format!("{}.json", id));
+    terminal_sessions::delete(&root_path, &id)?;
     if path.exists() {
         std::fs::remove_file(&path)
             .map_err(|e| format!("Failed to delete session {}: {}", id, e))?;
@@ -2020,11 +2037,14 @@ struct PtyState {
     instances: Mutex<HashMap<String, PtyInstance>>,
 }
 
+
+
 #[tauri::command]
 fn pty_spawn(
     app: tauri::AppHandle,
     id: String,
     shell: Option<String>,
+    command: Option<String>,
     cwd: Option<String>,
     cols: u16,
     rows: u16,
@@ -2045,12 +2065,7 @@ fn pty_spawn(
         .openpty(size)
         .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
-    let mut cmd = portable_pty::CommandBuilder::new(&shell_path);
-    if let Some(ref c) = cwd {
-        cmd.cwd(c);
-    }
-    // Set TERM so programs can render properly
-    cmd.env("TERM", "xterm-256color");
+    let cmd = terminal_agents::prepare(&shell_path, cwd.as_deref(), command.as_deref(), &id)?;
 
     let child = pair
         .slave
@@ -2706,6 +2721,8 @@ pub struct ChatMessage {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<serde_json::Value>,
     id: String,
     summary: String,
     /// "active" | "finished" | "archived"
@@ -3518,7 +3535,7 @@ pub async fn run_subagent(
     task: &str,
 ) -> Result<(String, SubAgentTrace), String> {
     if agent_file_policy::restricted(runner.root_path) {
-        return Err("Delegated execution is disabled to protect secret files and credential-provider sessions.".into());
+        return Err("Delegated execution is disabled to protect the configured tool permissions.".into());
     }
     if runner.depth >= MAX_SUBAGENT_DEPTH {
         return Err(format!(
@@ -3943,7 +3960,7 @@ async fn run_subagent_with_validation(
     task: &str,
 ) -> Result<(String, SubAgentTrace), String> {
     if agent_file_policy::restricted(runner.root_path) {
-        return Err("Delegated execution is disabled to protect secret files and credential-provider sessions.".into());
+        return Err("Delegated execution is disabled to protect the configured tool permissions.".into());
     }
     let root = runner
         .root_path
@@ -4010,7 +4027,7 @@ pub async fn run_micro_agent(
     task: &str,
 ) -> Result<(String, Vec<validation::ValidationResult>, SubAgentTrace), String> {
     if agent_file_policy::restricted(runner.root_path) {
-        return Err("Delegated execution is disabled to protect secret files and credential-provider sessions.".into());
+        return Err("Delegated execution is disabled to protect the configured tool permissions.".into());
     }
     if runner.depth >= MAX_MICRO_AGENT_DEPTH {
         return Err(format!(
@@ -5906,11 +5923,11 @@ fn build_tool_schemas_inner(
         }
     }
 
+
     if agent_file_policy::restricted(root_path) {
         // Credential-file protection strips every tool that can execute
         // arbitrary code — unless the user explicitly opted in from the Agent
-        // Tools panel (rust_repl / bash_sandbox only; custom tools stay gated
-        // until the sandboxed credential-provider feature is complete).
+        // Tools panel (rust_repl / bash_sandbox only; custom tools stay gated).
         tools.retain(|tool| {
             let name = tool["function"]["name"].as_str().unwrap_or("");
             agent_file_policy::automatic_tool_allowed(name)
@@ -6030,13 +6047,30 @@ async fn execute_tool(
     backend: &str,
     execution_opt_in: bool,
 ) -> Result<String, String> {
+    // Model boundary: tool output (file reads, command output, web fetches) must never carry a registered secret value into the
+    // model context. Error strings are redacted too — they can embed output.
+    execute_tool_inner(name, args, client, tool_configs, root_path, backend, execution_opt_in)
+        .await
+        .map(|output| redaction::redact(&output))
+        .map_err(|error| redaction::redact(&error))
+}
+
+async fn execute_tool_inner(
+    name: &str,
+    args: &serde_json::Value,
+    client: &reqwest::Client,
+    tool_configs: &HashMap<String, serde_json::Value>,
+    root_path: Option<&str>,
+    backend: &str,
+    execution_opt_in: bool,
+) -> Result<String, String> {
     // Credential-file protection blocks tools that can execute arbitrary code.
     // rust_repl / bash_sandbox are allowed when the user explicitly enabled
     // them in the Agent Tools panel (an informed override of the policy).
     let execution_allowed = agent_file_policy::automatic_tool_allowed(name)
         || (execution_opt_in && matches!(name, "rust_repl" | "bash_sandbox"));
     if agent_file_policy::restricted(root_path) && !execution_allowed {
-        return Err("Automatic code execution is disabled to protect secret files and credential-provider sessions. Run trusted commands in your terminal.".into());
+        return Err("Automatic code execution is disabled to protect the configured tool permissions. Run trusted commands in your terminal.".into());
     }
     if matches!(name, "read_file" | "write_file" | "edit" | "grep" | "list_directory") {
         if let Some(path) = args["path"].as_str() {
@@ -9394,6 +9428,19 @@ pub async fn run_chat(
     subagent_memory: &SubAgentMemory,
     mut req: ChatRequest,
 ) -> Result<ChatResult, String> {
+    // Model boundary: strip any registered secret value before task
+    // extraction, routing, providers, sub-agents or session logs can observe
+    // the text (user message, @file context, hook results, agent prompts).
+    for message in &mut req.messages {
+        message.content = redaction::redact(&message.content);
+    }
+    if let Some(prompt) = req.system_prompt.as_deref() {
+        let redacted = redaction::redact(prompt);
+        if redacted != prompt {
+            req.system_prompt = Some(redacted);
+        }
+    }
+
     eprintln!(
         "[nolock] ai_chat backend={} url={} model={} messages={} tools={:?} temp={:?} max_tokens={:?} system_prompt={:?}",
         req.backend,
@@ -10509,6 +10556,8 @@ pub fn run() {
             save_session,
             delete_session,
             archive_session,
+            workspace_git::git_workspace_status,
+            workspace_git::git_workspace_diff,
             git_session_files,
             git_session_file_diff,
             search_in_files,
@@ -10526,7 +10575,12 @@ pub fn run() {
             ai_chat,
             agent_file_policy::agent_read_file,
             agent_file_policy::agent_check_file_access,
-            credential_providers::credential_provider_availability,
+            terminal_agents::terminal_agent_capabilities,
+            agent_usage::agent_usage,
+            mcp_servers::list_mcp_servers,
+            mcp_servers::save_mcp_servers,
+            terminal_sessions::append_terminal_session_events,
+            terminal_sessions::read_terminal_session_events,
             pty_spawn,
             pty_write,
             pty_resize,
@@ -10844,23 +10898,22 @@ mod tests {
     fn test_execution_tool_schema_opt_in() {
         // Without the opt-in the public builder strips execution tools…
         assert!(build_tool_schemas(&["rust_repl".into()], None).is_empty());
-        // …but an explicit Agent Tools opt-in attaches them.
-        let schemas = build_tool_schemas_inner(&["rust_repl".into()], None, true, None, true);
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0]["function"]["name"], "rust_repl");
-        let schemas = build_tool_schemas_inner(&["bash_sandbox".into()], None, true, None, true);
-        assert_eq!(schemas.len(), 1);
-        assert_eq!(schemas[0]["function"]["name"], "bash_sandbox");
+        // An explicit Agent Tools opt-in attaches the supported execution tools.
+        for name in ["rust_repl", "bash_sandbox"] {
+            let schemas = build_tool_schemas_inner(&[name.into()], None, true, None, true);
+            assert_eq!(schemas.len(), 1);
+            assert_eq!(schemas[0]["function"]["name"], name);
+        }
     }
 
     #[tokio::test]
     async fn test_execute_tool_execution_opt_in() {
         let client = reqwest::Client::new();
-        // Opt-in bypasses the policy gate: rust_repl proceeds past it and fails
-        // on the missing argument instead (no compile is ever attempted).
+        // With the opt-in, rust_repl proceeds past the policy gate and fails on
+        // the missing argument instead (no compile is ever attempted).
         let result = execute_tool("rust_repl", &serde_json::json!({}), &client, &HashMap::new(), None, "ollama", true).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing required parameter"));
+        let error = result.unwrap_err();
+        assert!(error.contains("Missing required parameter"), "{error}");
         // The opt-in is scoped to rust_repl / bash_sandbox — every other
         // execution tool stays blocked even with the opt-in set.
         let result = execute_tool("custom_script", &serde_json::json!({"command":"echo hi"}), &client, &HashMap::new(), None, "ollama", true).await;

@@ -1,3 +1,4 @@
+import { sanitizeContent } from "../lib/sanitize";
 // ---------------------------------------------------------------------------
 // Notebook — native .ipynb viewer/editor with Colab-style rendering
 //
@@ -383,10 +384,10 @@ function OutputView({ output }: { output: NotebookOutput }) {
       return <img className="nb-out-image" alt="notebook output" src={`data:image/jpeg;base64,${data["image/jpeg"]}`} />;
     }
     if (typeof data["image/svg+xml"] === "string" && data["image/svg+xml"]) {
-      return <div className="nb-out-svg" dangerouslySetInnerHTML={{ __html: String(data["image/svg+xml"]) }} />;
+      return <div className="nb-out-svg" dangerouslySetInnerHTML={{ __html: sanitizeContent(String(data["image/svg+xml"])) }} />;
     }
     if (typeof data["text/html"] === "string" && data["text/html"]) {
-      return <div className="nb-out-html" dangerouslySetInnerHTML={{ __html: String(data["text/html"]) }} />;
+      return <div className="nb-out-html" dangerouslySetInnerHTML={{ __html: sanitizeContent(String(data["text/html"])) }} />;
     }
     if (typeof data["text/markdown"] === "string" && data["text/markdown"]) {
       return (
@@ -682,14 +683,14 @@ function buildExportHtml(nb: NotebookJson): string {
         return `<img class="out image" alt="output" src="data:image/jpeg;base64,${data["image/jpeg"]}" />`;
       }
       if (typeof data["image/svg+xml"] === "string" && data["image/svg+xml"]) {
-        return `<div class="out svg">${String(data["image/svg+xml"])}</div>`;
+        return `<div class="out svg">${sanitizeContent(String(data["image/svg+xml"]))}</div>`;
       }
       if (typeof data["text/html"] === "string" && data["text/html"]) {
-        return `<div class="out html">${String(data["text/html"])}</div>`;
+        return `<div class="out html">${sanitizeContent(String(data["text/html"]))}</div>`;
       }
       if (typeof data["text/markdown"] === "string" && data["text/markdown"]) {
         const { masked, restore } = protectMath(String(data["text/markdown"]));
-        return `<div class="out md">${restore(marked.parse(masked) as string)}</div>`;
+        return `<div class="out md">${sanitizeContent(restore(marked.parse(masked) as string))}</div>`;
       }
       if (typeof data["text/plain"] === "string" && data["text/plain"]) {
         return `<pre class="out text">${escapeHtml(String(data["text/plain"]))}</pre>`;
@@ -727,7 +728,7 @@ function buildExportHtml(nb: NotebookJson): string {
       const src = sourceToString(cell.source);
       if (cell.cell_type === "markdown") {
         const { masked, restore } = protectMath(src);
-        return `<div class="cell md">${restore(marked.parse(masked) as string)}</div>`;
+        return `<div class="cell md">${sanitizeContent(restore(marked.parse(masked) as string))}</div>`;
       }
       if (cell.cell_type !== "code") {
         return `<div class="cell raw"><pre class="src">${escapeHtml(src)}</pre></div>`;

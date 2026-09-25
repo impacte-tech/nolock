@@ -4,7 +4,7 @@
 // Hooks are project-local YAML files in `.hooks/` (managed through the Rust
 // `list_hooks` / `read_hook` / `save_hook` commands). A hook defines:
 //   - a trigger: a CLI command prefix (`git commit`), a cron schedule, or a
-//     manual `!hook-name` signal from chat
+//     manual `/hook hook-name` signal from chat
 //   - an agent run: an optional existing agent (`.agents/`), an inline system
 //     prompt, skills to inject (`.skills/`), and an explicit tool set
 //
@@ -360,7 +360,6 @@ async function executeHookRun(
 
   const apiKey =
     (await getSecret(`apiKey.${backend}`)) ??
-    localStorage.getItem(`nolock.apiKey.${backend}`) ??
     "";
 
   // System prompt: inline prompt > referenced agent > generic fallback.
@@ -386,7 +385,7 @@ async function executeHookRun(
 
   let toolConfigs: Record<string, Record<string, string>> = {};
   try {
-    const raw = localStorage.getItem("nolock.toolConfig") ?? "{}";
+    const raw = (await getSecret("toolConfig")) ?? "{}";
     toolConfigs = JSON.parse(raw);
   } catch {
     toolConfigs = {};

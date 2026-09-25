@@ -185,7 +185,7 @@ async function faqAuth(): Promise<{ backend: string; url: string; apiKey: string
   const backend = getChatBackend();
   const url = resolveBackendUrl(backend);
   const apiKey =
-    (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
+    (await getSecret(`apiKey.${backend}`)) ?? "";
   return { backend, url, apiKey };
 }
 

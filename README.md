@@ -98,7 +98,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **AI Inline Completions** — Fill-In-The-Middle (FIM) code suggestions from your local AI backend, debounced and triggered on typing pauses.
 - **Agent Chat** — Multi-turn conversational AI chat with file referencing (`@` mentions), tool calling (web search, web fetch, file read, directory listing, grep, edit, write_file), custom tools via `.tools/`, and context token tracking.
 - **AI Agent Manager** — Create and manage specialized AI agents (e.g., code-reviewer, doc-writer) stored as `.md` files (Markdown with YAML frontmatter) in the `.agents/` directory with custom system prompts. Legacy `.json` format is still supported.
-- **Hooks** — Project-local automation rules (`.hooks/`) that trigger AI agent runs on CLI commands (e.g. `git commit`), cron schedules, or manual `!hook-name` signals. Open via <kbd>Ctrl+A, H</kbd>.
+- **Hooks** — Project-local automation rules (`.hooks/`) that trigger AI agent runs on CLI commands (e.g. `git commit`), cron schedules, or manual `/hook hook-name` signals. Open via <kbd>Ctrl+A, H</kbd>.
 - **Human Feedback (RLHF)** — Collect thumbs-up/thumbs-down (KTO) and pairwise preference (DPO) feedback on AI chat responses. KTO and DPO data live in separate top-level directories under `.rlhf/`, each partitioned by model configuration, ready for downstream RLHF training. Enable/disable via <kbd>Ctrl+A, R</kbd>.
 - **Integrated Terminal** — Real PTY-based shell sessions with multiple tabs, resize support, and command history tracking.
 - **Terminal Memory** — Automatically records commands, tracks frequency, and lets you organize commands into categories for quick recall.
@@ -228,7 +228,7 @@ Hooks come in three trigger flavors:
 |---|---|
 | **Command** | After a CLI command whose leading words match a pattern — whether **you** run it in the terminal or the **AI agent** runs it via its `bash_sandbox` tool. |
 | **Cron** | On a repeating schedule (5-field cron expression) while nolock is open. |
-| **Manual** | When you type `!hook-name` in the chat panel, or press **Run now** in the Hooks panel. |
+| **Manual** | When you type `/hook hook-name` in the chat panel, or press **Run now** in the Hooks panel. |
 
 ### Creating a Hook
 
@@ -274,7 +274,7 @@ Field reference:
 ### Tips
 
 - Command triggers match **whole leading words**, so scope them deliberately: `git push` matches `git push origin main`, while a hook for `git` alone would fire on every git command.
-- Use `!hook-name` in the chat panel to trigger any hook manually without opening the Hooks panel.
+- Use `/hook hook-name` in the chat panel to trigger any hook manually without opening the Hooks panel.
 
 ---
 
@@ -691,3 +691,53 @@ Within the search panel (`Ctrl+F, S`):
 <p align="center">
   <sub>Built with ❤️ for local-first, privacy-respecting development.</sub>
 </p>
+
+### Shell commands from chat
+
+Start a message with `!` (as its very first character) to run a shell command,
+for example `! aws login` or `!pwd`. Leading whitespace prevents shell mode.
+Commands open in an interactive terminal in the current project directory;
+use that terminal for login prompts, input, output, and Ctrl+C. They bypass the AI.
+An empty `!` does nothing. Manual hooks use `/hook hook-name`.
+
+All terminals use your normal host shell, home directory, startup files, environment,
+and agent logins with full access. Each `!` command starts a fresh terminal; `cd`
+and `export` persist only within that terminal. There is no credential broker.
+
+### Project MCP connections
+
+Use **MCP → Manage MCP servers** to configure project-specific local stdio or
+remote HTTP(S) servers, including localhost. New launches of `codex`, `claude`,
+and `opencode` receive enabled connections through their native configuration.
+See [project MCP setup](docs/mcp-servers.md) for storage and client details.
+
+### Terminal agent sessions
+
+Open as many terminals as you need. Use **Arrange** for tabs, columns or a grid;
+expand a terminal into the editor area and double-click its name to rename it.
+Rearranging preserves processes, and terminals retain their original project.
+
+Each launch of `codex`, `claude` or `opencode` gets its own saved session, including
+concurrent and successive runs in the same terminal. For another coding agent,
+use `nolock-agent run COMMAND [args...]`. **Terminal → Agent Sessions...** shows
+running and completed runs, exit status and recorded output. These are terminal
+recordings, not imported native conversations or automatic resume checkpoints.
+Native agent history and authentication remain in their usual locations.
+
+The same panel consolidates native **token usage by agent, provider and model**
+for Codex, Claude Code and OpenCode in the project and its subfolders. It shows
+input/output, cached input and reasoning breakdowns; use **Refresh usage** to
+update counters. Missing usage stays unavailable, and older fork histories show
+an accuracy warning. See [usage details](docs/mcp-servers.md#token-usage-across-agents).
+
+Agent output is recorded automatically in `.sessions/`, up to 8 MiB per run.
+Output may include echoed input or sensitive values. Sessions are local and are
+not automatically inserted into model context. Deleting a recording does not
+stop the agent. Ordinary shell activity can still be associated with a Nolock
+chat session; its **Record transcript** toggle remains opt-in.
+
+### Live workspace changes
+
+The **Git** rail on the right opens a resizable repository-wide diff panel, between the editor and agent chat. It reads Git's current staged, unstaged, untracked and conflicted files independently of session history. Select a file under **Staged** or **Changes** to inspect that version's diff. Ignored files stay excluded; opening a subfolder still reviews the containing repository. The panel is read-only and updates every three seconds while open and visible. Large diff previews are capped at 2 MiB / 5,000 lines.
+
+The file explorer refreshes the root and expanded folders every two seconds while visible, and on window focus. New, renamed and deleted files from built-in agents, terminal harnesses or external editors appear without collapsing the tree. This refresh does not replace unsaved editor buffers.
