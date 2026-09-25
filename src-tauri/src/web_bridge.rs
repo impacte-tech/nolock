@@ -242,8 +242,8 @@ pub fn faq_create_category(root_path: String, name: String) -> Result<super::faq
     super::faq_create_category(root_path, name)
 }
 
-pub fn faq_rename_category(root_path: String, id: u64, name: String) -> Result<(), String> {
-    super::faq_rename_category(root_path, id, name)
+pub fn faq_rename_category(root_path: String, id: u64, name: String, automatic: Option<bool>) -> Result<(), String> {
+    super::faq_rename_category(root_path, id, name, automatic)
 }
 
 pub fn faq_delete_category(root_path: String, id: u64) -> Result<(), String> {
@@ -280,4 +280,9 @@ pub fn faq_delete_entry(root_path: String, id: u64) -> Result<(), String> {
 
 pub fn upload_file(directory: String, name: String, content: Vec<u8>) -> Result<String, String> {
     super::upload_file(directory, name, content)
+}
+
+
+pub async fn faq_category_name(req: super::ChatRequest) -> Result<String, String> {
+    super::faq_category_name(req).await
 }

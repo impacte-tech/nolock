@@ -5,18 +5,18 @@
 // `<root>/.faq/nolock-faq.db`):
 //   - automatic categories: on load, unassigned entries are clustered by
 //     embedding similarity into groups of at most Top K (from the Chat Model
-//     panel) and each group becomes an auto-category named after the
-//     most-asked question;
+//     panel) and each group becomes an auto-category with a short topic name from the chat model;
 //   - manual categories: create / rename / delete, and move Q→A pairs between
 //     them (moving any entry 'freezes' it out of auto-clustering);
 //   - edit any question/answer pair (re-embeds it), delete any pair;
 //   - search matches category names, questions AND answers.
 // ---------------------------------------------------------------------------
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import Select from "./Select";
 import {
   faqListCategories,
+  nameFaqCategories,
   faqStats,
   faqCreateCategory,
   faqRenameCategory,
@@ -63,11 +63,19 @@ function textMatches(needle: string, ...haystacks: string[]): boolean {
   return haystacks.some((h) => h.toLowerCase().includes(q));
 }
 
+/** Legacy auto-categories were created as "Topic"/"Topic N" placeholders —
+ * while a naming pass is pending, their representative question is shown
+ * instead so the UI never displays a numbered placeholder. */
+function isNumberedTopic(name: string): boolean {
+  return /^(topic(\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten))?)$/i.test(name.trim());
+}
+
 export default function FaqPanel({ visible, onClose, rootPath }: Props) {
   const [list, setList] = useState<FaqCategoryList | null>(null);
   const [stats, setStats] = useState<FaqStats | null>(null);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
+  const [naming, setNaming] = useState(false);
   const [error, setError] = useState<string | null>(null); // action errors
   const [newCategory, setNewCategory] = useState("");
   const [renaming, setRenaming] = useState<number | null>(null);
@@ -81,45 +89,64 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [autoNote, setAutoNote] = useState("");
 
+  const request = useRef(0);
   const topK = getFaqConfig().topK;
 
   const load = useCallback(async () => {
-    if (!rootPath) {
-      setList(null);
-      setStats(null);
-      return;
-    }
+    const version = ++request.current;
+    setNaming(false);
+    if (!rootPath) { setList(null); setStats(null); return; }
     setBusy(true);
     setError(null);
+    const cfg = getFaqConfig();
     try {
-      const cfg = getFaqConfig();
-      setList(await faqListCategories(rootPath, cfg.topK, cfg.minSimilarity));
-      setStats(await faqStats(rootPath));
-      setAutoNote(`Only Learning mode accumulates knowledge — answered exchanges are indexed here automatically. Auto-categories group similar questions (cosine ≥ ${(cfg.minSimilarity * 100).toFixed(0)}%, at most Top K ${cfg.topK} per group, most-asked first). Move entries to a manual category to stop them being re-grouped.`);
+      const [next, info] = await Promise.all([
+        faqListCategories(rootPath, cfg.topK, cfg.minSimilarity), faqStats(rootPath),
+      ]);
+      if (version !== request.current) return;
+      setList(next);
+      setStats(info);
+      setAutoNote(`Learning mode saves answered questions here. Similar questions are grouped together and named by your chat model. Rename any category or use a question’s category selector to organize it yourself.`);
+      setBusy(false);
+      if (next.categories.some((c) => c.needsName)) {
+        setNaming(true);
+        try { await nameFaqCategories(rootPath, next, () => version === request.current); }
+        catch (e) { if (version === request.current) setError(String(e)); }
+        if (version !== request.current) return;
+        const named = await faqListCategories(rootPath, cfg.topK, cfg.minSimilarity);
+        if (version === request.current) setList(named);
+      }
     } catch (e) {
-      setError(String(e));
-      setList(null);
-      setStats(null);
+      if (version === request.current) setError(String(e));
+    } finally {
+      if (version === request.current) { setBusy(false); setNaming(false); }
     }
-    setBusy(false);
   }, [rootPath]);
 
   useEffect(() => {
-    if (!visible) return;
+    setList(null);
+    setStats(null);
+    setEditingId(null);
+    setRenaming(null);
+    setExpanded(new Set());
     setQuery("");
-    void load();
+    if (visible) void load();
+    return () => { request.current++; };
   }, [visible, load]);
 
   const run = async (action: () => Promise<void>) => {
+    if (busy) return;
+    const version = ++request.current;
+    setNaming(false);
     setBusy(true);
     setError(null);
     try {
       await action();
-      await load();
+      if (version === request.current) await load();
     } catch (e) {
-      setError(String(e));
+      if (version === request.current) setError(String(e));
     }
-    setBusy(false);
+    if (version === request.current) setBusy(false);
   };
 
   const createCategory = () => {
@@ -168,9 +195,9 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
     const question = editQuestion.trim();
     const answer = editAnswer;
     const categoryId = editCategoryId === "" ? null : Number(editCategoryId);
-    setEditingId(null);
     void run(async () => {
       await faqUpdateEntry(rootPath, saving, question, answer, categoryId, editModel, editBackend);
+      setEditingId(null);
     });
   };
 
@@ -191,7 +218,16 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
 
   if (!visible) return null;
 
-  const categories = list?.categories ?? [];
+  const categories = (list?.categories ?? []).map((category) => ({
+    ...category,
+    // Auto-categories carry a real (question-derived) label from creation;
+    // only legacy "Topic N" placeholder rows fall back to their representative
+    // question while the model naming pass is pending. The UI never shows
+    // "Awaiting category name".
+    name: category.needsName && isNumberedTopic(category.name)
+      ? (category.entries[0]?.question ?? category.name)
+      : category.name,
+  }));
   const uncategorized = list?.uncategorized ?? [];
   const totalCount = stats?.count ?? 0;
 
@@ -219,12 +255,14 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal faq-panel" role="dialog" aria-modal="true" aria-label="Knowledge Base" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <span>Knowledge Base (.faq)</span>
-          <button onClick={onClose}>&times;</button>
+          <button aria-label="Close knowledge base" onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
+          {naming && <div role="status">Naming categories with the chat model… You can keep editing.</div>}
+          {error && <div className="faq-error" role="alert">{error}</div>}
           {!rootPath ? (
             <span style={{ fontSize: 11, color: "var(--text-muted)", display: "block" }}>
               Open a project folder to view its knowledge base. Each project keeps its own
@@ -234,27 +272,17 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
             <span style={{ fontSize: 11, color: "var(--text-muted)", display: "block" }}>
               Loading knowledge base…
             </span>
-          ) : totalCount === 0 ? (
-            <>
-              <span style={{ fontSize: 11, color: "var(--text-muted)", display: "block" }}>
-                No learned entries yet for <strong>{rootPath}</strong>. Switch the chat to{" "}
-                <strong>Learning mode</strong> (Chat Model panel) and ask questions — nolock
-                indexes each answered exchange and groups similar ones into categories here.
-              </span>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                <button className="btn-secondary" onClick={() => void load()}>Refresh</button>
-              </div>
-            </>
           ) : (
             <>
+              {totalCount === 0 && <p className="faq-empty">No learned entries yet. Switch the chat to Learning mode and ask a question to start your knowledge base.</p>}
               {stats && (
                 <div style={{ marginBottom: 8, fontSize: 11, color: "var(--text-muted)" }}>
                   <strong>{stats.count}</strong> learned exchange{stats.count === 1 ? "" : "s"}
-                  · embedding <code>{stats.model}</code>
-                  {stats.dimension > 0 ? ` · ${stats.dimension}-dim` : ""}
-                  <span style={{ display: "block", marginTop: 2 }} title={stats.dbPath}>
-                    Store: <code>{stats.dbPath}</code>
-                  </span>
+                  {` · ${categories.length} categories`}
+                  <details className="faq-details"><summary>Index details</summary>
+                    <p>Embedding: {stats.model} · {stats.dimension} dimensions</p>
+                    <code>{stats.dbPath}</code>
+                  </details>
                 </div>
               )}
               <div style={{ marginBottom: 10, fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
@@ -295,10 +323,6 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
                   style={{ width: "100%" }}
                 />
               </div>
-
-              {error && (
-                <div style={{ marginBottom: 8, fontSize: 11, color: "var(--danger, #c0392b)" }}>{error}</div>
-              )}
 
               {searching ? (
                 <>
@@ -372,7 +396,7 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
                   {uncategorized.length > 0 && (
                     <div style={{ marginTop: 12, padding: "8px 10px", background: "var(--surface)", border: "1px dashed var(--border)", borderRadius: 6 }}>
                       <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--text-muted)" }}>
-                        Unassigned ({uncategorized.length}) <span style={{ textTransform: "none", fontWeight: 400 }}>— auto-grouped from Top K on each refresh</span>
+                        Unassigned ({uncategorized.length}) <span style={{ textTransform: "none", fontWeight: 400 }}>— choose a category to organize these questions</span>
                       </div>
                       {uncategorized.map((entry) => (
                         <EntryCard
@@ -451,7 +475,7 @@ function EntryCard(props: CardProps) {
 
   if (isEditing) {
     return (
-      <div style={{ marginTop: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-secondary)" }}>
+      <div className="faq-entry" style={{ marginTop: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-secondary)" }}>
         <input
           className="field-input"
           value={props.editQuestion}
@@ -484,7 +508,7 @@ function EntryCard(props: CardProps) {
   }
 
   return (
-    <div style={{ marginTop: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6 }}>
+    <div className="faq-entry" style={{ marginTop: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6 }}>
       <strong style={{ fontSize: 12, display: "block" }}>{entry.question}</strong>
       <span style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginTop: 2 }}>
         {formatMeta(entry)}
@@ -499,7 +523,7 @@ function EntryCard(props: CardProps) {
         <button type="button" className="btn-secondary" onClick={props.onStartEdit} disabled={busy}>Edit</button>
         <Select
           value={entry.categoryId != null ? String(entry.categoryId) : ""}
-          onChange={props.onMove}
+          onChange={(value) => { if (!busy) props.onMove(value); }}
           options={categoryOptions}
           placeholder={categoryName ?? "Unassigned"}
           style={{ minWidth: 120 }}
@@ -547,7 +571,7 @@ interface CategoryProps {
 function CategorySection(props: CategoryProps) {
   const { category } = props;
   return (
-    <div style={{ marginTop: 10, padding: "8px 10px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
+    <div className="faq-category" style={{ marginTop: 10, padding: "8px 10px", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         {props.renaming === category.id ? (
           <>
@@ -567,7 +591,7 @@ function CategorySection(props: CategoryProps) {
             <strong style={{ fontSize: 12, flex: 1 }}>{category.name}</strong>
             {category.isAuto ? (
               <span style={{ fontSize: 10, color: "var(--text-muted)", border: "1px solid var(--border)", borderRadius: 4, padding: "1px 5px" }}>
-                auto · Top K {props.topK}
+                {category.needsName ? "Automatic (naming…)" : "Automatic"}
               </span>
             ) : (
               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>manual</span>
@@ -578,7 +602,7 @@ function CategorySection(props: CategoryProps) {
             <button type="button" className="btn-secondary" onClick={() => {
               props.setRenameName(category.name);
               props.setRenaming(category.id);
-            }} disabled={category.isAuto || props.busy} title={category.isAuto ? "Auto categories are managed from Top K" : undefined}>
+            }} disabled={props.busy}>
               Rename
             </button>
             <button type="button" className="btn-secondary" style={{ color: "var(--danger, #c0392b)" }} onClick={props.onDelete} disabled={props.busy}>

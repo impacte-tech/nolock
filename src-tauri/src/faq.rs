@@ -139,6 +139,7 @@ pub struct FaqCategory {
     pub id: u64,
     pub name: String,
     pub is_auto: bool,
+    pub needs_name: bool,
     pub size: u64,
     pub entries: Vec<FaqEntry>,
 }
@@ -237,6 +238,7 @@ fn ensure_text_schema(conn: &Connection) -> Result<(), String> {
         ("category_id", "INTEGER REFERENCES faq_categories(id)"),
         ("model", "TEXT"),
         ("backend", "TEXT"),
+        ("category_manual", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if let Err(e) = conn.execute(
             &format!("ALTER TABLE faq_entries ADD COLUMN {} {}", column, ddl),
@@ -757,13 +759,23 @@ fn cluster_ids(
     group_idx
 }
 
+/// Condense a question into a category label (short, single line).
 fn truncate_label(text: &str) -> String {
-    let mut out = text.trim().to_string();
-    if out.len() > 90 {
-        out.truncate(90);
+    let mut out = text.trim().split_whitespace()
+        .collect::<Vec<&str>>().join(" ");
+    if out.chars().count() > 90 {
+        out = out.chars().take(90).collect();
         out.push('…');
     }
     out
+}
+
+fn is_placeholder_category(name: &str) -> bool {
+    let lower = name.trim().to_lowercase();
+    if lower == "topic" { return true; }
+    lower.strip_prefix("topic ").and_then(|tail| tail.split_whitespace().next())
+        .map(|word| word.parse::<u64>().is_ok() || matches!(word, "one" | "two" | "three" | "four" | "five" | "six" | "seven" | "eight" | "nine" | "ten"))
+        .unwrap_or(false)
 }
 
 fn category_row(conn: &Connection, id: u64) -> Result<(u64, String, bool), String> {
@@ -801,30 +813,22 @@ fn load_categories(conn: &Connection) -> Result<Vec<(u64, String, bool)>, String
     Ok(out)
 }
 
-/// Find the auto-category named `label`, creating it if missing.
-fn find_or_create_auto_category(conn: &Connection, label: &str) -> Result<u64, String> {
-    match conn.query_row(
-        "SELECT id FROM faq_categories WHERE name = ?",
-        rusqlite::params!(label),
-        |row| Ok(row.get_unwrap::<usize, i64>(0)),
-    ) {
-        Ok(id) => Ok(id as u64),
-        Err(e) if format!("{}", e).contains("no rows") => {
-            conn.execute(
-                "INSERT INTO faq_categories (name, is_auto, created_at) VALUES (?, 1, ?)",
-                rusqlite::params!(label, now_secs() as i64),
-            )
-            .map_err(|e| format!("Failed to create FAQ category: {}", e))?;
-            conn.query_row(
-                "SELECT id FROM faq_categories WHERE name = ?",
-                rusqlite::params!(label),
-                |row| Ok(row.get_unwrap::<usize, i64>(0)),
-            )
-            .map_err(|e| format!("Failed to read FAQ category id: {}", e))
-            .map(|id| id as u64)
-        }
-        Err(e) => Err(format!("Failed to read FAQ category: {}", e)),
+/// Create a distinct pending category; a name collision must not merge clusters.
+fn create_auto_category(conn: &Connection, label: &str) -> Result<u64, String> {
+    let mut name = label.to_string();
+    let mut suffix = 2;
+    while conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM faq_categories WHERE name = ?)",
+        [&name], |row| row.get::<_, bool>(0),
+    ).map_err(|e| e.to_string())? {
+        name = format!("{} ({})", label, suffix);
+        suffix += 1;
     }
+    conn.execute(
+        "INSERT INTO faq_categories (name, is_auto, created_at) VALUES (?, 1, ?)",
+        rusqlite::params!(&name, now_secs() as i64),
+    ).map_err(|e| format!("Failed to create FAQ category: {}", e))?;
+    Ok(conn.last_insert_rowid() as u64)
 }
 
 fn entries_in_category(conn: &Connection, category_id: u64) -> Result<Vec<FaqEntry>, String> {
@@ -874,9 +878,10 @@ fn entries_without_category(conn: &Connection) -> Result<Vec<FaqEntry>, String> 
 /// into groups of at most `top_k` similar questions (the "Top K" config),
 /// grouped only when their cosine similarity to the group's representative is
 /// at least `min_similarity` (default 0.85 — user-configurable). Each group
-/// becomes (or joins) an auto-category named after the most-asked question.
-/// Entries the user placed in ANY category are never re-clustered — they are
-/// treated as curated and stay put. Empty auto-categories are pruned.
+/// becomes an auto-category labeled with its most-asked question; the chat
+/// model's naming pass (needs_name) may later refine that label. Entries the
+/// user placed in ANY category are never re-clustered — they are treated as
+/// curated and stay put. Empty auto-categories are pruned.
 pub fn list_categories(
     root_path: String,
     mut top_k: u32,
@@ -890,26 +895,40 @@ pub fn list_categories(
     }
     let conn = open_db(&root_path)?;
     ensure_text_schema(&conn)?;
-    // Auto categories are regenerated from the Top K config on every read:
-    // entries currently in an auto category are released back to Unassigned
-    // first, so a Top K change re-groups them. Entries in MANUAL categories
-    // are never touched (user-curated).
-    let _ = conn
-        .execute(
-            "UPDATE faq_entries SET category_id = NULL WHERE category_id IN
-               (SELECT id FROM faq_categories WHERE is_auto = 1)",
-            rusqlite::params!(),
-        )
-        .map_err(|e| format!("Failed to reset auto FAQ categories: {}", e))?;
+    conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+    // Keep names stable across reconciliation and never release user assignments.
+    let previous = top_by_frequency(&conn, 1000)?;
+    conn.execute(
+        "UPDATE faq_entries SET category_id = NULL WHERE category_manual = 0 AND category_id IN
+         (SELECT id FROM faq_categories WHERE is_auto = 1)", [],
+    ).map_err(|e| e.to_string())?;
+    let mut used_categories = std::collections::HashSet::new();
     let entries = top_by_frequency(&conn, 1000)?;
     let vectors = load_all_vectors(&conn)?;
 
     let mut uncategorized: Vec<FaqEntry> = Vec::new();
     for entry in entries.iter() {
-        if !entry.category_id.is_some() {
+        let curated: bool = conn.query_row("SELECT category_manual FROM faq_entries WHERE id = ?", [entry.id as i64], |r| r.get::<_, i64>(0)).map_err(|e| e.to_string())? != 0;
+        if entry.category_id.is_none() && !curated {
             uncategorized.push(entry.clone());
         }
     }
+    // Match new questions against curated categories as well as automatic groups.
+    // A user's explicit Unassigned choice remains excluded above.
+    let mut remaining = Vec::new();
+    for entry in uncategorized {
+        let matched = vectors.get(&entry.id).and_then(|v| {
+            entries.iter().filter(|e| e.category_id.is_some()).filter_map(|e| {
+                vectors.get(&e.id).map(|other| (e.category_id.unwrap(), cosine_sim(v, other)))
+            }).filter(|(_, similarity)| *similarity >= min_similarity)
+              .max_by(|a, b| a.1.total_cmp(&b.1))
+        });
+        if let Some((category_id, _)) = matched {
+            conn.execute("UPDATE faq_entries SET category_id = ? WHERE id = ?",
+                rusqlite::params!(category_id as i64, entry.id as i64)).map_err(|e| e.to_string())?;
+        } else { remaining.push(entry); }
+    }
+    let uncategorized = remaining;
     let clusters = cluster_ids(&uncategorized, &vectors, top_k, min_similarity);
     for cluster in clusters.iter() {
         if cluster.is_empty() {
@@ -918,8 +937,17 @@ pub fn list_categories(
         let Some(leader) = uncategorized.iter().find(|e| e.id == cluster[0]) else {
             continue;
         };
-        let label = truncate_label(&leader.question);
-        let auto_id = find_or_create_auto_category(&conn, &label)?;
+        let prior = previous.iter().find(|e| e.id == leader.id).and_then(|e| e.category_id)
+            .filter(|id| !used_categories.contains(id));
+        let auto_id = if let Some(id) = prior {
+            id
+        } else {
+            // Immediate, deterministic label: the group's most-asked question.
+            // Never a "Topic N" placeholder — the UI must always show a real
+            // name; the chat-model naming pass only refines it.
+            create_auto_category(&conn, &truncate_label(&leader.question))?
+        };
+        used_categories.insert(auto_id);
         for id in cluster.iter() {
             let _ = conn
                 .execute(
@@ -953,16 +981,16 @@ pub fn list_categories(
         }
         categories.push(FaqCategory {
             id,
+            needs_name: is_auto && (is_placeholder_category(&name) || meta_get(&conn, &format!("category_named_{}", id))?.is_none()),
             name,
             is_auto,
             size: member_entries.len() as u64,
             entries: member_entries,
         });
     }
-    Ok(FaqCategoryList {
-        categories,
-        uncategorized: entries_without_category(&conn)?,
-    })
+    let uncategorized = entries_without_category(&conn)?;
+    conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+    Ok(FaqCategoryList { categories, uncategorized })
 }
 
 /// Create a manual category.
@@ -993,14 +1021,13 @@ pub fn create_category(root_path: String, name: String) -> Result<FaqCategory, S
         id,
         name,
         is_auto,
+        needs_name: false,
         size: 0,
         entries: Vec::new(),
     })
 }
 
-/// Rename a MANUAL category. Auto categories are regenerated from the Top K
-/// config, so renaming one would be wiped on the next read — the UI should
-/// steer users to move entries into a manual category instead.
+/// Rename any category and mark it as curated so its label and members persist.
 pub fn rename_category(root_path: String, id: u64, name: String) -> Result<(), String> {
     let normalized = name.trim().to_string();
     if normalized.is_empty() {
@@ -1008,16 +1035,9 @@ pub fn rename_category(root_path: String, id: u64, name: String) -> Result<(), S
     }
     let conn = open_db(&root_path)?;
     ensure_text_schema(&conn)?;
-    let is_auto = match category_row(&conn, id) {
-        Ok((_, _, is_auto)) => is_auto,
-        Err(e) => return Err(e),
-    };
-    if is_auto {
-        return Err("Auto categories are managed automatically from the Top K config. Move its entries to a manual category to take control.".into());
-    }
     let rows = conn
         .execute(
-            "UPDATE faq_categories SET name = ? WHERE id = ?",
+            "UPDATE faq_categories SET name = ?, is_auto = 0 WHERE id = ?",
             rusqlite::params!(&normalized, id as i64),
         )
         .map_err(|e| format!("Failed to rename FAQ category: {}", e))?;
@@ -1027,13 +1047,38 @@ pub fn rename_category(root_path: String, id: u64, name: String) -> Result<(), S
     Ok(())
 }
 
+/// Save a model-generated label only while the category still needs one.
+/// A concurrent manual rename always wins.
+pub fn name_auto_category(root_path: String, id: u64, name: String) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err("Expected a category name of 1–60 characters".into());
+    }
+    let mut conn = open_db(&root_path)?;
+    ensure_text_schema(&conn)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let (_, current_name, is_auto) = category_row(&tx, id)?;
+    if !is_auto || (meta_get(&tx, &format!("category_named_{}", id))?.is_some() && !is_placeholder_category(&current_name)) { return Ok(()); }
+    let mut unique = name.to_string();
+    let mut suffix = 2;
+    while tx.query_row("SELECT EXISTS(SELECT 1 FROM faq_categories WHERE name = ? AND id != ?)",
+        rusqlite::params!(&unique, id as i64), |r| r.get::<_, bool>(0)).map_err(|e| e.to_string())? {
+        unique = format!("{} ({})", name.chars().take(50).collect::<String>(), suffix);
+        suffix += 1;
+    }
+    let changed = tx.execute("UPDATE faq_categories SET name = ? WHERE id = ? AND is_auto = 1",
+        rusqlite::params!(&unique, id as i64)).map_err(|e| e.to_string())?;
+    if changed > 0 { meta_set(&tx, &format!("category_named_{}", id), "true".into())?; }
+    tx.commit().map_err(|e| e.to_string())
+}
+
 /// Delete a category; its entries move back to Unassigned (never lost).
 pub fn delete_category(root_path: String, id: u64) -> Result<(), String> {
     let conn = open_db(&root_path)?;
     ensure_text_schema(&conn)?;
     let _ = conn
         .execute(
-            "UPDATE faq_entries SET category_id = NULL WHERE category_id = ?",
+            "UPDATE faq_entries SET category_id = NULL, category_manual = 1 WHERE category_id = ?",
             rusqlite::params!(id as i64),
         )
         .map_err(|e| format!("Failed to unassign FAQ entries: {}", e))?;
@@ -1059,7 +1104,7 @@ pub fn set_entry_category(
     }
     let rows = conn
         .execute(
-            "UPDATE faq_entries SET category_id = ?, updated_at = ? WHERE id = ?",
+            "UPDATE faq_entries SET category_id = ?, category_manual = 1, updated_at = ? WHERE id = ?",
             rusqlite::params!(category_id.map(|c| c as i64), now_secs() as i64, entry_id as i64),
         )
         .map_err(|e| format!("Failed to move FAQ entry: {}", e))?;
@@ -1106,7 +1151,7 @@ pub async fn update_entry(
     }
     let rows = conn
         .execute(
-            "UPDATE faq_entries SET question = ?, answer = ?, category_id = ?, model = ?, backend = ?, updated_at = ? WHERE id = ?",
+            "UPDATE faq_entries SET question = ?1, answer = ?2, category_manual = CASE WHEN category_id IS NOT ?3 THEN 1 ELSE category_manual END, category_id = ?3, model = ?4, backend = ?5, updated_at = ?6 WHERE id = ?7",
             rusqlite::params!(&q, &answer, category_id.map(|c| c as i64), &model_opt, &backend_opt, now_secs() as i64, id as i64),
         )
         .map_err(|e| format!("Failed to update FAQ entry: {}", e))?;
@@ -1503,7 +1548,7 @@ mod tests {
     fn similarity_threshold_controls_auto_category_merging() {
         let root = test_root("threshold");
         let _ = std::fs::remove_dir_all(&root);
-        let a = upsert_with_embedding(root.clone(), "A".into(), A1.into(), vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        let _a = upsert_with_embedding(root.clone(), "A".into(), A1.into(), vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         let b = upsert_with_embedding(root.clone(), "B".into(), A1.into(), vec![0.9, 0.4, 0.0, 0.0]).unwrap();
         // cosine(a, b) ≈ 0.914.
 
@@ -1520,7 +1565,7 @@ mod tests {
         // auto-clustering regardless of the threshold.
         set_entry_category(root.clone(), b.id, Some(loose.categories[0].id)).unwrap();
         let frozen = list_categories(root.clone(), 3, 0.95).unwrap();
-        assert_eq!(frozen.categories.len(), 2); // manual keeps A+B label; A alone
+        assert_eq!(frozen.categories.iter().flat_map(|c| &c.entries).find(|e| e.id == b.id).unwrap().category_id, Some(loose.categories[0].id));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1575,9 +1620,72 @@ mod tests {
         assert_eq!(list.categories.len(), 1);
         assert_eq!(list.categories[0].size, 1);
         assert_eq!(list.categories[0].is_auto, true);
+        // The category is labeled immediately with its most-asked question —
+        // never a "Topic N"/"Awaiting category name" placeholder.
+        assert_eq!(list.categories[0].name, "How does the tool loop stop?");
         assert_eq!(list.categories[0].entries.len(), 1);
         assert_eq!(list.categories[0].entries[0].question.as_str(), "How does the tool loop stop?");
         assert_eq!(list.uncategorized.len(), 0);
         let _ = std::fs::remove_dir_all(&root);
     }
+    #[test]
+    fn curated_assignments_and_local_names_survive_refresh() {
+        let root = test_root("curated_names");
+        let _ = std::fs::remove_dir_all(&root);
+        seed(&root);
+        let initial = list_categories(root.clone(), 3, 0.85).unwrap();
+        let category = &initial.categories[0];
+        assert!(category.needs_name);
+        name_auto_category(root.clone(), category.id, "Local topic".into()).unwrap();
+        let refreshed = list_categories(root.clone(), 3, 0.85).unwrap();
+        let named = refreshed.categories.iter().find(|c| c.id == category.id).unwrap();
+        assert_eq!(named.name, "Local topic");
+        assert!(!named.needs_name);
+        let entry = named.entries[0].id;
+        set_entry_category(root.clone(), entry, None).unwrap();
+        let unassigned = list_categories(root.clone(), 1, 0.99).unwrap();
+        assert!(unassigned.uncategorized.iter().any(|e| e.id == entry));
+        let target = &unassigned.categories[0];
+        set_entry_category(root.clone(), entry, Some(target.id)).unwrap();
+        let moved = list_categories(root.clone(), 1, 0.99).unwrap();
+        assert!(moved.categories.iter().find(|c| c.id == target.id).unwrap().entries.iter().any(|e| e.id == entry));
+        rename_category(root.clone(), target.id, "My category".into()).unwrap();
+        name_auto_category(root.clone(), target.id, "Late model result".into()).unwrap();
+        let renamed = list_categories(root.clone(), 1, 0.99).unwrap();
+        assert!(renamed.categories.iter().any(|c| c.name == "My category" && !c.is_auto));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn new_questions_match_curated_knowledge() {
+        let root = test_root("curated_match");
+        let _ = std::fs::remove_dir_all(&root);
+        let a = upsert_with_embedding(root.clone(), "Password reset".into(), "Answer".into(), vec![1.0, 0.0]).unwrap();
+        let category = create_category(root.clone(), "Account access".into()).unwrap();
+        set_entry_category(root.clone(), a.id, Some(category.id)).unwrap();
+        let b = upsert_with_embedding(root.clone(), "Forgot password".into(), "Answer".into(), vec![1.0, 0.01]).unwrap();
+        let result = list_categories(root.clone(), 3, 0.85).unwrap();
+        assert_eq!(result.categories.len(), 1);
+        assert!(result.categories[0].entries.iter().any(|e| e.id == b.id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn previously_saved_numbered_topics_are_renamed() {
+        let root = test_root("placeholder_retry");
+        let _ = std::fs::remove_dir_all(&root);
+        seed(&root);
+        let initial = list_categories(root.clone(), 3, 0.85).unwrap();
+        let id = initial.categories[0].id;
+        name_auto_category(root.clone(), id, "Topic five".into()).unwrap();
+        let pending = list_categories(root.clone(), 3, 0.85).unwrap();
+        assert!(pending.categories.iter().find(|c| c.id == id).unwrap().needs_name);
+        name_auto_category(root.clone(), id, "Agent execution".into()).unwrap();
+        let named = list_categories(root.clone(), 3, 0.85).unwrap();
+        let category = named.categories.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(category.name, "Agent execution");
+        assert!(!category.needs_name);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
 }
