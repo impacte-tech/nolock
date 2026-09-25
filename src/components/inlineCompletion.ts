@@ -133,7 +133,7 @@ export class AiInlineCompletionProvider implements monaco.languages.InlineComple
       const backend = getFimBackend();
       const url = resolveBackendUrl(backend);
       const completionModel = localStorage.getItem("nolock.completionModel") || "";
-      const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
+      const apiKey = (await getSecret(`apiKey.${backend}`)) ?? "";
 
       const fitmTemperature = localStorage.getItem("nolock.fitmTemperature");
       const fitmMaxTokens = localStorage.getItem("nolock.fitmMaxTokens");

@@ -99,7 +99,7 @@ describe("App", () => {
   it("toggles chat panel on Ctrl+A, O chord", () => {
     render(<App />);
     // Chat should be hidden initially
-    expect(screen.queryByText("Agent Chat")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent Chat")).not.toBeVisible();
 
     // Send Ctrl+A to start chord
     fireEvent.keyDown(window, { key: "a", ctrlKey: true, shiftKey: false });
@@ -113,7 +113,7 @@ describe("App", () => {
     // Send Ctrl+A, O again to toggle off
     fireEvent.keyDown(window, { key: "a", ctrlKey: true, shiftKey: false });
     fireEvent.keyDown(window, { key: "o", ctrlKey: false });
-    expect(screen.queryByText("Agent Chat")).not.toBeInTheDocument();
+    expect(screen.queryByText("Agent Chat")).not.toBeVisible();
   });
 
   it("creates a terminal on Ctrl+T, O chord", () => {
@@ -127,12 +127,56 @@ describe("App", () => {
 
     // Press O to create terminal
     fireEvent.keyDown(window, { key: "O", ctrlKey: false });
-    expect(screen.getByText("Terminal 1")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Terminal 1" })).toBeInTheDocument();
 
     // Ctrl+T, O again creates Terminal 2
     fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
     fireEvent.keyDown(window, { key: "O", ctrlKey: false });
-    expect(screen.getByText("Terminal 2")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Terminal 2" })).toBeInTheDocument();
+    for (let i = 0; i < 4; i++) {
+      fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+      fireEvent.keyDown(window, { key: "O", ctrlKey: false });
+    }
+    expect(screen.getAllByRole("tab")).toHaveLength(6);
+    expect(screen.getByRole("button", { name: "New terminal" })).not.toBeDisabled();
+  });
+
+  it("creates a local terminal on Ctrl+T, L chord", () => {
+    render(<App />);
+    fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+    fireEvent.keyDown(window, { key: "L", ctrlKey: false });
+    expect(screen.getByRole("tab", { name: "Terminal 1" })).toBeInTheDocument();
+    expect(screen.queryByText("Broker")).not.toBeInTheDocument();
+  });
+
+  it("cycles the active terminal on Ctrl+T, N chord", () => {
+    render(<App />);
+    for (let i = 0; i < 2; i++) {
+      fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+      fireEvent.keyDown(window, { key: "O", ctrlKey: false });
+    }
+    // Terminal 2 was just created, so it is active
+    expect(screen.getByRole("tab", { name: "Terminal 2", selected: true })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+    fireEvent.keyDown(window, { key: "N", ctrlKey: false });
+    expect(screen.getByRole("tab", { name: "Terminal 1", selected: true })).toBeInTheDocument();
+    // Wraps around
+    fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+    fireEvent.keyDown(window, { key: "N", ctrlKey: false });
+    expect(screen.getByRole("tab", { name: "Terminal 2", selected: true })).toBeInTheDocument();
+  });
+
+  it("closes the active terminal on Ctrl+T, W chord", () => {
+    render(<App />);
+    for (let i = 0; i < 2; i++) {
+      fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+      fireEvent.keyDown(window, { key: "O", ctrlKey: false });
+    }
+    fireEvent.keyDown(window, { key: "t", ctrlKey: true, shiftKey: false });
+    fireEvent.keyDown(window, { key: "W", ctrlKey: false });
+    expect(screen.queryByRole("tab", { name: "Terminal 2" })).not.toBeInTheDocument();
+    // Focus falls back to the remaining terminal
+    expect(screen.getByRole("tab", { name: "Terminal 1", selected: true })).toBeInTheDocument();
   });
 
   it("opens browser panel on Ctrl+B, O chord", () => {
@@ -382,4 +426,18 @@ describe("App", () => {
     document.body.removeChild(textarea);
   });
 
+});
+
+it("exposes MCP and agent sessions without a Secrets menu", async () => {
+  resetTauriMocks(); localStorage.clear(); mockInvoke.mockResolvedValue([]);
+  render(<App />);
+  expect(screen.queryByRole("button", {name:"Secrets"})).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", {name:"MCP"}));
+  fireEvent.click(screen.getByText("Manage MCP servers..."));
+  expect(screen.getByRole("dialog", {name:"MCP"})).toBeInTheDocument();
+  fireEvent.keyDown(window, {key:"Escape"});
+  expect(screen.queryByRole("dialog", {name:"MCP"})).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", {name:"Terminal"}));
+  fireEvent.click(screen.getByText("Agent Sessions..."));
+  expect(screen.getByRole("dialog", {name:"Terminal agent sessions"})).toBeInTheDocument();
 });

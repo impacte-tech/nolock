@@ -69,6 +69,9 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
   const [activePath, setActivePath] = useState<string | null>(null);
   const [rootExpanded, setRootExpanded] = useState(true);
   const entriesRef = useRef<TreeDirEntry[]>([]);
+  const currentRoot = useRef(rootPath);
+  currentRoot.current = rootPath;
+  const refreshInFlight = useRef(false);
   const dragSourceRef = useRef<string | null>(null);
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
 
@@ -103,6 +106,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     setLoading(true);
     try {
       const items: DirEntry[] = await invoke("list_directory", { path: dirPath, showHidden: true });
+      if (currentRoot.current !== dirPath) return;
       setEntries(items.map((e) => ({
         ...e,
         children: undefined,
@@ -111,55 +115,64 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
       })));
     } catch (e) {
       console.error("Failed to list directory:", e);
-      setEntries([]);
+      if (currentRoot.current === dirPath) setEntries([]);
     }
-    setLoading(false);
+    if (currentRoot.current === dirPath) setLoading(false);
   }, []);
 
   /** Re-fetches directory contents at dirPath, preserving expanded/children state. */
   const reloadPreservingState = useCallback(async (dirPath: string) => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
     try {
-      const items: DirEntry[] = await invoke("list_directory", { path: dirPath, showHidden: true });
-      const oldEntries = entriesRef.current;
-
-      // Walk the entire old tree to collect expanded paths and cached children
-      const expandedPaths = new Set<string>();
-      const childrenCache = new Map<string, TreeDirEntry[] | undefined>();
-      const walkOld = (list: TreeDirEntry[]) => {
-        for (const e of list) {
-          if (e.expanded) expandedPaths.add(e.path);
-          if (e.children) {
-            childrenCache.set(e.path, e.children);
-            walkOld(e.children);
-          }
-        }
+      const snapshots = new Map<string, DirEntry[]>();
+      const read = async (path: string, old: TreeDirEntry[]) => {
+        const items = await invoke<DirEntry[]>("list_directory", { path, showHidden: true });
+        snapshots.set(path, items);
+        await Promise.all(items.filter((item) => item.is_dir && old.some((e) => e.path === item.path && e.expanded))
+          .map((item) => read(item.path, old.find((e) => e.path === item.path)?.children ?? [])));
       };
-      walkOld(oldEntries);
-
-      // Merge new items with preserved state (recursive)
-      const merge = (newItems: DirEntry[]): TreeDirEntry[] =>
-        newItems.map((item) => {
-          const wasExpanded = expandedPaths.has(item.path);
-          const cachedChildren = childrenCache.get(item.path);
-          return {
-            ...item,
-            children: cachedChildren,
-            expanded: wasExpanded,
-            loaded: wasExpanded ? true : false,
-          };
-        });
-
-      setEntries(merge(items));
+      await read(dirPath, entriesRef.current);
+      if (currentRoot.current !== dirPath) return;
+      // Merge with the latest expansion state, including clicks during the read.
+      const merge = (path: string, old: TreeDirEntry[]): TreeDirEntry[] => (snapshots.get(path) ?? old).map((item) => {
+        const previous = old.find((e) => e.path === item.path);
+        return { ...item, expanded: previous?.expanded ?? false,
+          loaded: item.is_dir && !!previous?.expanded && (snapshots.has(item.path) || !!previous?.loaded),
+          children: item.is_dir && previous?.expanded ? merge(item.path, previous.children ?? []) : undefined };
+      });
+      setEntries((old) => {
+        const next = merge(dirPath, old);
+        return JSON.stringify(next) === JSON.stringify(old) ? old : next;
+      });
     } catch (e) {
       console.error("Failed to reload directory:", e);
-    }
+    } finally { refreshInFlight.current = false; }
   }, []);
 
   useEffect(() => {
-    if (rootPath) {
-      loadDir(rootPath);
-    }
-  }, [rootPath, loadDir, refreshKey]);
+    setEntries([]);
+    entriesRef.current = [];
+    if (rootPath) void loadDir(rootPath);
+  }, [rootPath, loadDir]);
+
+  useEffect(() => {
+    if (!rootPath || !visible) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      if (disposed) return;
+      if (!document.hidden) await reloadPreservingState(rootPath);
+      if (!disposed) timer = setTimeout(refresh, 2000);
+    };
+    timer = setTimeout(refresh, 2000);
+    const focus = () => { if (!disposed) void reloadPreservingState(rootPath); };
+    window.addEventListener("focus", focus);
+    document.addEventListener("visibilitychange", focus);
+    return () => { disposed = true; clearTimeout(timer); window.removeEventListener("focus", focus); document.removeEventListener("visibilitychange", focus); };
+  }, [rootPath, visible, reloadPreservingState]);
+
+  useEffect(() => { if (rootPath && refreshKey) void reloadPreservingState(rootPath); }, [refreshKey, rootPath, reloadPreservingState]);
 
   // ---- Close context menu on outside click ----
   useEffect(() => {
@@ -197,7 +210,7 @@ export default function FileExplorer({ onFileOpen, rootPath, setRootPath, visibl
     const willExpand = !entry.expanded;
     updateEntries(entry.path, (e) => ({ ...e, expanded: willExpand }));
 
-    if (willExpand && !entry.loaded) {
+    if (willExpand) {
       try {
         const children: DirEntry[] = await invoke("list_directory", { path: entry.path, showHidden: true });
         const treeChildren: TreeDirEntry[] = children.map((c) => ({

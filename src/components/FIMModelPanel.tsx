@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { getSecret } from "../lib/secrets";
+import { useState, useEffect, useRef } from "react";
 import ModelSelector from "./ModelSelector";
 import Select from "./Select";
 import NumberField, { parseInt10 } from "./NumberField";
@@ -13,6 +14,7 @@ export default function FIMModelPanel({ visible, onClose }: Props) {
   const [completionModel, setCompletionModel] = useState("");
   const [backend, setBackend] = useState("ollama");
   const [apiKey, setApiKey] = useState("");
+  const keyLoadRef = useRef(0);
   const [temperature, setTemperature] = useState(0.2);
   const [maxTokens, setMaxTokens] = useState(64);
 
@@ -27,12 +29,20 @@ export default function FIMModelPanel({ visible, onClose }: Props) {
     // FIM uses its own provider (falls back to the global one).
     const fitmBackend = getFimBackend();
     setBackend(fitmBackend);
-    setApiKey(localStorage.getItem(`nolock.apiKey.${fitmBackend}`) || "");
+    setApiKey("");
+    const keyRequest = ++keyLoadRef.current;
+    void getSecret(`apiKey.${fitmBackend}`).then((key) => {
+      if (keyLoadRef.current === keyRequest) setApiKey(key || "");
+    });
   }, [visible]);
 
   const selectBackend = (value: string) => {
     setBackend(value);
-    setApiKey(localStorage.getItem(`nolock.apiKey.${value}`) || "");
+    setApiKey("");
+    const keyRequest = ++keyLoadRef.current;
+    void getSecret(`apiKey.${value}`).then((key) => {
+      if (keyLoadRef.current === keyRequest) setApiKey(key || "");
+    });
   };
 
   const save = () => {

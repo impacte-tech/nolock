@@ -424,7 +424,7 @@ export default function HooksPanel({ visible, onClose, rootPath }: Props) {
           ) : (
             <>
               <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
-                Hooks are YAML files in the <code style={{ background: "var(--bg-surface)", padding: "1px 5px", borderRadius: 3 }}>.hooks/</code> folder. They trigger an agent after a CLI command, on a cron schedule, or manually with <strong>!hook-name</strong> in chat. Feedback appears in the chat panel.
+                Hooks are YAML files in the <code style={{ background: "var(--bg-surface)", padding: "1px 5px", borderRadius: 3 }}>.hooks/</code> folder. They trigger an agent after a CLI command, on a cron schedule, or manually with <strong>/hook hook-name</strong> in chat. Feedback appears in the chat panel.
               </div>
               {loadingList ? (
                 <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>

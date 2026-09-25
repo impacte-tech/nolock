@@ -1,0 +1,40 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
+import McpConnections from "../McpConnections";
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+afterEach(() => { cleanup(); vi.resetAllMocks(); });
+it("saves a remote connection only to the selected project", async () => {
+  vi.mocked(invoke).mockResolvedValue({mcpServers:{}});
+  render(<McpConnections rootPath="/project-a" />);
+  await screen.findByText("No MCP servers yet. Add a connection to share it with your coding agents.");
+  fireEvent.click(screen.getByText("Add MCP server"));
+  fireEvent.change(screen.getByLabelText("Server name"), {target:{value:"docs"}});
+  fireEvent.change(screen.getByLabelText("Server URL"), {target:{value:"https://example.com/mcp"}});
+  fireEvent.click(screen.getByText("Save connection"));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_mcp_servers", {rootPath:"/project-a",config:{mcpServers:{docs:{url:"https://example.com/mcp",headers:{},disabled:false}}}}));
+  expect(await screen.findByRole("status")).toHaveTextContent("Restart running agents");
+  expect(screen.getByText("Enabled for new agent launches", {exact:false})).toBeInTheDocument();
+});
+it("disables and removes saved connections without changing others", async () => {
+  vi.mocked(invoke).mockResolvedValue({mcpServers:{docs:{url:"https://example.com/mcp"},local:{command:"tool"}}});
+  render(<McpConnections rootPath="/project" />);
+  fireEvent.click(await screen.findByRole("button", {name:"Disable docs"}));
+  await screen.findByRole("button", {name:"Enable docs"});
+  expect(invoke).toHaveBeenLastCalledWith("save_mcp_servers", {rootPath:"/project",config:{mcpServers:{docs:{url:"https://example.com/mcp",disabled:true},local:{command:"tool"}}}});
+  fireEvent.click(screen.getByRole("button", {name:"Remove docs"}));
+  await waitFor(() => expect(screen.queryByRole("button", {name:"Edit docs"})).not.toBeInTheDocument());
+  expect(screen.getByRole("button", {name:"Edit local"})).toBeInTheDocument();
+});
+it("keeps the editor and saved list intact when persistence fails", async () => {
+  vi.mocked(invoke).mockImplementation(async cmd => {if(cmd === "save_mcp_servers") throw "Settings file unavailable"; return {mcpServers:{}};});
+  render(<McpConnections rootPath="/project" />);
+  await screen.findByText("No MCP servers yet. Add a connection to share it with your coding agents.");
+  fireEvent.click(screen.getByText("Add MCP server"));
+  fireEvent.change(screen.getByLabelText("Server name"), {target:{value:"docs"}});
+  fireEvent.change(screen.getByLabelText("Server URL"), {target:{value:"https://example.com/mcp"}});
+  fireEvent.click(screen.getByText("Save connection"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Settings file unavailable");
+  expect(screen.getByLabelText("Server name")).toHaveValue("docs");
+  expect(screen.queryByRole("button", {name:"Edit docs"})).not.toBeInTheDocument();
+});

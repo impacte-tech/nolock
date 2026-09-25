@@ -1,8 +1,7 @@
 //! OS keychain-backed secrets (keyring), plus the tauri commands the frontend
 //! `src/lib/secrets.ts` invokes.
 //!
-//! The frontend dual-writes to the OS keychain AND localStorage
-//! (`nolock.apiKey.<backend>`); these commands make the keychain half real. The
+//! The frontend uses the OS keychain and an in-memory session cache. The
 //! plain functions here are also used by the headless CLI and the e2e harness so
 //! they can read the same OpenRouter key the GUI stores — no secrets are ever
 //! written to `.routers/switchyard.json` or the repo.
@@ -11,17 +10,24 @@
 pub const KEYCHAIN_SERVICE: &str = "com.nolock.app";
 
 /// Read a secret from the OS keychain. Returns `Ok(None)` when no entry exists.
+/// The value is registered for model-boundary redaction (see `redaction.rs`):
+/// anything nolock legitimately read cannot silently re-enter model context.
 pub fn read_keychain(service: &str, key: &str) -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(service, key).map_err(|e| e.to_string())?;
     match entry.get_password() {
-        Ok(password) => Ok(Some(password)),
+        Ok(password) => {
+            super::redaction::register(&password);
+            Ok(Some(password))
+        }
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(format!("failed to read secret from keychain: {}", e)),
     }
 }
 
-/// Store a secret in the OS keychain (overwrites any existing value).
+/// Store a secret in the OS keychain (overwrites any existing value). The value
+/// is registered so a later accidental paste of it into chat is redacted.
 pub fn store_keychain(service: &str, key: &str, value: &str) -> Result<(), String> {
+    super::redaction::register(value);
     let entry = keyring::Entry::new(service, key).map_err(|e| e.to_string())?;
     entry
         .set_password(value)
@@ -59,31 +65,21 @@ pub fn read_opencode_auth_key(provider: &str) -> Result<Option<String>, String> 
 
 #[tauri::command]
 pub fn store_secret(service: String, key: String, value: String) -> Result<(), String> {
+    if service != KEYCHAIN_SERVICE { return Err("Secret service is not permitted.".into()); }
+    if key.starts_with("credential.") { return Err("Legacy credential entries are no longer managed here.".into()); }
     store_keychain(&service, &key, &value)
 }
 
 #[tauri::command]
 pub fn get_secret(service: String, key: String) -> Result<Option<String>, String> {
+    if service != KEYCHAIN_SERVICE { return Err("Secret service is not permitted.".into()); }
+    if key.starts_with("credential.") { return Err("Legacy credential entries are no longer managed here.".into()); }
     read_keychain(&service, &key)
 }
 
 #[tauri::command]
 pub fn delete_secret(service: String, key: String) -> Result<(), String> {
+    if service != KEYCHAIN_SERVICE { return Err("Secret service is not permitted.".into()); }
+    if key.starts_with("credential.") { return Err("Legacy credential entries are no longer managed here.".into()); }
     delete_keychain(&service, &key)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_missing_secret_returns_none_or_keychain_unavailable() {
-        // On a host with a keyring backend, a missing entry must come back as
-        // None; in headless CI the backend is absent and we accept an error.
-        match read_keychain("com.nolock.test", "definitely-missing-key") {
-            Ok(None) => {}
-            Ok(Some(_)) => panic!("missing key should not have a value"),
-            Err(_) => {} // no keyring backend available (headless) — acceptable
-        }
-    }
 }

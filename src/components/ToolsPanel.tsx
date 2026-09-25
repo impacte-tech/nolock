@@ -1,8 +1,7 @@
-import CredentialProviders from "./CredentialProviders";
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import NumberField, { parseInt10 } from "./NumberField";
-import { setSecret } from "../lib/secrets";
+import { getSecret, setSecret } from "../lib/secrets";
 import { getChatBackend } from "../lib/backends";
 
 interface Props {
@@ -98,9 +97,9 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
   useEffect(() => {
     if (!visible) return;
     const toolsRaw = localStorage.getItem("nolock.toolsEnabled");
-    const toolConfigRaw = localStorage.getItem("nolock.toolConfig");
+
     setToolsEnabled(toolsRaw ? JSON.parse(toolsRaw) : []);
-    setToolConfig(toolConfigRaw ? JSON.parse(toolConfigRaw) : {});
+    void getSecret("toolConfig").then((raw) => setToolConfig(raw ? JSON.parse(raw) : {}));
     const savedMax = localStorage.getItem("nolock.toolMaxIterations");
     setMaxIterations(savedMax ? parseInt(savedMax, 10) : 10);
     setShowNewToolForm(false);
@@ -180,7 +179,6 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
 
   const save = () => {
     localStorage.setItem("nolock.toolsEnabled", JSON.stringify(toolsEnabled));
-    localStorage.setItem("nolock.toolConfig", JSON.stringify(toolConfig));
     localStorage.setItem("nolock.toolMaxIterations", String(maxIterations));
     setSecret("toolConfig", JSON.stringify(toolConfig));
     onClose();
@@ -333,7 +331,6 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
             </div>
           )}
 
-          <CredentialProviders />
           {/* --- Custom Tools (from .tools/) --- */}
           {supportsTools && rootPath && (
             <div style={{ marginTop: 20, borderTop: "1px solid var(--border)", paddingTop: 16 }}>

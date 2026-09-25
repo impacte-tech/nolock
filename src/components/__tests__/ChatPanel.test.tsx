@@ -27,6 +27,32 @@ describe("ChatPanel", () => {
     vi.clearAllTimers();
   });
 
+  it.each(["!aws login", "!pwd", "! echo hello\nprintf world", "!!"])(
+    "runs %s directly in the terminal without invoking AI",
+    async (text) => {
+      localStorage.removeItem("nolock.chatModel");
+      const onRunShell = vi.fn();
+      render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} onRunShell={onRunShell} />);
+      fireEvent.change(screen.getByPlaceholderText(/Ask the AI/), { target: { value: text } });
+      fireEvent.click(screen.getByText("Send"));
+      expect(onRunShell).toHaveBeenCalledExactlyOnceWith(text.slice(1));
+      expect(screen.getByPlaceholderText(/Ask the AI/)).toHaveValue("");
+      expect(mockInvoke.mock.calls.some(([cmd]) => String(cmd).includes("chat_completion"))).toBe(false);
+    },
+  );
+
+  it.each([" !pwd", "\n!pwd", "hello !pwd", "!", "!   "])(
+    "does not execute a shell command for %j",
+    (text) => {
+      localStorage.removeItem("nolock.chatModel");
+      const onRunShell = vi.fn();
+      render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} onRunShell={onRunShell} />);
+      fireEvent.change(screen.getByPlaceholderText(/Ask the AI/), { target: { value: text } });
+      fireEvent.click(screen.getByText("Send"));
+      expect(onRunShell).not.toHaveBeenCalled();
+    },
+  );
+
   it("renders empty chat state", () => {
     render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} />);
     expect(screen.getByText(/Ask anything about your code/)).toBeInTheDocument();
@@ -349,12 +375,9 @@ describe("ChatPanel", () => {
 
   it("shows tool calls in the session summary opened from the picker", async () => {
     // list_sessions returns the record exactly as the Rust backend serializes
-    // it: camelCase message keys, snake_case tool-call result fields. Use the
-    // REAL persisted session file (67 tool calls) as the payload.
-    const { readFileSync } = await import("node:fs");
-    const realSession = JSON.parse(
-      readFileSync("/home/amazonas/Projects/homelab/nolock/.sessions/s_mtmxtsq9_fvnd1yui.json", "utf8"),
-    );
+    // it: camelCase message keys, snake_case tool-call result fields. The
+    // fixture mirrors that shape (67 tool calls) without touching disk.
+    const realSession = (await import("./fixtures/session-security-review.json")).default;
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "list_sessions") {
         return Promise.resolve([realSession]);

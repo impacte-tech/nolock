@@ -161,7 +161,6 @@ struct AppState {
     term_memory: Arc<main_impl::terminal_memory::TermMemory>,
     ptys: Mutex<HashMap<String, WebPty>>,
     kernels: Mutex<HashMap<String, main_impl::pykernel::KernelInstance>>,
-    secrets_path: PathBuf,
     dist_dir: PathBuf,
     auth_token: Option<String>,
     /// Optional llama.cpp service URL (from `LLAMACPP_URL` env var, set by
@@ -200,36 +199,6 @@ fn authorized(state: &AppState, headers: &HeaderMap, query_token: Option<&str>) 
     false
 }
 
-// ---------------------------------------------------------------------------
-// File-backed secret store (headless replacement for the OS keychain — the
-// desktop keyring needs a secret service/dbus which doesn't exist on a server)
-// ---------------------------------------------------------------------------
-
-fn secrets_load(path: &PathBuf) -> HashMap<String, String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default()
-}
-
-fn secrets_save(path: &PathBuf, map: &HashMap<String, String>) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create data directory: {}", e))?;
-    }
-    let json = serde_json::to_string_pretty(map)
-        .map_err(|e| format!("Failed to serialize secrets: {}", e))?;
-    std::fs::write(path, json).map_err(|e| format!("Failed to write secrets: {}", e))
-}
-
-#[cfg(unix)]
-fn secrets_harden(path: &PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
-
-#[cfg(not(unix))]
-fn secrets_harden(_path: &PathBuf) {}
 
 // ---------------------------------------------------------------------------
 // Dispatch plumbing
@@ -286,6 +255,8 @@ args!(SkillArgs { root_path: String, skill_name: String });
 args!(RunToolArgs { root_path: String, tool_name: String, args: serde_json::Value });
 args!(SaveHookArgs { root_path: String, name: String, config: serde_json::Value });
 args!(WriteSwitchyardArgs { root_path: String, config: main_impl::switchyard::SwitchyardConfig });
+args!(TerminalEventsArgs { root_path: String, session_id: String, events: Vec<main_impl::terminal_sessions::Event> });
+args!(TerminalSessionArgs { root_path: String, session_id: String });
 args!(SessionIdArgs { root_path: String, id: String });
 args!(SaveSessionArgs { root_path: String, session: main_impl::SessionRecord });
 args!(ArchiveArgs { root_path: String, id: String, summary: String });
@@ -301,7 +272,8 @@ args!(TermCmdArgs { command: String });
 args!(TermCatArgs { command: String, category: String });
 args!(SecretSetArgs { service: String, key: String, value: String });
 args!(SecretGetArgs { service: String, key: String });
-args!(PtySpawnArgs { id: String, shell: Option<String>, cwd: Option<String>, cols: u16, rows: u16 });
+args!(McpSaveArgs { root_path: String, config: main_impl::mcp_servers::Config });
+args!(PtySpawnArgs { id: String, shell: Option<String>, command: Option<String>, cwd: Option<String>, cols: u16, rows: u16 });
 args!(PtyWriteArgs { id: String, data: String });
 args!(PtyResizeArgs { id: String, cols: u16, rows: u16 });
 args!(PtyIdArgs { id: String });
@@ -355,7 +327,9 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             let a: ReadFileArgs = parse(command, args)?;
             ok(main_impl::agent_file_policy::agent_check_file_access(a.path))
         }
-        "credential_provider_availability" => ok(Ok(main_impl::credential_providers::credential_provider_availability())),
+        "terminal_agent_capabilities" => ok(Ok(main_impl::terminal_agents::terminal_agent_capabilities())),
+        "list_mcp_servers" => { let a: RootArgs = parse(command, args)?; ok(main_impl::mcp_servers::list_mcp_servers(a.root_path)) },
+        "save_mcp_servers" => { let a: McpSaveArgs = parse(command, args)?; ok(main_impl::mcp_servers::save_mcp_servers(a.root_path, a.config)) },
         "read_file" => {
             let a: ReadFileArgs = parse(command, args)?;
             ok(main_impl::web_bridge::read_file(a.path))
@@ -477,7 +451,19 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             ok(main_impl::web_bridge::write_switchyard_config(a.root_path, a.config))
         }
 
+        "append_terminal_session_events" => {
+            let a: TerminalEventsArgs = parse(command, args)?;
+            ok(main_impl::terminal_sessions::append_terminal_session_events(a.root_path, a.session_id, a.events))
+        }
+        "read_terminal_session_events" => {
+            let a: TerminalSessionArgs = parse(command, args)?;
+            ok(main_impl::terminal_sessions::read_terminal_session_events(a.root_path, a.session_id))
+        }
         // ----- Sessions (direct reuse)
+        "agent_usage" => {
+            let a: RootArgs = parse(command, args)?;
+            ok(main_impl::agent_usage::agent_usage(a.root_path).await)
+        }
         "list_sessions" => {
             let a: RootArgs = parse(command, args)?;
             ok(main_impl::web_bridge::list_sessions(a.root_path))
@@ -500,6 +486,18 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         }
 
         // ----- Git session diffs (direct reuse)
+        "git_workspace_status" => {
+            #[derive(serde::Deserialize)] #[serde(rename_all = "camelCase")]
+            struct Args { root_path: String }
+            let a: Args = parse(command, args)?;
+            ok(main_impl::workspace_git::git_workspace_status(a.root_path))
+        }
+        "git_workspace_diff" => {
+            #[derive(serde::Deserialize)] #[serde(rename_all = "camelCase")]
+            struct Args { root_path: String, path: String, area: String }
+            let a: Args = parse(command, args)?;
+            ok(main_impl::workspace_git::git_workspace_diff(a.root_path, a.path, a.area))
+        }
         "git_session_files" => {
             let a: GitFilesArgs = parse(command, args)?;
             ok(main_impl::web_bridge::git_session_files(a.root_path, a.since_ts))
@@ -628,28 +626,19 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             ok(state.term_memory.save_category(a.command, a.category))
         }
 
-        // ----- Secrets: file-backed store (no OS keychain on a server)
+        // Host keychain only; frontend keeps session-only values if unavailable.
         "store_secret" => {
             let a: SecretSetArgs = parse(command, args)?;
-            let mut map = secrets_load(&state.secrets_path);
-            map.insert(format!("{}::{}", a.service, a.key), a.value);
-            secrets_save(&state.secrets_path, &map)?;
-            secrets_harden(&state.secrets_path);
-            Ok(serde_json::Value::Null)
+            ok(main_impl::secrets::store_secret(a.service, a.key, a.value))
         }
         "get_secret" => {
             let a: SecretGetArgs = parse(command, args)?;
-            let map = secrets_load(&state.secrets_path);
-            Ok(serde_json::to_value(map.get(&format!("{}::{}", a.service, a.key)).cloned()).unwrap_or(serde_json::Value::Null))
+            ok(main_impl::secrets::get_secret(a.service, a.key))
         }
         "delete_secret" => {
             let a: SecretGetArgs = parse(command, args)?;
-            let mut map = secrets_load(&state.secrets_path);
-            map.remove(&format!("{}::{}", a.service, a.key));
-            secrets_save(&state.secrets_path, &map)?;
-            Ok(serde_json::Value::Null)
+            ok(main_impl::secrets::delete_secret(a.service, a.key))
         }
-
         // ----- RLHF dir (web data dir instead of Tauri app data dir)
         "get_rlhf_dir" => {
             let dir = data_dir().join(".rlhf");
@@ -660,7 +649,7 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         // ----- PTY terminal (web variant of the same portable-pty logic)
         "pty_spawn" => {
             let a: PtySpawnArgs = parse(command, args)?;
-            web_pty_spawn(state, a.id, a.shell, a.cwd, a.cols, a.rows)
+            web_pty_spawn(state, a.id, a.shell, a.command, a.cwd, a.cols, a.rows)
         }
         "pty_write" => {
             let a: PtyWriteArgs = parse(command, args)?;
@@ -801,6 +790,7 @@ fn web_pty_spawn(
     state: &Arc<AppState>,
     id: String,
     shell: Option<String>,
+    command: Option<String>,
     cwd: Option<String>,
     cols: u16,
     rows: u16,
@@ -814,11 +804,7 @@ fn web_pty_spawn(
         .openpty(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| format!("Failed to open PTY: {e}"))?;
 
-    let mut cmd = portable_pty::CommandBuilder::new(&shell_path);
-    if let Some(ref c) = cwd {
-        cmd.cwd(c);
-    }
-    cmd.env("TERM", "xterm-256color");
+    let cmd = main_impl::terminal_agents::prepare(&shell_path, cwd.as_deref(), command.as_deref(), &id)?;
 
     let child = pair
         .slave
@@ -1212,7 +1198,6 @@ async fn main() {
         term_memory: Arc::new(main_impl::terminal_memory::TermMemory::new()),
         ptys: Mutex::new(HashMap::new()),
         kernels: Mutex::new(HashMap::new()),
-        secrets_path: data_dir().join("secrets.json"),
         dist_dir: dist_dir.clone(),
         auth_token: auth_token.clone(),
         llamacpp_url,
@@ -1229,12 +1214,21 @@ async fn main() {
             .layer(axum::extract::DefaultBodyLimit::max(40_000_000 + 65_536)))
         .route("/api/invoke/{command}", post(invoke_handler))
         .fallback(get(static_handler))
+        .layer(axum::middleware::map_response(|mut response: axum::response::Response| async {
+            response.headers_mut().insert("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http: https: ws: wss:; worker-src 'self' blob:; frame-src http: https:; object-src 'none'; base-uri 'none'; form-action 'none'".parse().unwrap());
+            response.headers_mut().insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+            response.headers_mut().insert("Referrer-Policy", "no-referrer".parse().unwrap());
+            response
+        }))
         .with_state(state);
 
     let bind_ip: std::net::IpAddr = std::env::var("NOLOCK_WEB_BIND")
-        .unwrap_or_else(|_| "0.0.0.0".into())
+        .unwrap_or_else(|_| "127.0.0.1".into())
         .parse()
         .expect("NOLOCK_WEB_BIND must be an IPv4 or IPv6 address");
+    if !bind_ip.is_loopback() && auth_token.is_none() {
+        panic!("Set NOLOCK_WEB_TOKEN before binding nolock-server to a non-loopback interface.");
+    }
     let addr = SocketAddr::new(bind_ip, port);
     let listener = tokio::net::TcpListener::bind(addr)
         .await

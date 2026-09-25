@@ -5679,11 +5679,6 @@ select.field-input {
 .model-pull-path { display: block; overflow-wrap: anywhere; font-size: 11px; }
 
 
-.credential-providers { margin: 16px 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
-.credential-providers h3 { margin: 0 0 6px; font-size: 13px; }
-.credential-providers p, .credential-providers li { line-height: 1.5; font-size: 12px; overflow-wrap: anywhere; }
-.credential-providers ol { margin: 6px 0; padding-left: 20px; }
-.credential-providers code, .credential-providers pre { font-size: 11px; }
 .provider-options { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .provider-options button[aria-pressed="true"] { outline: 2px solid var(--accent, #79b8ff); outline-offset: 2px; }
 .provider-command { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
@@ -5786,24 +5781,94 @@ select.field-input {
 .web-path-dialog [role="alert"] { color: #ffaaaa; }
 
 
-/* Knowledge base: a roomy, readable workspace within the app's modal system. */
-.modal.faq-panel { width: min(1000px, 94vw); max-width: 1000px; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
-.faq-panel .modal-body { padding: 20px; overflow-y: auto; min-height: 0; }
-.faq-panel .modal-header, .faq-panel .modal-footer { flex-shrink: 0; }
-.faq-panel .faq-entry > div .field-select { width: auto; flex: 1; max-width: 320px; }
-.faq-panel .modal-header { padding: 16px 20px; }
-.faq-panel .field-input { min-height: 34px; }
-.faq-panel .faq-category { padding: 16px !important; margin-top: 18px !important; }
-.faq-panel .faq-entry { padding: 14px !important; background: var(--bg-secondary); }
-.faq-panel .faq-entry > strong { font-size: 14px !important; line-height: 1.5; overflow-wrap: anywhere; }
-.faq-panel .faq-entry pre { font-family: inherit; font-size: 13px !important; line-height: 1.65; padding: 12px 0; }
-.faq-panel .faq-category > div > strong { font-size: 15px !important; overflow-wrap: anywhere; }
-.faq-panel .btn-secondary { min-height: 30px; }
-.faq-details { margin-top: 8px; overflow-wrap: anywhere; }
-.faq-details summary { cursor: pointer; }
-.faq-error { padding: 12px; margin-bottom: 12px; color: var(--danger, #c0392b); border: 1px solid currentColor; border-radius: 6px; }
-.faq-empty { padding: 20px 0; color: var(--text-muted); line-height: 1.6; }
-@media (max-width: 600px) {
-  .faq-panel .modal-body { padding: 12px; }
-  .faq-panel .faq-category { padding: 10px !important; }
-}
+/* Terminal workspace uses the same flat chrome as editor tabs. */
+.terminal-workspace { display: grid; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; background: var(--terminal-bg); }
+.terminal-editor-slot, .terminal-emulator-slot { min-width: 0; min-height: 0; overflow: hidden; }
+.terminal-emulator-slot { flex: 1 1 0; }
+.terminal-workspace-pane { flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid var(--border); overflow: hidden; background: var(--terminal-bg); }
+.terminal-workspace-toolbar { display: flex; align-items: center; gap: 2px; height: 30px; padding-right: 6px; background: var(--bg-surface); border-bottom: 1px solid var(--border); min-width: 0; }
+.terminal-workspace-tabs { display: flex; align-self: stretch; flex: 1; min-width: 0; overflow-x: auto; }
+.terminal-workspace-tabs button { min-width: 0; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 12px; border: 0; border-right: 1px solid var(--border); border-bottom: 1px solid transparent; background: transparent; color: var(--text-muted); font: inherit; font-size: 11px; cursor: pointer; }
+.terminal-workspace-tabs button:hover { background: var(--hover); color: var(--text-primary); }
+.terminal-workspace-tabs [aria-selected="true"] { background: var(--bg-primary); color: var(--text-primary); border-bottom-color: var(--accent); }
+.terminal-count { color: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; padding: 0 6px; white-space: nowrap; }
+.terminal-pane-controls { display: flex; align-items: center; gap: 2px; height: 28px; flex-shrink: 0; padding: 0 6px 0 10px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); border-top: 1px solid var(--border); }
+.terminal-pane-name, .terminal-pane-controls input { flex: 1; width: 0; min-width: 0; color: var(--text-muted); font: inherit; font-size: 11px; }
+.terminal-pane-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
+.terminal-workspace-pane.active .terminal-pane-name { color: var(--text-secondary); }
+.terminal-pane-controls input { background: var(--bg-primary); border: 0; padding: 3px 4px; color: var(--text-primary); }
+.terminal-icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 24px; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.terminal-icon-button:hover:not(:disabled) { background: var(--hover); color: var(--text-primary); }
+.terminal-icon-button:disabled { opacity: .3; cursor: default; }
+.terminal-icon-button[aria-pressed="true"] { color: var(--text-primary); }
+.terminal-record[aria-pressed="true"] { color: #e57373; }
+.terminal-record[aria-pressed="true"] circle { fill: currentColor; }
+.terminal-workspace button:focus-visible, .terminal-pane-controls input:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+.terminal-workspace-toolbar [role="alert"] { display: inline-flex; align-items: center; color: var(--text-warning); font-size: 10px; }
+
+/* Workspace Git panel — same flat chrome as explorer and agent chat. */
+.workspace-git-rail { flex: 0 0 30px; border-left: 1px solid var(--border); background: var(--bg-secondary); }
+.workspace-git-rail button { display: flex; flex-direction: column; align-items: center; gap: 7px; width: 100%; padding: 12px 0; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 10px; }
+.workspace-git-rail button:hover { color: var(--text-primary); background: var(--hover); }
+.workspace-git-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg-secondary); border-left: 1px solid var(--border); }
+.workspace-git-header { display: flex; align-items: center; gap: 8px; height: 36px; flex-shrink: 0; padding: 0 10px; border-bottom: 1px solid var(--border); background: var(--bg-surface); font-size: 11px; }
+.workspace-git-header strong { font-weight: 500; }
+.workspace-git-count { flex: 1; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.workspace-git-header button { color: var(--text-muted); background: transparent; border: 0; width: 22px; height: 24px; border-radius: 3px; font-size: 17px; cursor: pointer; }
+.workspace-git-header button:hover { background: var(--hover); color: var(--text-primary); }
+.workspace-git-header button:disabled { opacity: .4; }
+.workspace-git-repo { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: space-between; padding: 10px 12px; font-size: 11px; border-bottom: 1px solid var(--border); }
+.workspace-git-repo span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-git-repo small { color: var(--text-muted); }
+.workspace-git-files { flex: 0 1 auto; max-height: 40%; overflow: auto; min-height: 0; }
+.workspace-git-files h3 { display: flex; gap: 8px; padding: 10px 12px 5px; color: var(--text-muted); font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: .6px; }
+.workspace-git-files h3 span { font-variant-numeric: tabular-nums; }
+.workspace-git-file { display: flex; align-items: center; width: 100%; gap: 7px; padding: 6px 12px; border: 0; border-left: 2px solid transparent; text-align: left; background: transparent; color: var(--text-secondary); cursor: pointer; font: inherit; font-size: 11px; }
+.workspace-git-file:hover { background: var(--hover); }
+.workspace-git-file.selected { background: var(--bg-surface); border-left-color: var(--accent); color: var(--text-primary); }
+.workspace-git-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.workspace-git-badge { flex: 0 0 14px; text-align: center; color: var(--text-warning); font: 10px monospace; }
+.workspace-git-badge.added { color: #98c379; }
+.workspace-git-badge.conflict { color: #e06c75; }
+.workspace-git-file small { color: #e06c75; }
+.workspace-git-preview { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--border); background: var(--bg-primary); }
+.workspace-git-diff-title { position: sticky; top: 0; z-index: 1; padding: 8px 12px; background: var(--bg-surface); color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; border-bottom: 1px solid var(--border); }
+.workspace-git-diff-title small { display: block; margin-top: 3px; color: var(--text-muted); }
+.workspace-git-empty { padding: 14px 12px; font-size: 11px; line-height: 1.6; color: var(--text-muted); overflow-wrap: anywhere; }
+.workspace-git-diff { margin: 0; font: 11px/1.65 'JetBrains Mono', monospace; width: max-content; min-width: 100%; }
+.workspace-git-diff .diff-line { padding: 0 12px; }
+.workspace-git-diff .diff-hunk { color: #89b4fa; background: rgba(137,180,250,.08); }
+.workspace-git-panel button:focus-visible, .workspace-git-rail button:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+
+
+.mcp-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mcp-section-heading h3, .mcp-section-heading h4 { margin: 0; font-size: 13px; font-weight: 500; }
+.mcp-section-heading p { margin: 5px 0 0; }
+.mcp-section-heading > span { color: var(--text-muted); font-size: 10px; }
+.mcp-body { gap: 18px; font-size: 12px; }
+
+.mcp-server-list { list-style: none; padding: 0; margin: 12px 0; }
+.mcp-server-list li { border-bottom: 1px solid var(--border); padding: 12px 0; }
+.mcp-server-list strong { font-size: 12px; font-weight: 500; }
+.mcp-server-list span { display: block; color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+.mcp-server-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.mcp-server-actions button { font-size: 11px; }
+.mcp-form { display: grid; gap: 12px; border: 1px solid var(--border); border-radius: 6px; padding: 14px; margin-top: 14px; min-width: 0; }
+.mcp-form label { display: grid; gap: 6px; font-size: 11px; }
+.mcp-form input, .mcp-form select, .mcp-form textarea { width: 100%; box-sizing: border-box; padding: 8px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
+.mcp-form textarea { min-height: 90px; font-family: monospace; resize: vertical; }
+.mcp-form .mcp-json { min-height: 220px; }
+.mcp-form details label { margin-top: 10px; }
+.mcp-connections > p { line-height: 1.6; }
+
+.mcp-modal { width: min(680px, 94vw); max-height: 90vh; }
+.mcp-footer { padding: 14px 20px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 11px; }
+
+.agent-session-open { display: block; text-align: left; width: 100%; border: 0; background: transparent; color: var(--text-primary); padding: 8px 0; cursor: pointer; }
+
+.agent-usage { border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+.agent-usage-table { overflow-x: auto; }
+.agent-usage table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.agent-usage th, .agent-usage td { padding: 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+.agent-usage th:first-child { text-align: left; white-space: normal; overflow-wrap: anywhere; min-width: 140px; }
+.agent-usage th small { display: block; color: var(--text-muted); font-weight: normal; }

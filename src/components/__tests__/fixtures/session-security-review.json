@@ -1,0 +1,543 @@
+{
+ "id": "s_fixture_security_review",
+ "summary": "Help me to review the security aspects of this project",
+ "status": "finished",
+ "createdAt": 1758600000,
+ "updatedAt": 1758600100,
+ "messageCount": 13,
+ "toolCallCount": 67,
+ "firstMessage": "Help me to review the security aspects of this project",
+ "lastMessage": "Security review complete. Rotate the exposed token and enable MFA.",
+ "tokenUsage": 1234,
+ "contextWindow": 128000,
+ "messages": [
+  {
+   "role": "user",
+   "content": "Help me to review the security aspects of this project",
+   "displayContent": "Help me to review the security aspects of this project",
+   "createdAt": 1758600000,
+   "tokens": 10
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 1.",
+   "createdAt": 1758600001,
+   "model": "openai/gpt-5",
+   "tokens": 121,
+   "toolCalls": [
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src/auth\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/login.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"TODO list\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/server\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/session.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 2.",
+   "createdAt": 1758600002,
+   "model": "openai/gpt-5",
+   "tokens": 122,
+   "toolCalls": [
+    {
+     "name": "credential_action",
+     "arguments": "{\"action\": \"supabase_projects\"}",
+     "result_snippet": "HTTP 200 \u00b7 3 resources",
+     "result_full": "HTTP 200 \u00b7 3 resources (names withheld)"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"password|token\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/config.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src/auth\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/login.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"TODO list\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 3.",
+   "createdAt": 1758600003,
+   "model": "openai/gpt-5",
+   "tokens": 123,
+   "toolCalls": [
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/server\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/session.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "credential_action",
+     "arguments": "{\"action\": \"supabase_projects\"}",
+     "result_snippet": "HTTP 200 \u00b7 3 resources",
+     "result_full": "HTTP 200 \u00b7 3 resources (names withheld)"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"password|token\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/config.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src/auth\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 4.",
+   "createdAt": 1758600004,
+   "model": "openai/gpt-5",
+   "tokens": 124,
+   "toolCalls": [
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/login.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"TODO list\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/server\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/session.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "credential_action",
+     "arguments": "{\"action\": \"supabase_projects\"}",
+     "result_snippet": "HTTP 200 \u00b7 3 resources",
+     "result_full": "HTTP 200 \u00b7 3 resources (names withheld)"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 5.",
+   "createdAt": 1758600005,
+   "model": "openai/gpt-5",
+   "tokens": 125,
+   "toolCalls": [
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"password|token\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/config.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src/auth\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/login.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"TODO list\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/server\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 6.",
+   "createdAt": 1758600006,
+   "model": "openai/gpt-5",
+   "tokens": 126,
+   "toolCalls": [
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/session.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "credential_action",
+     "arguments": "{\"action\": \"supabase_projects\"}",
+     "result_snippet": "HTTP 200 \u00b7 3 resources",
+     "result_full": "HTTP 200 \u00b7 3 resources (names withheld)"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"password|token\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/config.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src/auth\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 7.",
+   "createdAt": 1758600007,
+   "model": "openai/gpt-5",
+   "tokens": 127,
+   "toolCalls": [
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/login.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"TODO list\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/server\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/session.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "credential_action",
+     "arguments": "{\"action\": \"supabase_projects\"}",
+     "result_snippet": "HTTP 200 \u00b7 3 resources",
+     "result_full": "HTTP 200 \u00b7 3 resources (names withheld)"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 8.",
+   "createdAt": 1758600008,
+   "model": "openai/gpt-5",
+   "tokens": 128,
+   "toolCalls": [
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"password|token\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/config.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src/auth\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/login.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"TODO list\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/server\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 9.",
+   "createdAt": 1758600009,
+   "model": "openai/gpt-5",
+   "tokens": 129,
+   "toolCalls": [
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/session.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "credential_action",
+     "arguments": "{\"action\": \"supabase_projects\"}",
+     "result_snippet": "HTTP 200 \u00b7 3 resources",
+     "result_full": "HTTP 200 \u00b7 3 resources (names withheld)"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"password|token\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/config.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src/auth\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/login.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 10.",
+   "createdAt": 1758600010,
+   "model": "openai/gpt-5",
+   "tokens": 130,
+   "toolCalls": [
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"TODO list\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/server\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/session.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "credential_action",
+     "arguments": "{\"action\": \"supabase_projects\"}",
+     "result_snippet": "HTTP 200 \u00b7 3 resources",
+     "result_full": "HTTP 200 \u00b7 3 resources (names withheld)"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"password|token\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Reviewed area 11.",
+   "createdAt": 1758600011,
+   "model": "openai/gpt-5",
+   "tokens": 131,
+   "toolCalls": [
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/config.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "list_directory",
+     "arguments": "{\"path\": \"src/auth\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/auth/login.ts\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "search_files",
+     "arguments": "{\"pattern\": \"TODO list\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    },
+    {
+     "name": "read_file",
+     "arguments": "{\"path\": \"src/server\"}",
+     "result_snippet": "ok",
+     "result_full": "ok"
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "content": "Security review complete. Rotate the exposed token and enable MFA.",
+   "createdAt": 1758600012,
+   "model": "openai/gpt-5",
+   "tokens": 40
+  }
+ ],
+ "usage": [
+  {
+   "provider": "openai",
+   "model": "gpt-5",
+   "promptTokens": 900,
+   "completionTokens": 334,
+   "totalTokens": 1234,
+   "promptPricePerM": 1.25,
+   "completionPricePerM": 10.0,
+   "cost": 0.0045
+  }
+ ],
+ "totalCost": 0.0045
+}

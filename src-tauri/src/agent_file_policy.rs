@@ -7,7 +7,7 @@ pub fn protected_path(path: &Path) -> bool {
     if ["/proc", "/dev", "/sys"].iter().any(|root| path.starts_with(root)) { return true; }
     path.components().any(|part| {
         let name = part.as_os_str().to_string_lossy().to_lowercase();
-        name.contains(".env") || matches!(name.as_str(), ".bash_history" | ".zsh_history" | "fish_history" | ".aws" | ".ssh" | ".gnupg" | ".op" | "1password" | "bitwarden cli" | ".bitwarden")
+        name.contains(".env") || name.contains("credential-actions") || matches!(name.as_str(), ".bash_history" | ".zsh_history" | "fish_history" | ".aws" | ".ssh" | ".gnupg" | ".op" | "1password" | "bitwarden cli" | ".bitwarden" | "credential-actions.json" | "secrets.json" | "auth.json")
     })
 }
 
@@ -65,7 +65,7 @@ pub fn automatic_tool_allowed(name: &str) -> bool {
 mod tests {
     use super::*;
     #[test] fn blocks_env_variants_and_credential_paths() {
-        for path in [".env", ".env.local", ".env.example", "production.env", ".env.bak", ".ENV", "folder/.envrc", ".aws/credentials", "/proc/self/environ", "/dev/fd/1", ".config/1Password/data"] {
+        for path in [".env", ".env.local", ".env.example", "production.env", ".env.bak", ".ENV", "folder/.envrc", ".config/nolock/credential-actions.json", ".nolock-web/secrets.json", ".local/share/opencode/auth.json", ".aws/credentials", "/proc/self/environ", "/dev/fd/1", ".config/1Password/data"] {
             assert!(protected_path(Path::new(path)), "{path}");
         }
         assert!(!protected_path(Path::new("src/environment.ts")));

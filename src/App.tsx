@@ -1,3 +1,5 @@
+import WorkspaceGitPanel from "./components/WorkspaceGitPanel";
+import { migrateLegacySecrets } from "./lib/secrets";
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
@@ -6,7 +8,7 @@ import FileExplorer from "./components/FileExplorer";
 import MagnifierIcon from "./components/MagnifierIcon";
 import FolderIcon from "./components/FolderIcon";
 import Editor from "./components/Editor";
-import { TerminalPanel, type TerminalInstance, type TerminalStackLayout } from "./components/Terminal";
+import { TerminalWorkspace, type TerminalInstance } from "./components/Terminal";
 import ChatPanel from "./components/ChatPanel";
 import BrowserPanel from "./components/BrowserPanel";
 import MenuBar from "./components/MenuBar";
@@ -14,6 +16,8 @@ import ModelProvidersPanel from "./components/ModelProvidersPanel";
 import ChatModelPanel from "./components/ChatModelPanel";
 import FIMModelPanel from "./components/FIMModelPanel";
 import ToolsPanel from "./components/ToolsPanel";
+import AgentSessionsPanel from "./components/AgentSessionsPanel";
+import McpPanel from "./components/McpPanel";
 import RlhfPanel from "./components/RlhfPanel";
 import SwitchyardPanel from "./components/SwitchyardPanel";
 import FaqPanel from "./components/FaqPanel";
@@ -51,16 +55,6 @@ import nolockLogo from "./assets/nolocklogo-white.svg";
     }
   }
 
-  // Migrate old single API key to per-backend keys.
-  // If the old key exists but the current backend's slot is empty,
-  // copy it to the active backend only (we can't know which backend it was for).
-  const oldApiKey = localStorage.getItem("nolock.apiKey") || "";
-  if (oldApiKey) {
-    const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
-    if (!localStorage.getItem(`nolock.apiKey.${currentBackend}`)) {
-      localStorage.setItem(`nolock.apiKey.${currentBackend}`, oldApiKey);
-    }
-  }
 })();
 
 // ---------------------------------------------------------------------------
@@ -92,9 +86,16 @@ interface OpenFile {
   dirty: boolean;
 }
 
-let termCounter = 0;
 
 export default function App() {
+  const termCounter = useRef(0);
+  const [secretStorageWarning, setSecretStorageWarning] = useState("");
+  useEffect(() => {
+    const warn = (event: Event) => setSecretStorageWarning((event as CustomEvent<string>).detail);
+    window.addEventListener("nolock:secret-storage-warning", warn);
+    void migrateLegacySecrets();
+    return () => window.removeEventListener("nolock:secret-storage-warning", warn);
+  }, []);
   const [mobileLayout, setMobileLayout] = useState(() => window.matchMedia?.("(max-width: 760px)")?.matches ?? false);
   useEffect(() => {
     const query = window.matchMedia?.("(max-width: 760px)");
@@ -114,6 +115,8 @@ export default function App() {
   const [showChatModel, setShowChatModel] = useState(false);
   const [showFIMModel, setShowFIMModel] = useState(false);
   const [showTools, setShowTools] = useState(false);
+  const [showAgentSessions, setShowAgentSessions] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const [showRlhf, setShowRlhf] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showSwitchyard, setShowSwitchyard] = useState(false);
@@ -268,10 +271,9 @@ export default function App() {
   const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
-  // --- Terminal stacking (up to 3 terminals sharing vertical space) ---
-  const [stackedTermIds, setStackedTermIds] = useState<string[]>([]);
-  const [termStackRatios, setTermStackRatios] = useState<number[]>([]);
-  const terminalStackBodyRef = useRef<HTMLDivElement>(null);
+  const [showGit, setShowGit] = useState(false);
+  const [gitPts, setGitPts] = useState(26);
+  const [editorTerminalId, setEditorTerminalId] = useState<string | null>(null);
 
   // --- Chord state: null | 'A' | 'T' | 'B' | 'E' | 'F'
   // 'A' = waiting for second key after Ctrl+A (AI shortcuts)
@@ -293,14 +295,29 @@ export default function App() {
     setBrowserUrl(null);
   }, []);
 
+  const terminalCountRef = useRef(terminals.length);
+  terminalCountRef.current = terminals.length;
   const createTerminal = useCallback(() => {
-    termCounter++;
-    const id = `term-${termCounter}`;
-    const label = `Terminal ${termCounter}`;
-    const inst: TerminalInstance = { id, label, active: true };
+    terminalCountRef.current++;
+    termCounter.current++;
+    const id = `term-${termCounter.current}`;
+    const label = `Terminal ${termCounter.current}`;
+    const inst: TerminalInstance = { id, label, active: true, rootPath };
     setTerminals((prev) => [...prev, inst]);
     setActiveTermId(id);
-  }, []);
+  }, [rootPath]);
+
+  const runShellCommand = useCallback((command: string) => {
+    terminalCountRef.current++;
+    termCounter.current++;
+    const id = `term-${termCounter.current}`;
+    setTerminals((prev) => [...prev, {
+      id, label: `Shell ${termCounter.current}`, active: true, rootPath,
+      initialCommand: { current: command },
+    }]);
+    setActiveTermId(id);
+    return true;
+  }, [rootPath]);
 
   const closeTerminal = useCallback((id: string) => {
     setTerminals((prev) => prev.filter((t) => t.id !== id));
@@ -309,77 +326,14 @@ export default function App() {
       const remaining = terminals.filter((t) => t.id !== id);
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
-    // Clean up stacking: remove closed terminal from stack
-    setStackedTermIds((prev) => {
-      const idx = prev.indexOf(id);
-      if (idx === -1) return prev;
-      const next = prev.filter((tid) => tid !== id);
-      if (next.length < 2) {
-        // Unstack everything when fewer than 2 remain
-        setTermStackRatios([]);
-        return [];
-      }
-      // Remove the corresponding ratio and re-normalize
-      setTermStackRatios((ratios) => {
-        const newRatios = ratios.filter((_, i) => i !== idx);
-        const total = newRatios.reduce((a, b) => a + b, 0);
-        return newRatios.map((r) => Math.round((r / total) * 100));
-      });
-      return next;
-    });
+    setEditorTerminalId((prev) => prev === id ? null : prev);
   }, [terminals]);
 
-  // --- Terminal toggle in/out of stack ---
-  const toggleTerminalStack = useCallback((id: string) => {
-    setStackedTermIds((prev) => {
-      const idx = prev.indexOf(id);
-      if (idx >= 0) {
-        // Remove from stack
-        const next = prev.filter((tid) => tid !== id);
-        if (next.length < 2) {
-          // Unstack everything when fewer than 2 remain
-          setTermStackRatios([]);
-          return [];
-        }
-        // Remove the corresponding ratio and re-normalize
-        setTermStackRatios((ratios) => {
-          const newRatios = ratios.filter((_, i) => i !== idx);
-          const total = newRatios.reduce((a, b) => a + b, 0);
-          return newRatios.map((r) => Math.round((r / total) * 100));
-        });
-        return next;
-      } else {
-        // Add to stack (max 3)
-        if (prev.length >= 3) return prev;
-        const next = [...prev, id];
-        const equalRatio = Math.floor(100 / next.length);
-        const newRatios = next.map((_, i) =>
-          i === next.length - 1 ? 100 - equalRatio * (next.length - 1) : equalRatio
-        );
-        setTermStackRatios(newRatios);
-        return next;
-      }
-    });
-  }, []);
-
-  // --- Terminal stack ratio change handler ---
-  const handleTermStackRatioChange = useCallback((index: number, newRatio: number) => {
-    setTermStackRatios((prev) => {
-      const next = [...prev];
-      const oldRatio = next[index];
-      const delta = newRatio - oldRatio;
-      // Distribute the delta to the next sibling, clamped
-      if (index + 1 < next.length) {
-        const newNext = Math.max(10, Math.min(80, next[index + 1] - delta));
-        next[index + 1] = newNext;
-      } else if (index - 1 >= 0) {
-        const newPrev = Math.max(10, Math.min(80, next[index - 1] - delta));
-        next[index - 1] = newPrev;
-      }
-      next[index] = Math.max(10, Math.min(80, newRatio));
-      return next;
-    });
-  }, []);
+  const cycleTerminal = useCallback(() => {
+    if (terminals.length < 2) return;
+    const index = terminals.findIndex((t) => t.id === activeTermId);
+    setActiveTermId(terminals[(index + 1) % terminals.length].id);
+  }, [terminals, activeTermId]);
 
   // --- Open folder ---
   const openFolder = useCallback(async () => {
@@ -658,6 +612,8 @@ export default function App() {
           if (showChatModel) setShowChatModel(false);
           if (showFIMModel) setShowFIMModel(false);
           if (showTools) setShowTools(false);
+          if (showMcp) setShowMcp(false);
+          if (showAgentSessions) setShowAgentSessions(false);
           if (showSettings) setShowSettings(false);
           if (showTermMemory) { setShowTermMemory(false); }
           return;
@@ -754,6 +710,24 @@ export default function App() {
             e.preventDefault();
             setChordPrefix(null);
             createTerminal();
+            return;
+          }
+          if (e.key === "l" || e.key === "L") {
+            e.preventDefault();
+            setChordPrefix(null);
+            createTerminal();
+            return;
+          }
+          if (e.key === "n" || e.key === "N") {
+            e.preventDefault();
+            setChordPrefix(null);
+            cycleTerminal();
+            return;
+          }
+          if (e.key === "w" || e.key === "W") {
+            e.preventDefault();
+            setChordPrefix(null);
+            if (activeTermId) closeTerminal(activeTermId);
             return;
           }
           if (e.key === "m" || e.key === "M") {
@@ -910,6 +884,8 @@ export default function App() {
         if (showChatModel) setShowChatModel(false);
         if (showFIMModel) setShowFIMModel(false);
         if (showTools) setShowTools(false);
+          if (showMcp) setShowMcp(false);
+          if (showAgentSessions) setShowAgentSessions(false);
         if (showSettings) setShowSettings(false);
         if (showTermMemory) {
           setShowTermMemory(false);
@@ -923,7 +899,7 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, showModelProviders, showChatModel, showFIMModel, showTools, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch, showFaq]);
+  }, [openFolder, refreshFolder, createTerminal, closeTerminal, cycleTerminal, activeTermId, showModelProviders, showChatModel, showFIMModel, showTools, showMcp, showAgentSessions, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch, showFaq]);
 
   // --- Menu ---
   const menus = [
@@ -951,7 +927,10 @@ export default function App() {
     {
       label: "Terminal",
       items: [
-        { label: "New Terminal", action: createTerminal, shortcut: "Ctrl+T, O" },
+        { label: "New Terminal", action: () => createTerminal(), shortcut: "Ctrl+T, O" },
+        { label: "Next Terminal", action: cycleTerminal, shortcut: "Ctrl+T, N" },
+        { label: "Close Terminal", disabled: terminals.length === 0, action: () => { if (activeTermId) closeTerminal(activeTermId); }, shortcut: "Ctrl+T, W" },
+        { label: "Agent Sessions...", action: () => setShowAgentSessions(true) },
         { label: "Terminal Memory", action: () => setShowTermMemory(true), shortcut: "Ctrl+T, M" },
         ...terminals.map((t) => ({
           label: t.label,
@@ -981,6 +960,7 @@ export default function App() {
         { label: "Knowledge Base...", action: () => setShowFaq(true), shortcut: "Ctrl+A, L" },
       ],
     },
+    { label: "MCP", items: [{ label: "Manage MCP servers...", action: () => { setShowMcp(true); } }] },
     {
       label: "Editor",
       items: [
@@ -1003,7 +983,7 @@ export default function App() {
   const hasTerminal = terminals.length > 0;
 
   // Editor area gets whatever is left from the 100-point outer pool
-  const outerSidePanels = (hasExplorer ? explorerPts : 0) + (hasChat ? chatPts : 0);
+  const outerSidePanels = (hasExplorer ? explorerPts : 0) + (hasChat ? chatPts : 0) + (showGit ? gitPts : 0);
   const editorPts = Math.max(15, 100 - outerSidePanels);
 
   return (
@@ -1013,7 +993,7 @@ export default function App() {
           {chordPrefix === "A" ? (
             <>Waiting for second key... (press <strong>O</strong> for Chat, <strong>G</strong> for Agents, <strong>H</strong> for Hooks, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF, <strong>L</strong> for .faq)</>
           ) : chordPrefix === "T" ? (
-            <>Waiting for second key... (press <strong>O</strong> for Terminal, <strong>M</strong> for Memory)</>
+            <>Waiting for second key... (press <strong>O</strong> for Terminal, <strong>L</strong> for Local, <strong>N</strong> for Next, <strong>W</strong> for Close, <strong>M</strong> for Memory)</>
           ) : chordPrefix === "B" ? (
             <>Waiting for second key... (press <strong>O</strong> for Browser)</>
           ) : chordPrefix === "E" ? (
@@ -1066,8 +1046,14 @@ export default function App() {
         )}
 
         <div className="editor-area" ref={editorAreaRef} style={{ flex: ratioFlex(editorPts) }}>
+          <TerminalWorkspace instances={terminals} activeId={activeTermId} editorTerminalId={editorTerminalId}
+            rootPath={rootPath} terminalPercent={terminalPts} onSelect={setActiveTermId} onClose={closeTerminal}
+            onCreate={() => createTerminal()} onEditorTerminal={setEditorTerminalId}
+            onRename={(id, label) => setTerminals((prev) => prev.map((t) => t.id === id ? { ...t, label } : t))}
+            resizeHandle={<ResizableHandle direction="vertical" onDrag={makeResizeHandler(setTerminalPts, 8, 80, editorAreaRef, "height", 100, true)} onDragEnd={() => setResizeEpoch((e) => e + 1)} />}
+          >
           <div className={`editor-main ${hasBrowser ? "split" : ""}`} ref={editorMainRef}
-            style={hasTerminal ? { flex: ratioFlex(100 - terminalPts) } : undefined}
+            style={{ flex: "1 1 0", width: "100%" }}
           >
             <div
               className="editor-pane"
@@ -1244,39 +1230,20 @@ export default function App() {
                   onDragEnd={() => setResizeEpoch((e) => e + 1)}
                 />
                 <div className="browser-pane" style={{ flex: ratioFlex(browserPts) }}>
-                  <BrowserPanel url={browserUrl!} onClose={closeBrowser} resizeEpoch={resizeEpoch} />
+                  {!editorTerminalId && <BrowserPanel url={browserUrl!} onClose={closeBrowser} resizeEpoch={resizeEpoch} />}
                 </div>
               </>
             )}
           </div>
 
-          {hasTerminal && (
-            <>
-              <ResizableHandle
-                direction="vertical"
-                onDrag={makeResizeHandler(setTerminalPts, 8, 65, editorAreaRef, "height", 100, true)}
-                onDragEnd={() => setResizeEpoch((e) => e + 1)}
-              />
-              <TerminalPanel
-                instances={terminals}
-                activeId={activeTermId}
-                rootPath={rootPath}
-                onSelect={setActiveTermId}
-                onClose={closeTerminal}
-                style={{ flex: ratioFlex(terminalPts) }}
-                lastCommandRef={lastCommandRef}
-                stackLayout={
-                  stackedTermIds.length > 1
-                    ? { stackedIds: stackedTermIds, ratios: termStackRatios }
-                    : null
-                }
-                onToggleStack={toggleTerminalStack}
-                onStackRatioChange={handleTermStackRatioChange}
-                stackContainerRef={terminalStackBodyRef}
-              />
-            </>
-          )}
+          </TerminalWorkspace>
+
         </div>
+
+        {showGit && <ResizableHandle direction="horizontal"
+          onDrag={makeResizeHandler(setGitPts, 18, 45, mainAreaRef, "width", 100, true)}
+          onDragEnd={() => setResizeEpoch((e) => e + 1)} />}
+        <WorkspaceGitPanel rootPath={rootPath} open={showGit} onToggle={() => { setShowGit((value) => !value); setResizeEpoch((e) => e + 1); }} style={{ flex: ratioFlex(gitPts) }} />
 
         {hasChat && (
           <>
@@ -1285,16 +1252,19 @@ export default function App() {
               onDrag={makeResizeHandler(setChatPts, 15, 55, mainAreaRef, "width", 100, true)}
               onDragEnd={() => setResizeEpoch((e) => e + 1)}
             />
-            <ChatPanel onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} rootPath={rootPath} style={{ flex: ratioFlex(chatPts) }} onOpenAgentManager={() => setShowAgentManager(true)} />
           </>
         )}
+        <ChatPanel onRunShell={runShellCommand} onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} rootPath={rootPath} style={{ flex: ratioFlex(chatPts), display: hasChat ? undefined : "none" }} onOpenAgentManager={() => setShowAgentManager(true)} />
       </div>
 
+      {secretStorageWarning && <div role="alert">{secretStorageWarning}</div>}
       <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} rootPath={rootPath} />
 
       <ModelProvidersPanel visible={showModelProviders} onClose={() => setShowModelProviders(false)} />
       <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />
       <FIMModelPanel visible={showFIMModel} onClose={() => setShowFIMModel(false)} />
+      <AgentSessionsPanel visible={showAgentSessions} rootPath={rootPath} onClose={() => setShowAgentSessions(false)} />
+      <McpPanel visible={showMcp} onClose={() => setShowMcp(false)} rootPath={rootPath} />
       <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} rootPath={rootPath} />
       <HooksPanel visible={showHooks} onClose={() => setShowHooks(false)} rootPath={rootPath} />
       <RlhfPanel visible={showRlhf} onClose={() => setShowRlhf(false)} />

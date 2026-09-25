@@ -1,8 +1,10 @@
+import { activeSessionId, setActiveSessionId, flushTerminalActivity } from "../lib/terminalSessions";
 import AgentFileProtectionNotice from "./AgentFileProtectionNotice";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Marked } from "marked";
+import { sanitizeContent } from "../lib/sanitize";
 import FileAutocomplete, { type AgentRef } from "./FileAutocomplete";
 import SkillAutocomplete from "./SkillAutocomplete";
 import ToolAutocomplete from "./ToolAutocomplete";
@@ -66,12 +68,12 @@ const marked = new Marked({ gfm: true, breaks: true });
 
 /** Build the provider config map (url + api key per backend) sent to the
  *  backend so sub-agents can run on a different provider than the main agent. */
-function buildProvidersMap(): Record<string, { url: string; apiKey: string }> {
+async function buildProvidersMap(): Promise<Record<string, { url: string; apiKey: string }>> {
   const providers: Record<string, { url: string; apiKey: string }> = {};
   for (const b of BACKENDS) {
     providers[b.value] = {
       url: resolveBackendUrl(b.value),
-      apiKey: localStorage.getItem(`nolock.apiKey.${b.value}`) || "",
+      apiKey: (await getSecret(`apiKey.${b.value}`)) || "",
     };
   }
   return providers;
@@ -208,6 +210,7 @@ export interface ToolRef {
 
 interface Props {
   onClose: () => void;
+  onRunShell?: (command: string) => boolean | void;
   onOpenUrl: (url: string) => void;
   rootPath?: string;
   style?: React.CSSProperties;
@@ -225,7 +228,7 @@ export function MarkdownContent({ text }: { text: string }) {
   // keeps protectMath+marked off the hot path for unchanged messages.
   const html = useMemo(() => {
     const { masked, restore } = protectMath(text);
-    return restore(marked.parse(masked) as string);
+    return sanitizeContent(restore(marked.parse(masked) as string));
   }, [text]);
 
   useEffect(() => {
@@ -327,21 +330,15 @@ function ToolCallItem({ call }: { call: ToolCallLog }) {
 export function ToolCallBlock({ calls }: { calls: ToolCallLog[] }) {
   const hasWebSearch = calls.some((c) => c.name === "web_search");
 
-  let providerLabel = "DuckDuckGo";
-  let providerUrl = "https://duckduckgo.com";
-  if (hasWebSearch) {
-    try {
-      const raw = localStorage.getItem("nolock.toolConfig");
-      if (raw) {
-        const config = JSON.parse(raw);
-        const provider = config?.web_search?.provider;
-        if (provider && PROVIDER_META[provider]) {
-          providerLabel = PROVIDER_META[provider].label;
-          providerUrl = PROVIDER_META[provider].url;
-        }
-      }
-    } catch {}
-  }
+  const [searchProvider, setSearchProvider] = useState("duckduckgo");
+  useEffect(() => {
+    if (!hasWebSearch) return;
+    void getSecret("toolConfig").then((raw) => {
+      try { setSearchProvider(JSON.parse(raw || "{}").web_search?.provider || "duckduckgo"); } catch {}
+    });
+  }, [hasWebSearch]);
+  const providerLabel = PROVIDER_META[searchProvider]?.label || "DuckDuckGo";
+  const providerUrl = PROVIDER_META[searchProvider]?.url || "https://duckduckgo.com";
 
   return (
     <div className="tool-calls">
@@ -521,8 +518,7 @@ function SessionPicker({
                   </span>
                   <span className="session-picker-item-meta">
                     {formatSessionTime(s.updatedAt)}
-                    {" · "}{s.messageCount} msg{s.messageCount === 1 ? "" : "s"}
-                    {" · "}{s.toolCallCount} tool{s.toolCallCount === 1 ? "" : "s"}
+                    {s.agent ? ` · ${s.agent.name} · ${s.status} · ${s.agent.terminalId}` : ` · ${s.messageCount} msgs · ${s.toolCallCount} tools`}
                     {s.totalCost != null && s.totalCost >= 0.000001
                       ? ` · ~$${s.totalCost.toFixed(4)}`
                       : ""}
@@ -1053,7 +1049,7 @@ function extractCommandsFromToolCalls(toolCalls: HookToolCallLog[] | undefined):
   return commands;
 }
 
-export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, onOpenAgentManager }: Props) {
+export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "", style, onOpenAgentManager }: Props) {
   // Wire up global ref so MarkdownContent can open URLs
   useEffect(() => {
     globalOpenUrl = onOpenUrl;
@@ -1061,6 +1057,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   }, [onOpenUrl]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [shellNotice, setShellNotice] = useState("");
   const [loading, setLoading] = useState(false);
   // Chat mode: "building" (default), "planning", or "learning". Changes the
   // behavior of the main chat agent (see src/lib/chatModes.ts). Configured in
@@ -1692,7 +1689,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     // save was still pending, skip the write — otherwise the old conversation
     // would be re-written as "active" AFTER its archive, resurrecting it in the
     // session list and mixing old context into the new session's file.
-    if (id !== sessionIdRef.current) return;
+    if (id !== sessionIdRef.current || id !== activeSessionId(rootPath)) return;
     const now = Math.floor(Date.now() / 1000);
     const createdAt = createdAtRef.current[id] ?? now;
     createdAtRef.current[id] = createdAt;
@@ -1701,7 +1698,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     try {
       await saveSession(rootPath, {
         id,
-        summary: summarizeMessages(msgs),
+        summary: summarizeMessages(msgs) || "Terminal session",
         status: "active",
         createdAt,
         updatedAt: now,
@@ -1744,13 +1741,15 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     //    the archived file as "active".)
     if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
     const oldId = sessionId;
-    if (oldId && messages.length > 0) {
+    await flushTerminalActivity();
+    if (oldId) {
       try { await persistSession(oldId, messages, accumulatedContextTokens, maxTokens, usageLogRef.current); } catch {}
       try { await archiveSession(rootPath, oldId, summarizeMessages(messages)); } catch {}
     }
     // 3. Switch to a brand-new session id and clear every piece of carried-over
     //    conversation state.
     const newId = newSessionId();
+    setActiveSessionId(rootPath, newId);
     sessionIdRef.current = newId;
     createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
     setSessionId(newId);
@@ -1781,7 +1780,6 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
   /** Delete a session by id. If it's the current one, start a fresh session. */
   const deleteSessionById = useCallback(async (id: string) => {
-    try { await deleteSession(rootPath, id); } catch (e) { console.error(e); }
     if (id === sessionId) {
       // Invalidate in-flight requests for the deleted session and cancel any
       // pending auto-save so the deleted conversation can't be re-persisted.
@@ -1790,7 +1788,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
       if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
       const newId = newSessionId();
-      sessionIdRef.current = newId;
+      setActiveSessionId(rootPath, newId);
+    sessionIdRef.current = newId;
       createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
       setSessionId(newId);
       setMessages([]);
@@ -1805,6 +1804,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       setChatBusy(false);
       try { await invoke("subagent_reset"); } catch {}
     }
+    await flushTerminalActivity();
+    try { await deleteSession(rootPath, id); } catch (e) { console.error(e); }
     try { setSessions(await listSessions(rootPath)); } catch {}
   }, [rootPath, sessionId]);
 
@@ -1813,34 +1814,32 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
   const mountedRootRef = useRef<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      if (!rootPath) { setSessions([]); return; }
-      try {
-        const list = await listSessions(rootPath);
-        if (cancelled) return;
-        setSessions(list);
-        // On a PROJECT SWITCH, invalidate anything in-flight from the previous
-        // project and start a completely fresh session — no context carries
-        // across. (On initial mount there is nothing in-flight to invalidate,
-        // and bumping the epoch here would race the first send.)
-        const isProjectSwitch = mountedRootRef.current !== null && mountedRootRef.current !== rootPath;
-        mountedRootRef.current = rootPath;
-        if (isProjectSwitch) {
-          sendEpochRef.current += 1;
-          stopRequestedRef.current = false;
-          if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
-          if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
-        }
-        const newId = newSessionId();
-        sessionIdRef.current = newId;
-        createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
-        setSessionId(newId);
-      } catch (e) {
-        console.error("[sessions] load failed:", e);
-      }
-    })();
+    const isProjectSwitch = mountedRootRef.current !== null && mountedRootRef.current !== rootPath;
+    mountedRootRef.current = rootPath;
+    if (isProjectSwitch) {
+      setMessages([]); setAccumulatedContextTokens(0); usageLogRef.current = []; setUsageLog([]);
+      sendEpochRef.current += 1;
+      stopRequestedRef.current = false;
+      if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      sendingRef.current = false; setLoading(false); setChatBusy(false);
+    }
+    const newId = isProjectSwitch ? newSessionId() : activeSessionId(rootPath);
+    setActiveSessionId(rootPath, newId);
+    sessionIdRef.current = newId;
+    createdAtRef.current[newId] ??= Math.floor(Date.now() / 1000);
+    setSessionId(newId);
+    void listSessions(rootPath).then((list) => { if (!cancelled) setSessions(list); })
+      .catch((e) => console.error("[sessions] load failed:", e));
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootPath]);
+
+  useEffect(() => {
+    const refresh = () => { void listSessions(rootPath).then(setSessions).catch(() => {}); };
+    window.addEventListener("nolock:terminal-session-updated", refresh);
+    const timer = setInterval(refresh, 3000);
+    return () => { clearInterval(timer); window.removeEventListener("nolock:terminal-session-updated", refresh); };
   }, [rootPath]);
 
   // Auto-save the current session (debounced) whenever the conversation changes
@@ -1964,7 +1963,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       const chatModel = localStorage.getItem("nolock.chatModel") || "";
       if (!chatModel) return;
 
-      const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
+      const apiKey = (await getSecret(`apiKey.${backend}`)) ?? "";
 
       const chatTemperature = localStorage.getItem("nolock.chatTemperature");
       const chatMaxTokens = isCloudBackend(backend)
@@ -1995,7 +1994,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
 
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
-      const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
+      const toolConfigRaw = (await getSecret("toolConfig")) ?? "{}";
       const toolConfigs = seedKnowledgeBaseToolConfig(
         JSON.parse(toolConfigRaw) as Record<string, Record<string, string>>,
         toolsEnabled,
@@ -2019,7 +2018,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         rootPath: rootPath || undefined,
         maxIterations: 1,
         modelAffinity: getDigitalOceanModelAffinity(),
-        providers: buildProvidersMap(),
+        providers: await buildProvidersMap(),
       };
 
       // Stream tokens — they get appended to the existing last assistant message
@@ -2398,6 +2397,20 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
     // Prevent sending while a DPO response choice is pending
     if (messages.some((m) => m.dpoResponses !== undefined)) return;
 
+    // Inspect the raw input: whitespace before ! must remain ordinary chat.
+    if (input.startsWith("!")) {
+      const command = input.slice(1);
+      if (!command.trim()) return;
+      if (!onRunShell) return;
+      if (onRunShell(command) === false) {
+        setShellNotice("Three terminals are open. Close one to run another shell command.");
+        return;
+      }
+      setShellNotice("");
+      setInput("");
+      return;
+    }
+
     // Claim the current generation epoch and clear any stale stop request: a
     // previous Stop (or an invalidated request from a cleared session) must not
     // discard THIS generation's stream/response.
@@ -2414,10 +2427,10 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
       return;
     }
 
-    // ---- !hook-name manual trigger ----
-    const bangMatch = trimmed.match(/^!([\w.-]+)$/);
-    if (bangMatch) {
-      const hookName = bangMatch[1];
+    // ---- /hook hook-name manual trigger ----
+    const hookMatch = trimmed.match(/^\/hook\s+([\w.-]+)$/);
+    if (hookMatch) {
+      const hookName = hookMatch[1];
       setInput("");
       if (!rootPath) {
         setMessages((prev) => [...prev, { role: "assistant", content: "Open a folder first to run hooks." }]);
@@ -2688,17 +2701,16 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         return;
       }
 
-      // Read per-backend API key from keychain (fallback: localStorage)
-      const apiKey = (await getSecret(`apiKey.${backend}`)) ?? localStorage.getItem(`nolock.apiKey.${backend}`) ?? "";
+      // Read credentials from the host store or session-only cache.
+      const apiKey = (await getSecret(`apiKey.${backend}`)) ?? "";
 
       // Read enabled tools from localStorage. spawn_subagent is added by the
       // backend whenever agents exist, so the orchestrator can delegate.
       const toolsRaw = localStorage.getItem("nolock.toolsEnabled") || "[]";
       const toolsEnabled: string[] = JSON.parse(toolsRaw);
 
-      // Read per-tool configuration from localStorage (always the most current,
-      // written synchronously by setSecret; keychain may hold stale data).
-      const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
+      // Tool configuration may contain API keys; keep it out of browser storage.
+      const toolConfigRaw = (await getSecret("toolConfig")) ?? "{}";
       const toolConfigs = seedKnowledgeBaseToolConfig(
         JSON.parse(toolConfigRaw) as Record<string, Record<string, string>>,
         toolsEnabled,
@@ -2784,7 +2796,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         rootPath: rootPath || undefined,
         maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
         modelAffinity: getDigitalOceanModelAffinity(),
-        providers: buildProvidersMap(),
+        providers: await buildProvidersMap(),
         // Reasoning-only retry budget from the Chat Model panel (default 8).
         reasoningRetries: parseInt(localStorage.getItem("nolock.reasoningRetries") || "8", 10),
         // Agents explicitly referenced via @mentions — the backend pre-spawns
@@ -2987,7 +2999,7 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
         setChatBusy(false);
       }
     }
-  }, [input, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy, recordUsage, chatMode]);
+  }, [input, onRunShell, loading, messages, fileRefs, agentRefs, clearAllRefs, showThinking, hookBusy, recordUsage, chatMode]);
 
   return (
     <div className="chat-panel" style={style}>
@@ -3038,7 +3050,8 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
             Use <strong>@agent-name</strong> to invoke an AI agent.<br />
             Use <strong>/skill-name</strong> to run a skill command.<br />
             Use <strong>#tool-name</strong> to force the AI to use a specific tool.<br />
-            Use <strong>!hook-name</strong> to run a hook.
+            Start with <strong>!</strong> to run a shell command.<br />
+            Use <strong>/hook hook-name</strong> to run a hook.
             {chatMode === "learning" && (
               <>
                 <br /><br />
@@ -3480,12 +3493,13 @@ export default function ChatPanel({ onClose, onOpenUrl, rootPath = "", style, on
           </div>
         )}
 
+        {shellNotice && <p role="status" style={{ color: "var(--text-muted)", fontSize: 11, padding: "4px 0" }}>{shellNotice}</p>}
         <div className="chat-input-wrapper">
           <textarea
             ref={textareaRef}
             className="chat-input"
             rows={2}
-            placeholder={dpoPending ? "Please choose a response above to continue..." : hookBusy ? "Hook running..." : "Type @ to reference a file or agent, / to run a skill, # to use a tool... Ask the AI..."}
+            placeholder={dpoPending ? "Please choose a response above to continue..." : hookBusy ? "Hook running..." : "Start with ! to run a shell command. Type @ to reference a file or agent, / to run a skill, # to use a tool... Ask the AI..."}
             value={input}
             onChange={handleInputChange}
             onKeyDown={(e) => {

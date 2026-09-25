@@ -1,9 +1,10 @@
+import { getSecret } from "../../lib/secrets";
 // ---------------------------------------------------------------------------
 // Tests for new AI settings panel components
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import ModelProvidersPanel from "../ModelProvidersPanel";
 import ChatModelPanel from "../ChatModelPanel";
 import FIMModelPanel from "../FIMModelPanel";
@@ -256,7 +257,7 @@ describe("ToolsPanel", () => {
     expect(screen.getByPlaceholderText("BSA-...")).toBeInTheDocument();
   });
 
-  it("saves Brave provider and API key to localStorage on Save", () => {
+  it("saves Brave credentials without a plaintext browser copy", async () => {
     render(<ToolsPanel visible={true} onClose={vi.fn()} />);
 
     const webSearchCheckbox = screen.getByLabelText(/^Web Search/);
@@ -273,13 +274,14 @@ describe("ToolsPanel", () => {
     fireEvent.click(screen.getByText("Save"));
 
     // Verify localStorage
-    const saved = JSON.parse(localStorage.getItem("nolock.toolConfig") || "{}");
+    const saved = JSON.parse((await getSecret("toolConfig")) || "{}");
+    expect(localStorage.getItem("nolock.toolConfig")).toBeNull();
     expect(saved.web_search).toBeDefined();
     expect(saved.web_search.provider).toBe("brave");
     expect(saved.web_search.api_key).toBe("BSA-test-key-123");
   });
 
-  it("preserves DuckDuckGo provider setting when saved without Brave key", () => {
+  it("preserves DuckDuckGo provider setting when saved without Brave key", async () => {
     render(<ToolsPanel visible={true} onClose={vi.fn()} />);
 
     const webSearchCheckbox = screen.getByLabelText(/^Web Search/);
@@ -288,14 +290,15 @@ describe("ToolsPanel", () => {
     // DuckDuckGo is the default, save immediately
     fireEvent.click(screen.getByText("Save"));
 
-    const saved = JSON.parse(localStorage.getItem("nolock.toolConfig") || "{}");
+    const saved = JSON.parse((await getSecret("toolConfig")) || "{}");
+    expect(localStorage.getItem("nolock.toolConfig")).toBeNull();
     // web_search might not be in toolConfig if never changed from default
     if (saved.web_search) {
       expect(saved.web_search.provider).toBe("duckduckgo");
     }
   });
 
-  it("loads existing toolConfig from localStorage on open", () => {
+  it("migrates existing toolConfig from localStorage on open", async () => {
     // Pre-set toolConfig with Brave provider
     localStorage.setItem("nolock.toolConfig", JSON.stringify({
       web_search: { provider: "brave", api_key: "BSA-preloaded-key" },
@@ -306,19 +309,20 @@ describe("ToolsPanel", () => {
 
     // Brave should be selected
     const braveRadio = screen.getByLabelText(/Brave Search/);
-    expect(braveRadio).toBeChecked();
+    await waitFor(() => expect(braveRadio).toBeChecked());
 
     // API key should be pre-filled
     expect(screen.getByDisplayValue("BSA-preloaded-key")).toBeInTheDocument();
   });
 
-  it("reads toolConfig from localStorage (not keychain) when sending chat request", () => {
+  it("retrieves migrated toolConfig without leaving keys in localStorage", async () => {
     // Simulate the pattern used in ChatPanel.tsx to read toolConfig
     localStorage.setItem("nolock.toolConfig", JSON.stringify({
       web_search: { provider: "brave", api_key: "BSA-chat-test" },
     }));
 
-    const toolConfigRaw = localStorage.getItem("nolock.toolConfig") ?? "{}";
+    const toolConfigRaw = (await getSecret("toolConfig")) ?? "{}";
+    expect(localStorage.getItem("nolock.toolConfig")).toBeNull();
     const toolConfigs = JSON.parse(toolConfigRaw);
 
     expect(toolConfigs.web_search.provider).toBe("brave");

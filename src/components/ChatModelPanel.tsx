@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { getSecret } from "../lib/secrets";
+import { useState, useEffect, useRef } from "react";
 import ModelSelector from "./ModelSelector";
 import Select from "./Select";
 import NumberField, { parseInt10 } from "./NumberField";
@@ -27,6 +28,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
   const [chatModel, setChatModel] = useState("");
   const [backend, setBackend] = useState("ollama");
   const [apiKey, setApiKey] = useState("");
+  const keyLoadRef = useRef(0);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [temperature, setTemperature] = useState(0.7);
   const [maxTokens, setMaxTokens] = useState(8192);
@@ -64,7 +66,11 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
     // Chat uses its own provider (falls back to the global one).
     const chatBackend = getChatBackend();
     setBackend(chatBackend);
-    setApiKey(localStorage.getItem(`nolock.apiKey.${chatBackend}`) || "");
+    setApiKey("");
+    const keyRequest = ++keyLoadRef.current;
+    void getSecret(`apiKey.${chatBackend}`).then((key) => {
+      if (keyLoadRef.current === keyRequest) setApiKey(key || "");
+    });
     setShowThinking(localStorage.getItem("nolock.showThinking") === "true");
     setChatMode(getChatMode());
     setFaqConfigState(getFaqConfig());
@@ -72,7 +78,11 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
 
   const selectBackend = (value: string) => {
     setBackend(value);
-    setApiKey(localStorage.getItem(`nolock.apiKey.${value}`) || "");
+    setApiKey("");
+    const keyRequest = ++keyLoadRef.current;
+    void getSecret(`apiKey.${value}`).then((key) => {
+      if (keyLoadRef.current === keyRequest) setApiKey(key || "");
+    });
   };
 
   const save = () => {

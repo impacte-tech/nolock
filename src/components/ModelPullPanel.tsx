@@ -77,6 +77,9 @@ export default function ModelPullPanel({ backend, url }: { backend: string; url:
         req: { ...request(), model: model.trim(), filename: backend === "llamacpp" ? filename.trim() : "" },
       });
       if (current === generation.current) {
+        // Invalidate list responses that were requested before this job
+        // existed — they must not overwrite the locally-known active job.
+        mutationVersion.current++;
         setJobs(previous => [job, ...previous.filter(item => item.id !== job.id)]);
         setConnectionError("");
       }
@@ -95,7 +98,12 @@ export default function ModelPullPanel({ backend, url }: { backend: string; url:
     mutationVersion.current++;
     try {
       const job = await invoke<ModelPullJob>("cancel_model_pull", { req: { ...request(), id } });
-      if (current === generation.current) setJobs(previous => previous.map(item => item.id === id ? job : item));
+      if (current === generation.current) {
+        // Same stale-list guard as pull: a list captured before the cancel
+        // completed must not resurrect the cancelled job's prior state.
+        mutationVersion.current++;
+        setJobs(previous => previous.map(item => item.id === id ? job : item));
+      }
     } catch (err) {
       if (current === generation.current) setError(String(err));
     } finally {

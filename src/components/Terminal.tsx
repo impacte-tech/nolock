@@ -1,4 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useActiveSessionId, trackTerminal, flushTerminalActivity } from "../lib/terminalSessions";
+import { nanoid } from "nanoid";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -9,21 +11,46 @@ export interface TerminalInstance {
   id: string;
   label: string;
   active: boolean;
+  rootPath?: string;
+  /** Claimed once, including across layout remounts, to avoid replaying commands. */
+  initialCommand?: { current: string | null };
 }
 
 interface TerminalViewProps {
   instance: TerminalInstance;
   rootPath: string;
   lastCommandRef?: React.MutableRefObject<string>;
+  recording?: boolean;
+  /** True while this terminal is the selected one — the view focuses itself on activation. */
+  active?: boolean;
 }
 
-export default function TerminalView({ instance, rootPath }: TerminalViewProps) {
+export default function TerminalView({ instance, rootPath, recording = false, active = false }: TerminalViewProps) {
   const termRef = useRef<HTMLDivElement>(null);
   const fitAddon = useRef<FitAddon | null>(null);
+  const termInstance = useRef<Terminal | null>(null);
+
+  const cwd = instance.rootPath ?? rootPath;
+  const sessionId = useActiveSessionId(cwd);
+  const context = useRef({ sessionId, recording, label: instance.label });
+  context.current = { sessionId, recording, label: instance.label };
+  const track = (kind: "opened" | "attached" | "input" | "output" | "exited" | "closed" | "recording-on" | "recording-off", text?: string) => {
+    trackTerminal(cwd, context.current.sessionId, { terminalId: instance.id, label: context.current.label.slice(0, 128), kind, ...(text === undefined ? {} : { text }) });
+  };
+  useEffect(() => { track("attached"); }, [sessionId]);
+  const wasRecording = useRef(false);
+  useEffect(() => {
+    if (wasRecording.current !== recording) track(recording ? "recording-on" : "recording-off");
+    wasRecording.current = recording;
+  }, [recording]);
+  useEffect(() => {
+    if (active) termInstance.current?.focus();
+  }, [active]);
 
   useEffect(() => {
     if (!termRef.current) return;
 
+    const ptyId = `${instance.id}-${nanoid()}`;
     const term = new Terminal({
       theme: {
         background: "#000000",
@@ -35,11 +62,14 @@ export default function TerminalView({ instance, rootPath }: TerminalViewProps) 
       fontSize: 13,
       cursorBlink: true,
       allowProposedApi: true,
+      scrollback: 5000,
     });
 
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(termRef.current);
+    termInstance.current = term;
+    term.write("[Nolock] Full terminal access. Project MCPs and agent session tracking: codex | claude | opencode\r\n");
 
     // Wait a tick for layout to settle
     requestAnimationFrame(() => {
@@ -49,42 +79,47 @@ export default function TerminalView({ instance, rootPath }: TerminalViewProps) 
 
     const { cols, rows } = term;
 
+    let exited = false;
     // Listen for PTY output from Rust backend
     const unlisten = listen<{ id: string; data: string }>("pty-output", (event) => {
-      if (event.payload.id === instance.id) {
+      if (event.payload.id === ptyId) {
         term.write(event.payload.data);
+        if (context.current.recording) track("output", event.payload.data);
       }
     });
 
     const unlistenExit = listen<string>("pty-exit", (event) => {
-      if (event.payload === instance.id) {
+      if (event.payload === ptyId) {
+        exited = true;
+        track("exited");
         term.write("\r\n\x1b[33m[Process exited]\x1b[0m\r\n");
       }
     });
 
-    // Spawn PTY via Rust backend
-    invoke("pty_spawn", {
-      id: instance.id,
-      shell: null as string | null,
-      cwd: rootPath || null as string | null,
-      cols,
-      rows,
+    let disposed = false;
+    // Register listeners before spawning so even short commands retain output.
+    void Promise.all([unlisten, unlistenExit]).then(async () => {
+      if (disposed) return;
+      const command = instance.initialCommand?.current ?? null;
+      if (instance.initialCommand) instance.initialCommand.current = null;
+      await invoke<void>("pty_spawn", {
+        id: ptyId, shell: null, command,
+        cwd: cwd || null, cols, rows,
+      });
+      if (disposed) await invoke("pty_kill", { id: ptyId });
+      else { track("opened"); term.focus(); }
     }).catch((e) => {
-      term.write(`\r\n\x1b[31mFailed to start shell: ${String(e)}\x1b[0m\r\n`);
+      if (!disposed) term.write(`\r\n\x1b[31mFailed to start shell: ${String(e)}\x1b[0m\r\n`);
     });
 
-    // Terminal input -> PTY
     const dataDisposable = term.onData((data: string) => {
-      // Always forward keystroke to PTY first (fire-and-forget)
-      invoke("pty_write", { id: instance.id, data }).catch(() => {});
-
-      // Vault passwords and MFA input must never be captured as command memory.
-
+      invoke("pty_write", { id: ptyId, data }).catch(() => {});
+      if (/[\r\n]/.test(data)) track("input");
     });
 
     // Resize handler
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      invoke("pty_resize", { id: instance.id, cols, rows }).catch(() => {});
+      invoke("pty_resize", { id: ptyId, cols, rows }).catch(() => {});
     });
 
     const observer = new ResizeObserver(() => {
@@ -93,223 +128,107 @@ export default function TerminalView({ instance, rootPath }: TerminalViewProps) 
     observer.observe(termRef.current);
 
     return () => {
+      disposed = true;
+      track("closed");
+      void flushTerminalActivity();
       observer.disconnect();
       dataDisposable.dispose();
       resizeDisposable.dispose();
       unlisten.then((fn) => fn());
       unlistenExit.then((fn) => fn());
-      invoke("pty_kill", { id: instance.id }).catch(() => {});
+      invoke("pty_kill", { id: ptyId }).catch(() => {});
+      termInstance.current = null;
       term.dispose();
     };
-  }, [rootPath, instance.id]);
+  }, [cwd, instance.id]);
 
   return <div ref={termRef} style={{ width: "100%", height: "100%", padding: "2px 4px" }} />;
 }
 
-// ---------------------------------------------------------------------------
-// Terminal Panel — manages terminal tabs with stacking support
-// ---------------------------------------------------------------------------
-
-export type TermLayoutMode = "single" | "stacked";
-
-export interface TerminalStackLayout {
-  /** Ordered list of terminal IDs currently visible in the stack (1–3 items). */
-  stackedIds: string[];
-  /** Flex-grow ratios for each stacked terminal (length = stackedIds.length). */
-  ratios: number[];
+function TerminalIcon({ kind }: { kind: "add" | "arrange" | "expand" | "restore" | "record" | "close" }) {
+  return <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" aria-hidden="true">{kind === "add" ? <path d="M8 3v10M3 8h10" /> : kind === "close" ? <path d="m4 4 8 8m0-8-8 8" /> : kind === "record" ? <circle cx="8" cy="8" r="4" /> : kind === "arrange" ? <><rect x="2" y="3" width="12" height="10" rx="1"/><path d="M8 3v10M8 8h6"/></> : kind === "expand" ? <path d="M9 2h5v5M14 2 7 9M6 3H2v11h11v-4"/> : <><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M2 10h12M8 4v4m-2-2 2 2 2-2"/></>}</svg>;
 }
 
-interface PanelProps {
+export type TerminalLayout = "tabs" | "columns" | "grid";
+export function nextTerminalLayout(layout: TerminalLayout): TerminalLayout {
+  return layout === "tabs" ? "columns" : layout === "columns" ? "grid" : "tabs";
+}
+const TERMINAL_LAYOUT_KEY = "nolock:terminal-layout";
+function loadTerminalLayout(): TerminalLayout {
+  try {
+    const stored = localStorage.getItem(TERMINAL_LAYOUT_KEY);
+    return stored === "columns" || stored === "grid" ? stored : "tabs";
+  } catch {
+    return "tabs";
+  }
+}
+interface WorkspaceProps {
   instances: TerminalInstance[];
   activeId: string | null;
+  editorTerminalId: string | null;
   rootPath: string;
+  terminalPercent: number;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
-  style?: React.CSSProperties;
-  lastCommandRef?: React.MutableRefObject<string>;
-  /** Stack layout — when non-null, multiple terminals are shown simultaneously. */
-  stackLayout: TerminalStackLayout | null;
-  /** Callback to toggle a terminal in/out of the stack. */
-  onToggleStack?: (id: string) => void;
-  /** Callback when a resize handle between stacked terminals is dragged. */
-  onStackRatioChange?: (index: number, newRatio: number) => void;
-  /** Container ref for measuring during resize. */
-  stackContainerRef?: React.RefObject<HTMLDivElement | null>;
+  onCreate: () => void;
+  onEditorTerminal: (id: string | null) => void;
+  onRename: (id: string, label: string) => void;
+  children: React.ReactNode;
+  resizeHandle: React.ReactNode;
 }
-
-export function TerminalPanel({
-  instances,
-  activeId,
-  rootPath,
-  onSelect,
-  onClose,
-  style,
-  lastCommandRef,
-  stackLayout,
-  onToggleStack,
-  onStackRatioChange,
-  stackContainerRef,
-}: PanelProps) {
-  if (instances.length === 0) return null;
-
-  const stackedIds = stackLayout?.stackedIds ?? [];
-  const ratios = stackLayout?.ratios ?? [];
-  const isStacked = stackedIds.length > 1;
-
-  return (
-    <div className="terminal-container" style={style}>
-      <div className="terminal-header">
-        <div className="terminal-tabs">
-          {instances.map((inst) => {
-            const isStackedHere = stackedIds.includes(inst.id);
-            return (
-              <div
-                key={inst.id}
-                className={`terminal-tab ${inst.id === activeId ? "active" : ""} ${isStackedHere ? "stacked" : ""}`}
-                onClick={() => onSelect(inst.id)}
-              >
-                <span>{inst.label}</span>
-                {instances.length >= 2 && onToggleStack && (
-                  <span
-                    className={`terminal-tab-stack-btn ${isStackedHere ? "active" : ""}`}
-                    title={isStackedHere ? "Unstack this terminal" : "Stack this terminal"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onToggleStack(inst.id);
-                    }}
-                  >
-                    &#8862;
-                  </span>
-                )}
-                <span
-                  className="terminal-tab-close"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onClose(inst.id);
-                  }}
-                >
-                  &times;
-                </span>
-              </div>
-            );
-          })}
-        </div>
-        <span />
-      </div>
-
-      <div
-        className={`terminal-body ${isStacked ? "stacked" : ""}`}
-        ref={stackContainerRef as React.RefObject<HTMLDivElement>}
-      >
-        {isStacked ? (
-          stackedIds.map((id, idx) => {
-            const inst = instances.find((i) => i.id === id);
-            if (!inst) return null;
-
-            const elements: React.ReactNode[] = [];
-
-            // Resize handle between stacked panes (not before the first)
-            if (idx > 0 && onStackRatioChange) {
-              elements.push(
-                <TerminalStackHandle
-                  key={`handle-${id}`}
-                  onDrag={(delta) => {
-                    const container = stackContainerRef?.current;
-                    if (!container) return;
-                    const totalHeight = container.getBoundingClientRect().height;
-                    const available = totalHeight - (stackedIds.length - 1) * 5;
-                    if (available <= 0) return;
-                    const ptsDelta = (delta / available) * 100;
-                    const newRatio = Math.max(10, Math.min(80, ratios[idx] + ptsDelta));
-                    onStackRatioChange(idx, newRatio);
-                  }}
-                />
-              );
-            }
-
-            elements.push(
-              <div
-                key={`pane-${id}`}
-                className={`terminal-stack-pane ${inst.id === activeId ? "active" : ""}`}
-                style={{ flex: ratioFlex(ratios[idx] || 33) }}
-                onClick={() => onSelect(id)}
-              >
-                <div className="terminal-stack-pane-header">
-                  <span className="terminal-stack-pane-label">{inst.label}</span>
-                  <span
-                    className="terminal-tab-close"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onClose(id);
-                    }}
-                  >
-                    &times;
-                  </span>
-                </div>
-                <TerminalView instance={inst} rootPath={rootPath} lastCommandRef={lastCommandRef} />
-              </div>
-            );
-
-            return elements;
-          })
-        ) : (
-          instances.map((inst) => (
-            <div
-              key={`single-${inst.id}`}
-              style={{ display: inst.id === activeId ? "block" : "none", width: "100%", height: "100%" }}
-            >
-              <TerminalView instance={inst} rootPath={rootPath} lastCommandRef={lastCommandRef} />
-            </div>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Internal: resize handle between stacked terminal panes
-// ---------------------------------------------------------------------------
-
-function TerminalStackHandle({ onDrag }: { onDrag: (delta: number) => void }) {
-  const handleRef = useRef<HTMLDivElement>(null);
-
+/** Every PTY view keeps the same React parent/key. Layout is CSS-only. */
+export function TerminalWorkspace({ instances, activeId, editorTerminalId, rootPath, terminalPercent, onSelect, onClose, onCreate, onEditorTerminal, onRename, children, resizeHandle }: WorkspaceProps) {
+  const [layout, setLayoutState] = useState<TerminalLayout>(loadTerminalLayout);
+  const setLayout = useCallback((next: TerminalLayout) => {
+    setLayoutState(next);
+    try { localStorage.setItem(TERMINAL_LAYOUT_KEY, next); } catch { /* storage unavailable */ }
+  }, []);
+  const [recorded, setRecorded] = useState<Set<string>>(() => new Set());
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [error, setError] = useState("");
   useEffect(() => {
-    const handle = handleRef.current;
-    if (!handle) return;
-
-    const onMouseDown = (e: MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-
-      const onMouseMove = (ev: MouseEvent) => {
-        onDrag(ev.clientY - startY);
-      };
-
-      const onMouseUp = () => {
-        document.removeEventListener("mousemove", onMouseMove);
-        document.removeEventListener("mouseup", onMouseUp);
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-      };
-
-      document.body.style.userSelect = "none";
-      document.body.style.cursor = "row-resize";
-      document.addEventListener("mousemove", onMouseMove);
-      document.addEventListener("mouseup", onMouseUp);
-    };
-
-    handle.addEventListener("mousedown", onMouseDown);
-    return () => handle.removeEventListener("mousedown", onMouseDown);
-  }, [onDrag]);
-
-  return <div ref={handleRef} className="terminal-stack-handle" />;
-}
-
-// ---------------------------------------------------------------------------
-// Helper
-// ---------------------------------------------------------------------------
-
-function ratioFlex(grow: number): string {
-  return `${grow} 1 0`;
+    const failed = (event: Event) => { setError((event as CustomEvent<string>).detail); setRecorded(new Set()); };
+    window.addEventListener("nolock:terminal-tracking-error", failed);
+    return () => window.removeEventListener("nolock:terminal-tracking-error", failed);
+  }, []);
+  const promoted = instances.some((t) => t.id === editorTerminalId) ? editorTerminalId : null;
+  const lower = instances.filter((t) => t.id !== promoted);
+  const selected = lower.some((t) => t.id === activeId) ? activeId : lower[0]?.id;
+  const columns = layout === "tabs" ? 1 : layout === "columns" ? Math.max(1, lower.length) : Math.max(1, Math.ceil(Math.sqrt(lower.length)));
+  const rows = layout === "grid" ? Math.max(1, Math.ceil(lower.length / columns)) : 1;
+  const hasLower = lower.length > 0;
+  const gridRows = instances.length === 0 ? "minmax(0, 1fr)" : hasLower
+    ? `minmax(0, ${100-terminalPercent}fr) 5px auto repeat(${rows}, minmax(0, ${terminalPercent / rows}fr))`
+    : "minmax(0, 1fr) auto";
+  return <div className="terminal-workspace" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gridTemplateRows: gridRows }}>
+    <div className="terminal-editor-slot" style={{ gridRow: 1, gridColumn: "1 / -1", display: promoted ? "none" : "flex" }}>{children}</div>
+    {hasLower && <div style={{ gridRow: 2, gridColumn: "1 / -1" }}>{resizeHandle}</div>}
+    {instances.length > 0 && <div className="terminal-workspace-toolbar" style={{ gridRow: hasLower ? 3 : 2, gridColumn: "1 / -1" }}>
+      <div className="terminal-workspace-tabs" role="tablist" aria-label="Terminals">
+        {instances.map((t) => <button type="button" role="tab" aria-selected={t.id === activeId} key={t.id} onClick={() => onSelect(t.id)} onDoubleClick={() => setRenaming(t.id)} title="Double-click to rename">{t.label}{t.id === promoted ? " ↗" : ""}</button>)}
+      </div>
+      <span className="terminal-count">{instances.length} terminals</span>
+      <button className="terminal-icon-button" type="button" onClick={onCreate} title="New terminal" aria-label="New terminal"><TerminalIcon kind="add" /></button>
+      <button className="terminal-icon-button" type="button" onClick={() => setLayout(nextTerminalLayout(layout))} disabled={lower.length < 2} title={`Arrange terminals · ${layout} (click to cycle)`} aria-label={`Arrange: ${layout}`}><TerminalIcon kind="arrange" /></button>
+      {error && <span role="alert" title={error}>Tracking failed <button className="terminal-icon-button" type="button" onClick={() => setError("")} aria-label="Dismiss tracking error"><TerminalIcon kind="close" /></button></span>}
+    </div>}
+    {instances.map((inst) => {
+      const inEditor = inst.id === promoted;
+      const index = lower.findIndex((t) => t.id === inst.id);
+      const visible = inEditor || layout !== "tabs" || inst.id === selected;
+      return <div key={inst.id} className={`terminal-workspace-pane ${inst.id === activeId ? "active" : ""}`} style={{
+        display: visible ? "flex" : "none",
+        gridRow: inEditor ? 1 : 4 + Math.floor(index / columns),
+        gridColumn: inEditor ? "1 / -1" : 1 + (index % columns),
+      }} onFocusCapture={() => onSelect(inst.id)} onMouseDown={() => onSelect(inst.id)}>
+        <div className="terminal-pane-controls">
+          {renaming === inst.id ? <input autoFocus aria-label={`Name for ${inst.id}`} value={inst.label} maxLength={80} onChange={(e) => onRename(inst.id, e.target.value)} onBlur={() => setRenaming(null)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") setRenaming(null); }} /> : <span className="terminal-pane-name" title="Double-click to rename" onDoubleClick={() => setRenaming(inst.id)}>{inst.label}</span>}
+          <button className="terminal-icon-button terminal-record" type="button" aria-label={recorded.has(inst.id) ? "Stop recording" : "Record transcript"} aria-pressed={recorded.has(inst.id)} title={recorded.has(inst.id) ? "Stop recording transcript" : "Record transcript — output may contain secrets"} onClick={() => setRecorded((prev) => { const next = new Set(prev); next.has(inst.id) ? next.delete(inst.id) : next.add(inst.id); return next; })}><TerminalIcon kind="record" /></button>
+          <button className="terminal-icon-button" type="button" aria-label={inEditor ? "Show files" : `Move ${inst.label} to editor`} title={inEditor ? "Restore file editor" : "Move terminal to editor"} aria-pressed={inEditor} onClick={() => onEditorTerminal(inEditor ? null : inst.id)}><TerminalIcon kind={inEditor ? "restore" : "expand"} /></button>
+          <button className="terminal-icon-button" type="button" aria-label={`Close ${inst.label}`} title="Close terminal" onClick={() => onClose(inst.id)}><TerminalIcon kind="close" /></button>
+        </div>
+        <div className="terminal-emulator-slot"><TerminalView instance={inst} rootPath={rootPath} active={inst.id === activeId} recording={recorded.has(inst.id)} /></div>
+      </div>;
+    })}
+  </div>;
 }

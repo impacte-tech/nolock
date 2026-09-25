@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getSecret, setSecret } from "../lib/secrets";
 import { BACKENDS, isPlanningBackend, resolveBackendUrl } from "../lib/backends";
@@ -20,6 +20,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
   const [backend, setBackend] = useState("ollama");
   const [url, setUrl] = useState("http://localhost:11434");
   const [apiKey, setApiKey] = useState("");
+  const keyLoadRef = useRef(0);
   const [routerName, setRouterName] = useState("");
   const [routers, setRouters] = useState<RouterItem[]>([]);
   const [loadingRouters, setLoadingRouters] = useState(false);
@@ -45,7 +46,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     }
     setBackend(currentBackend);
     setUrl(loadedUrl || resolveBackendUrl(currentBackend));
-    setApiKey(localStorage.getItem(`nolock.apiKey.${currentBackend}`) || "");
+    setApiKey("");
     setRouterName(localStorage.getItem("nolock.routerName") || "");
     setRouters([]);
     setRouterError(null);
@@ -53,10 +54,11 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     // Model affinity (session pinning) is enabled by default.
     setModelAffinity(localStorage.getItem("nolock.digitaloceanModelAffinity") !== "false");
 
-    // Upgrade from OS keychain if available
+    // Ignore stale keychain reads after switching providers or typing a key.
+    const keyRequest = ++keyLoadRef.current;
     (async () => {
       const storedApiKey = await getSecret(`apiKey.${currentBackend}`);
-      if (storedApiKey != null) {
+      if (storedApiKey != null && keyLoadRef.current === keyRequest) {
         setApiKey(storedApiKey);
       }
     })();
@@ -68,7 +70,11 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
       setBackend(value);
       setUrl(resolveBackendUrl(value));
       // Load the new backend's API key
-      setApiKey(localStorage.getItem(`nolock.apiKey.${value}`) || "");
+      setApiKey("");
+      const keyRequest = ++keyLoadRef.current;
+    void getSecret(`apiKey.${value}`).then((key) => {
+      if (keyLoadRef.current === keyRequest) setApiKey(key || "");
+    });
       setRouters([]);
       setRouterError(null);
       setRoutersLoaded(false);
@@ -168,7 +174,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
                 className="field-input"
                 type="password"
                 value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
+                onChange={(e) => { keyLoadRef.current++; setApiKey(e.target.value); }}
                 placeholder={backend === "openrouter" ? "sk-or-..." : backend === "digitalocean" ? "dop_v1_..." : "sk-oc-..."}
               />
               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>

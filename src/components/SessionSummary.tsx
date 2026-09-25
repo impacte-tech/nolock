@@ -1,3 +1,4 @@
+import { readTerminalActivity, terminalDisplayText, type TerminalSessionEvent } from "../lib/terminalSessions";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   type SessionRecord,
@@ -486,6 +487,20 @@ function makeMatcher(query: string) {
 }
 
 export default function SessionSummary({ session, onClose, rootPath = "" }: Props) {
+  const [terminalEvents, setTerminalEvents] = useState<TerminalSessionEvent[]>([]);
+  const [terminalError, setTerminalError] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => { void readTerminalActivity(rootPath, session.id).then((events) => {
+      if (!cancelled) { setTerminalEvents(events); setTerminalError(false); }
+    }).catch(() => { if (!cancelled) setTerminalError(true); }); };
+    setTerminalEvents([]);
+    refresh();
+    window.addEventListener("nolock:terminal-session-updated", refresh);
+    const timer = setInterval(refresh, 2000);
+    return () => { cancelled = true; clearInterval(timer); window.removeEventListener("nolock:terminal-session-updated", refresh); };
+  }, [rootPath, session.id]);
+  const terminals = [...new Set(terminalEvents.map((event) => event.terminalId))];
   const usageSummary = summarizeUsage(session.usage);
   const messages = session.messages ?? [];
   // Session-wide search — filters the tool call log, changed files and chat log.
@@ -579,6 +594,26 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
             </button>
           )}
         </div>
+
+        {(terminals.length > 0 || terminalError) && <div className="session-summary-section">
+          <div className="session-summary-section-title">Terminal activity</div>
+          {session.agent ? <>
+            <p>{session.agent.name} · {session.agent.terminalId} · {session.agent.cwd}</p>
+            <p>{session.agent.interrupted ? "Interrupted" : session.status === "active" ? "Running" : `Exited (${session.agent.exitCode ?? "unknown"})`}. Agent output is recorded automatically. Native conversation history remains managed by the coding agent; token usage is unavailable.</p>
+            {session.agent.transcriptTruncated && <p role="status">Recording reached the 8 MiB limit. The agent continued running.</p>}
+            {session.agent.recordingFailed && <p role="alert">Part of this session could not be recorded.</p>}
+          </> : <p>Terminal activity attached to this chat session. Submissions count Enter presses.</p>}
+          {terminalError && <p role="alert">Could not load terminal activity.</p>}
+          {terminals.map((id) => {
+            const events = terminalEvents.filter((event) => event.terminalId === id);
+            const output = terminalDisplayText(events.filter((event) => event.kind === "output").map((event) => event.text ?? "").join(""));
+            return <details key={id}>
+              <summary>{events[events.length - 1].label} · {events.filter((event) => event.kind === "input").length} submissions · {events.length} events</summary>
+              <ul>{events.filter((event) => event.kind !== "output" && event.kind !== "input").map((event) => <li key={event.id}>{formatSessionTime(event.createdAt)} · {event.kind}</li>)}</ul>
+              {output ? <><p>{session.agent ? "Agent transcript" : "Opt-in transcript"}{output.length > 100000 ? " (last 100,000 characters)" : ""}</p><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 280, overflow: "auto" }}>{output.slice(-100000)}</pre></> : <p>No transcript recorded.</p>}
+            </details>;
+          })}
+        </div>}
 
         {/* Token expenses — split by provider/model with price + cost. */}
         <div className="session-summary-section session-summary-section-fixed">
