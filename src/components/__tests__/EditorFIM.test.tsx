@@ -82,10 +82,9 @@ describe("AiInlineCompletionProvider - gate behavior", () => {
       createCancellationToken(),
     );
 
-    // Two calls: getSecret + ai_complete
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
-    expect(mockInvoke.mock.calls[0][0]).toBe("get_secret");
-    expect(mockInvoke.mock.calls[1][0]).toBe("ai_complete");
+    // Session credentials require no host call.
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke.mock.calls[0][0]).toBe("ai_complete");
     expect(result.items).toHaveLength(1);
     expect(result.items[0].insertText).toBe("const result = 42;");
   });
@@ -135,9 +134,9 @@ describe("AiInlineCompletionProvider - API integration", () => {
     );
 
     // Two calls: getSecret (index 0) + ai_complete (index 1)
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
-    const callArgs = mockInvoke.mock.calls[1][0]; // "ai_complete"
-    const req = mockInvoke.mock.calls[1][1].req;
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    const callArgs = mockInvoke.mock.calls[0][0]; // "ai_complete"
+    const req = mockInvoke.mock.calls[0][1].req;
 
     expect(callArgs).toBe("ai_complete");
     // The prompt should contain FIM tokens since suffix is non-empty
@@ -168,8 +167,8 @@ describe("AiInlineCompletionProvider - API integration", () => {
       createCancellationToken(),
     );
 
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
-    const req = mockInvoke.mock.calls[1][1].req;
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.prompt).not.toContain("<|fim_prefix|>");
     expect(req.prompt).toBe("const x = ");
 
@@ -197,9 +196,8 @@ describe("AiInlineCompletionProvider - API integration", () => {
     );
 
     expect(result.items).toHaveLength(0);
-    // getSecret WAS called (first arg is "get_secret"), but ai_complete was NOT
-    expect(mockInvoke).toHaveBeenCalledTimes(1);
-    expect(mockInvoke.mock.calls[0][0]).toBe("get_secret");
+    // No completion request or host secret access without a model.
+    expect(mockInvoke).toHaveBeenCalledTimes(0);
   });
 
   it("returns empty when prefix is too short (< 5 chars)", async () => {
@@ -247,7 +245,7 @@ describe("AiInlineCompletionProvider - FIM parameter forwarding", () => {
       createCancellationToken(),
     );
 
-    const req = mockInvoke.mock.calls[1][1].req;
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.temperature).toBe(0.5);
     expect(req.max_tokens).toBe(128);
     expect(req.system_prompt).toBeUndefined();
@@ -270,7 +268,7 @@ describe("AiInlineCompletionProvider - FIM parameter forwarding", () => {
       createCancellationToken(),
     );
 
-    const req = mockInvoke.mock.calls[1][1].req;
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.temperature).toBeUndefined();
     expect(req.max_tokens).toBeUndefined();
     expect(req.system_prompt).toBeUndefined();
@@ -292,7 +290,7 @@ describe("AiInlineCompletionProvider - FIM parameter forwarding", () => {
       createCancellationToken(),
     );
 
-    const req = mockInvoke.mock.calls[1][1].req;
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.model).toBe("deepseek-coder:6.7b");
   });
 });
@@ -408,7 +406,6 @@ describe("AiInlineCompletionProvider - response cleaning", () => {
 
   it("handles error from backend gracefully", async () => {
     mockInvoke
-      .mockResolvedValueOnce(null)    // getSecret("apiKey")
       .mockRejectedValueOnce(new Error("Network error")); // ai_complete fails
     const provider = new AiInlineCompletionProvider();
     openGate(provider);
@@ -629,8 +626,8 @@ describe("AiInlineCompletionProvider - FIM prompt construction", () => {
       createCancellationToken(),
     );
 
-    // Second call is ai_complete (first is get_secret)
-    const req = mockInvoke.mock.calls[1][1].req;
+    // The completion request is the only host call.
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.prompt).toContain("<|fim_prefix|>");
     expect(req.prompt).toContain("<|fim_suffix|>");
     expect(req.prompt).toContain("<|fim_middle|>");
@@ -651,8 +648,8 @@ describe("AiInlineCompletionProvider - FIM prompt construction", () => {
       createCancellationToken(),
     );
 
-    // Second call is ai_complete (first is get_secret)
-    const req = mockInvoke.mock.calls[1][1].req;
+    // The completion request is the only host call.
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.prompt).not.toContain("<|fim_prefix|>");
     expect(req.prompt).toBe("console.");
   });
@@ -697,15 +694,15 @@ describe("AiInlineCompletionProvider - FIM fallback", () => {
     );
 
     // Should have made 3 invoke calls: getSecret + ai_complete(FIM) + ai_complete(retry)
-    expect(mockInvoke).toHaveBeenCalledTimes(3);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
 
     // First ai_complete should use FIM prompt
-    const fimCall = mockInvoke.mock.calls[1];
+    const fimCall = mockInvoke.mock.calls[0];
     expect(fimCall[0]).toBe("ai_complete");
     expect(fimCall[1].req.prompt).toContain("<|fim_prefix|>");
 
     // Second ai_complete (retry) should use raw prefix, no FIM tokens
-    const retryCall = mockInvoke.mock.calls[2];
+    const retryCall = mockInvoke.mock.calls[1];
     expect(retryCall[0]).toBe("ai_complete");
     expect(retryCall[1].req.prompt).not.toContain("<|fim_prefix|>");
     expect(retryCall[1].req.suffix).toBeNull();
@@ -737,7 +734,7 @@ describe("AiInlineCompletionProvider - FIM fallback", () => {
     );
 
     // Two ai_complete calls (FIM + retry), both empty
-    expect(mockInvoke).toHaveBeenCalledTimes(3);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
     expect(result.items).toHaveLength(0);
   });
 
@@ -767,7 +764,7 @@ describe("AiInlineCompletionProvider - FIM fallback", () => {
     );
 
     // Only getSecret + one ai_complete (no retry)
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
     expect(result.items).toHaveLength(0);
   });
 
@@ -793,7 +790,7 @@ describe("AiInlineCompletionProvider - FIM fallback", () => {
     );
 
     // Only getSecret + one ai_complete (no retry needed)
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
     expect(result.items).toHaveLength(1);
   });
 
@@ -952,7 +949,7 @@ describe("AiInlineCompletionProvider - debounce timing", () => {
       model, position as any, {} as any, createCancellationToken(),
     );
     expect(secondResult.items).toHaveLength(0);
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
   });
 
   it("full debounce cycle: keystroke → 500ms → gate open → trigger → completion", async () => {
@@ -978,7 +975,7 @@ describe("AiInlineCompletionProvider - debounce timing", () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0].insertText).toBe("return a + b;\n}");
     expect((provider as any)._ready).toBe(false);
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
   });
 
   it("disposes the timer on provider dispose", () => {
@@ -1095,7 +1092,7 @@ describe("AiInlineCompletionProvider - debounce timing", () => {
       model, position as any, {} as any, createCancellationToken(),
     );
     expect(result.items).toHaveLength(1);
-    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -124,8 +124,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           />
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
             This is the <strong>Planning provider</strong> — the main orchestrator model that
-            plans, delegates to sub-agents, and synthesizes. Use an online provider (OpenRouter,
-            DigitalOcean) here for the best planning quality, and local models as task executors.
+            plans, delegates to sub-agents, and synthesizes. Use OpenRouter or a local model here, and configure task executors separately.
           </span>
 
           <ModelSelector
@@ -185,8 +184,7 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
               <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
                 Maximum output tokens for cloud providers. Leave empty for the{" "}
                 <strong>default (256000)</strong> — large enough for long agentic tool-loop
-                runs on models with big context windows. For DigitalOcean this maps to{" "}
-                <code>max_completion_tokens</code>, scoped across the whole tool loop.
+                runs on models with big context windows.
               </span>
             </>
           ) : (
@@ -272,11 +270,9 @@ export default function ChatModelPanel({ visible, onClose }: Props) {
           </span>
           <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 12 }}>
             In <strong>Learning</strong> mode the assistant teaches you about the project and
-            maintains a plain-text <code>.faq/</code> directory at the repository root — it
-            creates it, tracks every question you ask and rewrites a ranked README
-            (most-asked first) as the conversation goes. Every exchange is also indexed
-            in a local SQLite + sqlite-vec vector store so past questions can be retrieved
-            semantically on later turns.
+            offers a book button beside response feedback. Review the question/answer
+            chunks, summary excerpts and category, then approve saving to the local
+            knowledge base. Exchanges are never saved automatically.
           </span>
 
           {/* ============ Learning-mode retrieval config ============ */}

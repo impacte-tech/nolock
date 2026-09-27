@@ -15,6 +15,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import Select from "./Select";
 import {
+  displayFaqQuestion,
   faqListCategories,
   nameFaqCategories,
   faqStats,
@@ -178,7 +179,7 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
 
   const startEdit = (entry: FaqEntry) => {
     setEditingId(entry.id);
-    setEditQuestion(entry.question);
+    setEditQuestion(displayFaqQuestion(entry.question));
     setEditAnswer(entry.answer);
     setEditCategoryId(entry.categoryId != null ? String(entry.categoryId) : "");
     setEditModel(entry.model ?? "");
@@ -202,7 +203,7 @@ export default function FaqPanel({ visible, onClose, rootPath }: Props) {
   };
 
   const deleteEntry = (entry: FaqEntry) => {
-    if (!confirm(`Delete "${entry.question}" from the knowledge base?`)) return;
+    if (!confirm(`Delete "${displayFaqQuestion(entry.question)}" from the knowledge base?`)) return;
     void run(() => faqDeleteEntry(rootPath, entry.id));
   };
 
@@ -509,7 +510,7 @@ function EntryCard(props: CardProps) {
 
   return (
     <div className="faq-entry" style={{ marginTop: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6 }}>
-      <strong style={{ fontSize: 12, display: "block" }}>{entry.question}</strong>
+      <strong style={{ fontSize: 12, display: "block" }}>{displayFaqQuestion(entry.question)}</strong>
       <span style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginTop: 2 }}>
         {formatMeta(entry)}
       </span>

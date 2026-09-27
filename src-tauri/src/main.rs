@@ -15,7 +15,6 @@ pub mod linter;
 mod macos_keyboard;
 pub mod notebook;
 pub mod pykernel;
-pub mod secrets;
 pub mod switchyard;
 pub mod terminal_memory;
 pub mod terminal_sessions;
@@ -63,6 +62,15 @@ async fn faq_search(
 }
 
 #[tauri::command]
+fn faq_review_preview(root_path: String, question: String, answer: String) -> Result<faq::review::Preview, String> {
+    faq::review::preview(root_path, question, answer)
+}
+#[tauri::command]
+async fn faq_review_save(root_path: String, backend: String, url: String, api_key: String, review: faq::review::Review, config: faq::FaqConfig) -> Result<faq::review::Review, String> {
+    faq::review::save(root_path, backend, url, api_key, review, config).await
+}
+
+#[tauri::command]
 async fn faq_upsert(
     root_path: String,
     backend: String,
@@ -96,14 +104,17 @@ fn faq_list_categories(root_path: String, top_k: u32, min_similarity: f64) -> Re
     faq::list_categories(root_path, top_k, min_similarity)
 }
 
+fn ensure_model_backend(backend: &str) -> Result<(), String> {
+    if matches!(backend, "ollama" | "llamacpp" | "openrouter") { Ok(()) }
+    else { Err(format!("Unsupported model provider: {backend}. Choose Ollama, llama.cpp or OpenRouter.")) }
+}
+
 fn faq_category_endpoint(backend: &str, url: &str) -> Result<String, String> {
     let base = url.trim_end_matches('/');
     match backend {
         "ollama" => Ok(format!("{}/api/chat", base)),
         "llamacpp" => Ok(format!("{}/chat/completions", if base.ends_with("/v1") { base.to_string() } else { format!("{}/v1", base) })),
         "openrouter" => Ok("https://openrouter.ai/api/v1/chat/completions".into()),
-        "digitalocean" => Ok("https://inference.do-ai.run/v1/chat/completions".into()),
-        "opencode" => Ok(format!("{}/chat/completions", base)),
         _ => Err(format!("Unsupported chat provider: {}", backend)),
     }
 }
@@ -2364,41 +2375,6 @@ fn parse_ollama_context_length(data: &serde_json::Value) -> u32 {
     8192
 }
 
-/// Heuristic: is this OpenCode Zen model free?
-///
-/// Based on https://opencode.ai/docs/zen/#pricing
-/// Free models are those with "-free" suffix, or "big-pickle".
-fn opencode_is_free_model(id: &str) -> bool {
-    let lower = id.to_lowercase();
-    lower.ends_with("-free") || lower == "big-pickle"
-}
-
-/// Heuristic: does this OpenCode Zen model have zero data retention?
-///
-/// Based on https://opencode.ai/docs/zen/#privacy
-/// - Default: zero-retention, no training
-/// - EXCEPTION: OpenAI models (gpt-*) → retained 30 days
-/// - EXCEPTION: Anthropic models (claude-*) → retained 30 days
-/// - EXCEPTION: Free models (*-free, big-pickle) → data may be used for training
-fn opencode_has_zdr(id: &str) -> bool {
-    let lower = id.to_lowercase();
-    // Free models: data may be used for training → NOT ZDR
-    if lower.ends_with("-free") || lower == "big-pickle" {
-        return false;
-    }
-    // OpenAI models: retained 30 days → NOT ZDR
-    if lower.starts_with("gpt") {
-        return false;
-    }
-    // Anthropic models: retained 30 days → NOT ZDR
-    if lower.starts_with("claude") {
-        return false;
-    }
-    // Everything else (Gemini, DeepSeek, GLM, Kimi, Qwen, Grok, MiniMax paid, etc.)
-    // → zero retention
-    true
-}
-
 #[derive(serde::Deserialize)]
 pub struct FetchModelsRequest {
     backend: String,
@@ -2444,6 +2420,7 @@ async fn cancel_model_pull(req: model_pulls::PullRequest) -> Result<model_pulls:
 
 #[tauri::command]
 async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, String> {
+    ensure_model_backend(&req.backend)?;
     let client = reqwest::Client::new();
 
     match req.backend.as_str() {
@@ -2498,83 +2475,7 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                 }
             }).collect())
         }
-        "opencode" => {
-            let normalized = req.url.trim_end_matches('/');
-            let is_remote = normalized.contains("/v1");
 
-            if is_remote {
-                // Remote OpenAI-compatible API
-                let endpoint = format!("{}/models", normalized);
-                eprintln!("[nolock] fetch_models opencode(remote) GET {}", endpoint);
-                let mut builder = client.get(&endpoint);
-                if let Some(ref key) = req.api_key {
-                    if !key.is_empty() {
-                        builder = builder.header("Authorization", format!("Bearer {}", key));
-                    }
-                }
-                let resp = builder
-                    .timeout(std::time::Duration::from_secs(15))
-                    .send()
-                    .await
-                    .map_err(|e| format!("OpenCode Zen request failed: {}", e))?;
-
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(format!("OpenCode Zen API error ({}): {}", status, &text[..text.len().min(200)]));
-                }
-
-                let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-                let data = body["data"].as_array().cloned().unwrap_or_default();
-
-                Ok(data.iter().map(|m| {
-                    let id = m["id"].as_str().unwrap_or("");
-                    let is_free = opencode_is_free_model(id);
-                    let has_zdr = opencode_has_zdr(id);
-                    ModelListItem {
-                        id: id.to_string(),
-                        name: id.to_string(),
-                        is_free,
-                        zero_data_retention: has_zdr,
-                        pricing: None,
-                    }
-                }).collect())
-            } else {
-                // Local Ollama-compatible API
-                let endpoint = format!("{}/api/tags", normalized);
-                eprintln!("[nolock] fetch_models opencode(local) GET {}", endpoint);
-                let resp = client
-                    .get(&endpoint)
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send()
-                    .await
-                    .map_err(|e| format!("OpenCode Zen local request failed: {}", e))?;
-
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    return Err(format!("OpenCode Zen local API error ({}): {}", status, &text[..text.len().min(200)]));
-                }
-
-                let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-                let models = body["models"].as_array().cloned().unwrap_or_default();
-
-                Ok(models.iter().map(|m| {
-                    let name = m["name"].as_str().unwrap_or("");
-                    // Strip ":latest" suffix for matching
-                    let base_id = name.split(':').next().unwrap_or(name);
-                    let is_free = opencode_is_free_model(base_id);
-                    let has_zdr = opencode_has_zdr(base_id);
-                    ModelListItem {
-                        id: name.to_string(),
-                        name: name.to_string(),
-                        is_free,
-                        zero_data_retention: has_zdr,
-                        pricing: None,
-                    }
-                }).collect())
-            }
-        }
         "ollama" => {
             let base = req.url.trim_end_matches('/');
             let endpoint = format!("{}/api/tags", base);
@@ -2645,96 +2546,9 @@ async fn fetch_models(req: FetchModelsRequest) -> Result<Vec<ModelListItem>, Str
                 }
             }).collect())
         }
-        "digitalocean" => {
-            // DigitalOcean Inference Router — return empty list, routers are fetched separately
-            // Models are associated with routers, not listed directly
-            Ok(vec![])
-        }
+
         _ => Ok(vec![]),
     }
-}
-
-// ---------------------------------------------------------------------------
-// DigitalOcean Inference Router commands
-// ---------------------------------------------------------------------------
-
-#[derive(serde::Deserialize)]
-pub struct FetchRoutersRequest {
-    api_key: String,
-}
-
-#[derive(serde::Serialize)]
-pub struct RouterItem {
-    /// Router name — used to build the `router:{name}` model reference.
-    id: String,
-    /// Display name.
-    name: String,
-    /// Router description.
-    description: String,
-}
-
-#[tauri::command]
-async fn fetch_digitalocean_routers(req: FetchRoutersRequest) -> Result<Vec<RouterItem>, String> {
-    let client = reqwest::Client::new();
-    // DigitalOcean Inference Router management API — lists the routers in the
-    // authenticated account. Requires a personal access token (dop_v1_...) with
-    // the `genai:read` scope.
-    let endpoint = "https://api.digitalocean.com/v2/gen-ai/models/routers?per_page=200";
-
-    eprintln!("[nolock] fetch_digitalocean_routers GET {}", endpoint);
-    let resp = client
-        .get(endpoint)
-        .header("Authorization", format!("Bearer {}", req.api_key))
-        .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| format!("DigitalOcean routers request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "DigitalOcean API error ({}): {}",
-            status,
-            &text[..text.len().min(300)]
-        ));
-    }
-
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-
-    // The list endpoint returns the routers under the `model_routers` key
-    // (per the OpenAPI spec `apiListModelRoutersOutput`). Fall back to other
-    // plausible keys in case the shape changes between API versions.
-    let routers = body["model_routers"]
-        .as_array()
-        .or_else(|| body["routers"].as_array())
-        .or_else(|| body["data"].as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    Ok(routers
-        .iter()
-        .filter_map(|r| {
-            // `name` is the router reference used in `router:{name}`. Fall back
-            // to `uuid`/`id` (the unique identifier) in case `name` is absent.
-            let name = r["name"]
-                .as_str()
-                .or_else(|| r["uuid"].as_str())
-                .or_else(|| r["id"].as_str())
-                .unwrap_or("")
-                .to_string();
-            if name.is_empty() {
-                return None;
-            }
-            let description = r["description"].as_str().unwrap_or("").to_string();
-            Some(RouterItem {
-                id: name.clone(),
-                name,
-                description,
-            })
-        })
-        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -2911,11 +2725,6 @@ pub struct ChatRequest {
     /// Maximum number of tool call iterations before the agent stops.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
-    /// Whether to pin the DigitalOcean Inference Router to a single model for
-    /// the whole agent/tool loop (via the `X-Model-Affinity` header). Defaults
-    /// to enabled when absent.
-    #[serde(default)]
-    pub model_affinity: Option<bool>,
     /// Agents explicitly referenced by the user via `@agent` mentions. The
     /// backend pre-spawns these in parallel and injects their results as
     /// context, so parallel triggering doesn't depend on the orchestrator
@@ -3442,7 +3251,6 @@ pub struct SubAgentRunner<'a> {
     /// The model's context window (in tokens), propagated so sub/micro-agents
     /// can detect near-limit usage and trigger context summarization.
     context_length: u64,
-use_model_affinity: bool,
     /// Current sub-agent nesting depth (to bound recursion).
     depth: usize,
     /// Explicit user opt-in for code-execution tools (rust_repl / bash_sandbox),
@@ -3862,7 +3670,6 @@ pub async fn run_subagent(
             runner.max_tokens,
             sub_iterations,
             None,
-            runner.use_model_affinity,
             Some(&id),
             Some(&sub_runner),
             &std::collections::HashSet::new(),
@@ -3885,7 +3692,6 @@ pub async fn run_subagent(
             runner.max_tokens,
             sub_iterations,
             None,
-            runner.use_model_affinity,
             Some(&id),
             Some(&sub_runner),
             &std::collections::HashSet::new(),
@@ -4227,7 +4033,6 @@ pub async fn run_micro_agent(
                 runner.max_tokens,
                 MICRO_AGENT_MAX_ITERATIONS,
                 None,
-                runner.use_model_affinity,
                 Some(&id),
                 Some(&sub_runner),
                 &std::collections::HashSet::new(),
@@ -4250,7 +4055,6 @@ pub async fn run_micro_agent(
                 runner.max_tokens,
                 MICRO_AGENT_MAX_ITERATIONS,
                 None,
-                runner.use_model_affinity,
                 Some(&id),
                 Some(&sub_runner),
                 &std::collections::HashSet::new(),
@@ -8407,12 +8211,13 @@ async fn run_openai_tool_loop(
     max_tokens: Option<u32>,
     max_iterations: usize,
     extra_headers: Option<Vec<(&str, &str)>>,
-    use_model_affinity: bool,
     subagent_id: Option<&str>,
     runner: Option<&SubAgentRunner<'_>>,
     pre_spawned: &std::collections::HashSet<String>,
     context_length: u64,
 ) -> Result<ChatResult, String> {
+    ensure_model_backend(backend)?;
+    redaction::register(api_key);
     let mut openai_msgs: Vec<serde_json::Value> = messages
         .iter()
         .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
@@ -8489,17 +8294,6 @@ async fn run_openai_tool_loop(
     // De-duplicate spawn_subagent calls (same agent + task) within this run.
     let mut spawned_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Generate a stable session ID for the model-affinity header. This pins the
-    // DigitalOcean Inference Router to a single model across the whole tool loop,
-    // preventing mid-session model switches (which break tool-calling formats and
-    // invalidate the KV cache). Without it the router may route each iteration to
-    // a different model, so tool_calls from one turn don't parse in the next.
-    let session_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .to_string();
-
     // Bounded retries when a thinking model (deepseek-r1, qwen3, …) ends a turn
     // with ONLY reasoning (no content, no tool call). We nudge it to produce a
     // real answer / structured tool call instead of dumping the reasoning.
@@ -8535,8 +8329,8 @@ async fn run_openai_tool_loop(
         }
 
         eprintln!(
-            "[nolock] openai-tool-loop iteration={}, POST {} (streaming, tools={}, affinity={})",
-            iteration, url, tools.len(), session_id
+            "[nolock] openai-tool-loop iteration={}, POST {} (streaming, tools={})",
+            iteration, url, tools.len()
         );
 
         let mut req_builder = client
@@ -8544,9 +8338,7 @@ async fn run_openai_tool_loop(
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&body)
             .timeout(std::time::Duration::from_secs(300));
-        if use_model_affinity {
-            req_builder = req_builder.header("X-Model-Affinity", &session_id);
-        }
+
 
         if let Some(headers) = &extra_headers {
             for (k, v) in headers {
@@ -8563,21 +8355,6 @@ async fn run_openai_tool_loop(
             })?;
 
         let status = resp.status();
-        // Log the routed task/model for debugging (DigitalOcean router headers)
-        if let Some(route) = resp.headers().get("x-model-router-selected-route") {
-            if let Ok(route) = route.to_str() {
-                eprintln!("[nolock] openai-tool-loop routed route={}", route);
-            }
-        }
-        if let Some(m) = resp.headers().get("x-model-router-selected-model") {
-            if let Ok(m) = m.to_str() {
-                eprintln!("[nolock] openai-tool-loop routed model={}", m);
-                // Surface the routed model to the frontend so the user can see
-                // which model the DigitalOcean Inference Router selected (helps
-                // diagnose e.g. reasoning-model "overthinking").
-                sink.emit_model_routed(m);
-            }
-        }
         if !status.is_success() {
             let text = resp.text().await.map_err(|e| e.to_string())?;
             eprintln!(
@@ -9054,6 +8831,7 @@ fn build_ollama_body(
 
 #[tauri::command]
 async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
+    ensure_model_backend(&req.backend)?;
     eprintln!(
         "[nolock] ai_complete backend={} url={} model={} prompt_len={} suffix={} temp={:?} max_tokens={:?} system_prompt={:?}",
         req.backend,
@@ -9211,149 +8989,8 @@ async fn ai_complete(req: CompletionRequest) -> Result<String, String> {
                 .unwrap_or("")
                 .to_string())
         }
-        "opencode" => {
-            let api_key = req.api_key.clone().unwrap_or_default();
-            let is_remote = req.url.contains("/v1");
 
-            if is_remote {
-                // Remote OpenCode Zen API — OpenAI-compatible format
-                let body = serde_json::json!({
-                    "model": req.model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": req.prompt}
-                    ],
-                    "stream": false,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                });
-                let full_url = format!("{}/chat/completions", req.url.trim_end_matches('/'));
-                eprintln!("[nolock] opencode POST {full_url}");
-                let resp = client
-                    .post(&full_url)
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .json(&body)
-                    .timeout(std::time::Duration::from_secs(30))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        eprintln!("[nolock] opencode error: {}", e);
-                        e.to_string()
-                    })?;
-                let status = resp.status();
-                let text = resp.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
-                let data: serde_json::Value =
-                    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
-                Ok(data["choices"][0]["message"]["content"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string())
-            } else {
-                // Local OpenCode Zen — Ollama-compatible format
-                let body = serde_json::json!({
-                    "model": req.model,
-                    "system": system_prompt,
-                    "prompt": req.prompt,
-                    "stream": false,
-                    "options": {
-                        "num_predict": max_tokens,
-                        "temperature": temperature,
-                        "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
-                    }
-                });
-                let full_url = format!("{}/api/generate", req.url.trim_end_matches('/'));
-                eprintln!("[nolock] opencode POST {full_url}");
-                let resp = client
-                    .post(&full_url)
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .json(&body)
-                    .timeout(std::time::Duration::from_secs(30))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        eprintln!("[nolock] opencode error: {}", e);
-                        e.to_string()
-                    })?;
-                let status = resp.status();
-                let text = resp.text().await.map_err(|e| e.to_string())?;
-                eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
-                let data: serde_json::Value =
-                    serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
-                Ok(data["response"].as_str().unwrap_or("").to_string())
-            }
-        }
-        "digitalocean" => {
-            let api_key = req.api_key.unwrap_or_default();
 
-            // Build a structured prompt that includes both prefix and suffix context.
-            // DigitalOcean Inference Router uses the chat completions API which doesn't natively support
-            // suffix/FITM, so we encode both sides of the cursor in the message content.
-            let user_content = if let Some(ref suffix) = req.suffix {
-                if !suffix.is_empty() {
-                    format!(
-                        "Complete the code at the cursor position marked by <CURSOR>.\n\n\
-                         Before cursor:\n```\n{}\n```\n\n\
-                         After cursor:\n```\n{}\n```\n\n\
-                         Output ONLY the code that should replace <CURSOR>. No explanations, \
-                         no markdown formatting, no conversational text.",
-                        req.prompt, suffix
-                    )
-                } else {
-                    format!(
-                        "Complete the following code at the cursor. Output ONLY the code that \
-                         belongs at the cursor. No explanations, no markdown, no conversational text.\n\n```\n{}\n```",
-                        req.prompt
-                    )
-                }
-            } else {
-                format!(
-                    "Complete the following code at the cursor. Output ONLY the code that \
-                     belongs at the cursor. No explanations, no markdown, no conversational text.\n\n```\n{}\n```",
-                    req.prompt
-                )
-            };
-
-            let body = serde_json::json!({
-                "model": req.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    { "role": "user", "content": user_content }
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "stop": ["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"]
-            });
-            // DigitalOcean serverless inference endpoint — a fixed host (like
-            // OpenRouter's). We ignore `req.url` here because the inference API
-            // lives at `inference.do-ai.run`, not `api.digitalocean.com`. The
-            // model field carries either a model id or "router:{router_name}".
-            let full_url = "https://inference.do-ai.run/v1/chat/completions".to_string();
-            eprintln!("[nolock] digitalocean POST {} model={}", full_url, req.model);
-            let resp = client
-                .post(&full_url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .json(&body)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| {
-                    eprintln!("[nolock] digitalocean error: {}", e);
-                    e.to_string()
-                })?;
-            let status = resp.status();
-            let text = resp.text().await.map_err(|e| e.to_string())?;
-            eprintln!("[nolock] digitalocean status={} body={}", status, &text[..text.len().min(200)]);
-            let data: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| format!("JSON parse error: {}", e))?;
-            Ok(data["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string())
-        }
         _ => Err(format!("Unknown backend: {}", req.backend)),
     }
 }
@@ -9483,6 +9120,10 @@ pub async fn run_chat(
     subagent_memory: &SubAgentMemory,
     mut req: ChatRequest,
 ) -> Result<ChatResult, String> {
+    ensure_model_backend(&req.backend)?;
+    if let Some(key) = &req.api_key { redaction::register(key); }
+    for provider in req.providers.values() { redaction::register(&provider.api_key); }
+
     // Model boundary: strip any registered secret value before task
     // extraction, routing, providers, sub-agents or session logs can observe
     // the text (user message, @file context, hook results, agent prompts).
@@ -9734,7 +9375,6 @@ pub async fn run_chat(
         max_iterations: req.max_iterations,
         reasoning_retries: req.reasoning_retries.unwrap_or(THINKING_ONLY_MAX_RETRIES),
         context_length: context_len as u64,
-        use_model_affinity: req.model_affinity.unwrap_or(true),
         depth: 0,
         execution_opt_in: req
             .tools_enabled
@@ -10013,7 +9653,6 @@ pub async fn run_chat(
                     cloud_max_tokens,
                     req.max_iterations,
                     None, // extra_headers
-                    true, // use_model_affinity
                     None, // subagent_id (main agent)
                     Some(&runner),
                     &pre_spawned,
@@ -10138,7 +9777,6 @@ pub async fn run_chat(
                     cloud_max_tokens,
                     req.max_iterations,
                     Some(vec![("HTTP-Referer", "https://nolock.impacte.tech")]),
-                    true,
                     None, // subagent_id (main agent)
                     Some(&runner),
                     &pre_spawned,
@@ -10275,244 +9913,8 @@ pub async fn run_chat(
                 })
             }
         }
-        "opencode" => {
-            let api_key = req.api_key.clone().unwrap_or_default();
-            let is_remote = req.url.contains("/v1");
 
-            if is_remote {
-                // Remote OpenCode Zen API — OpenAI-compatible SSE streaming
-                let mut body = serde_json::json!({
-                    "model": req.model,
-                    "messages": messages,
-                    "stream": true,
-                    "temperature": temperature,
-                });
-                if let Some(mt) = cloud_max_tokens {
-                    body["max_tokens"] = serde_json::json!(mt);
-                }
-                let full_url = format!("{}/chat/completions", req.url.trim_end_matches('/'));
-                eprintln!("[nolock] opencode POST {full_url} (streaming)");
-                let mut resp = client
-                    .post(&full_url)
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .json(&body)
-                    .timeout(std::time::Duration::from_secs(60))
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
 
-                let status = resp.status();
-                if !status.is_success() {
-                    let text = resp.text().await.map_err(|e| e.to_string())?;
-                    eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
-                    let error_detail = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
-                        .and_then(|v| v["error"].as_str().map(String::from))
-                        .unwrap_or_else(|| text.clone());
-                    return Err(format!("OpenCode API error ({}): {}", status, error_detail));
-                }
-
-                // SSE streaming — data: {...}\n\n (OpenAI-compatible format)
-                let mut full_content = String::new();
-                let mut full_thinking = String::new();
-                let mut buf: Vec<u8> = Vec::new();
-                loop {
-                    match resp.chunk().await.map_err(|e| e.to_string())? {
-                        None => break,
-                        Some(chunk) => {
-                            buf.extend_from_slice(&chunk);
-                            while let Some(line) = take_next_line(&mut buf) {
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    let data = data.trim();
-                                    if data == "[DONE]" { continue; }
-                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                        if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
-                                            if !thinking.is_empty() {
-                                                full_thinking.push_str(thinking);
-                                                 sink.emit_stream_token(None, &thinking.to_string(), true);
-                                            }
-                                        }
-                                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                            if !content.is_empty() {
-                                                full_content.push_str(content);
-                                                 sink.emit_stream_token(None, &content.to_string(), false);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // Drain trailing buffer (last chunk may not end with '\n\n')
-                if !buf.is_empty() {
-                    let line = String::from_utf8_lossy(&buf).trim().to_string();
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        let data = data.trim();
-                        if data != "[DONE]" {
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(thinking) = json["choices"][0]["delta"]["reasoning_content"].as_str() {
-                                    if !thinking.is_empty() {
-                                        full_thinking.push_str(thinking);
-                                         sink.emit_stream_token(None, &thinking.to_string(), true);
-                                    }
-                                }
-                                if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                                    if !content.is_empty() {
-                                        full_content.push_str(content);
-                                        sink.emit_stream_token(None, &content.to_string(), false);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let thinking_tokens = estimate_chat_tokens(&full_thinking);
-                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content) + thinking_tokens;
-                Ok(ChatResult {
-                    content: full_content.clone(),
-                    tool_calls: vec![],
-                    context_tokens: ctx_tokens_estimate,
-                    thinking_tokens,
-                    usage: vec![usage_for(
-                        "opencode",
-                        &req.model,
-                        0,
-                        0,
-                        0,
-                        estimate_messages_tokens(&messages),
-                        estimate_chat_tokens(&full_content),
-                        thinking_tokens,
-                    )],
-                })
-            } else {
-                // Local OpenCode Zen — Ollama-compatible NDJSON streaming
-                let prompt = messages
-                    .iter()
-                    .map(|m| format!("{}: {}", m.role, m.content))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    + "\nassistant:";
-
-                let body = serde_json::json!({
-                    "model": req.model,
-                    "prompt": prompt,
-                    "stream": true,
-                    "options": { "num_predict": max_tokens, "temperature": temperature }
-                });
-                let full_url = format!("{}/api/generate", req.url.trim_end_matches('/'));
-                eprintln!("[nolock] opencode POST {full_url} (streaming)");
-                let mut resp = client
-                    .post(&full_url)
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .json(&body)
-                    .timeout(std::time::Duration::from_secs(60))
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                let status = resp.status();
-                if !status.is_success() {
-                    let text = resp.text().await.map_err(|e| e.to_string())?;
-                    eprintln!("[nolock] opencode status={} body={}", status, &text[..text.len().min(200)]);
-                    let error_detail = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
-                        .and_then(|v| v["error"].as_str().map(String::from))
-                        .unwrap_or_else(|| text.clone());
-                    return Err(format!("OpenCode API error ({}): {}", status, error_detail));
-                }
-
-                // NDJSON streaming — {"response":"...","done":false}
-                let mut full_content = String::new();
-                let mut buf: Vec<u8> = Vec::new();
-                loop {
-                    match resp.chunk().await.map_err(|e| e.to_string())? {
-                        None => break,
-                        Some(chunk) => {
-                            buf.extend_from_slice(&chunk);
-                            while let Some(line) = take_next_line(&mut buf) {
-                                if line.is_empty() { continue; }
-                                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
-                                    if let Some(content) = data["response"].as_str() {
-                                         if !content.is_empty() {
-                                            full_content.push_str(content);
-                                            sink.emit_stream_token(None, &content.to_string(), false);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // Drain trailing buffer (last chunk may not end with '\n')
-                if !buf.is_empty() {
-                    let line = String::from_utf8_lossy(&buf).trim().to_string();
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&line) {
-                        if let Some(content) = data["response"].as_str() {
-                            if !content.is_empty() {
-                                full_content.push_str(content);
-                                sink.emit_stream_token(None, &content.to_string(), false);
-                            }
-                        }
-                    }
-                }
-                let ctx_tokens_estimate = estimate_messages_tokens(&messages) + estimate_chat_tokens(&full_content);
-                Ok(ChatResult {
-                    content: full_content.clone(),
-                    tool_calls: vec![],
-                    context_tokens: ctx_tokens_estimate,
-                    thinking_tokens: 0,
-                    usage: vec![usage_for(
-                        "opencode",
-                        &req.model,
-                        0,
-                        0,
-                        0,
-                        estimate_messages_tokens(&messages),
-                        estimate_chat_tokens(&full_content),
-                        0,
-                    )],
-                })
-            }
-        }
-        "digitalocean" => {
-            let api_key = req.api_key.clone().unwrap_or_default();
-
-            // DigitalOcean serverless inference endpoint — a fixed host (like
-            // OpenRouter's). We ignore `req.url` because the inference API lives
-            // at `inference.do-ai.run`, not `api.digitalocean.com`. The model
-            // field carries either a model id or "router:{router_name}".
-            let full_url = "https://inference.do-ai.run/v1/chat/completions".to_string();
-
-            // Model affinity (session pinning) keeps the router on a single model
-            // across the whole tool loop. Defaults to enabled; the user can disable
-            // it in the DigitalOcean provider settings.
-            let use_model_affinity = req.model_affinity.unwrap_or(true);
-
-            // Use the OpenAI-compatible tool calling loop
-            run_openai_tool_loop(
-                &client,
-                sink,
-                &full_url,
-                &api_key,
-                &req.model,
-                &req.backend,
-                &messages,
-                &tools,
-                &req.tool_configs,
-                req.root_path.as_deref(),
-                temperature,
-                cloud_max_tokens,
-                req.max_iterations,
-                None, // no extra headers needed for DigitalOcean
-                use_model_affinity,
-                None, // subagent_id (main agent)
-                Some(&runner),
-                &pre_spawned,
-                context_len as u64,
-            )
-            .await
-        }
         _ => Err(format!("Unknown backend: {}", req.backend)),
     }
 }
@@ -10626,7 +10028,6 @@ pub fn run() {
             start_model_pull,
             list_model_pulls,
             cancel_model_pull,
-            fetch_digitalocean_routers,
             ai_complete,
             ai_chat,
             agent_file_policy::agent_read_file,
@@ -10650,11 +10051,10 @@ pub fn run() {
             terminal_memory::get_top_commands,
             terminal_memory::get_command_categories,
             terminal_memory::save_command_category,
-            secrets::store_secret,
-            secrets::get_secret,
-            secrets::delete_secret,
             faq_search,
             faq_upsert,
+            faq_review_preview,
+            faq_review_save,
             faq_list,
             faq_delete,
             faq_stats,
@@ -10739,6 +10139,15 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     use super::*;
+
+    #[test]
+    fn retired_model_providers_are_rejected() {
+        for backend in ["digitalocean", "opencode", "unknown"] {
+            assert!(ensure_model_backend(backend).is_err());
+            assert!(faq_category_endpoint(backend, "https://example.test").is_err());
+        }
+        for backend in ["ollama", "llamacpp", "openrouter"] { assert!(ensure_model_backend(backend).is_ok()); }
+    }
 
     // ---- Streaming UTF-8 line splitter ------------------------------------
     #[test]
@@ -11065,7 +10474,7 @@ mod tests {
         assert!(local.len() < content.len(), "local result should be truncated");
 
         // Cloud backend returns the full file.
-        let cloud = execute_tool("read_file", &args, &client, &HashMap::new(), None, "digitalocean", false)
+        let cloud = execute_tool("read_file", &args, &client, &HashMap::new(), None, "openrouter", false)
             .await
             .unwrap();
         assert_eq!(
@@ -12118,37 +11527,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ai_complete_opencode_body_has_system_field() {
-        let req = CompletionRequest {
-            backend: "opencode".into(),
-            url: "http://localhost:11434".into(),
-            model: "deepseek-coder".into(),
-            prompt: "import".into(),
-            suffix: None,
-            api_key: None,
-            temperature: None,
-            max_tokens: None,
-            system_prompt: None,
-        };
-
-        let body = serde_json::json!({
-            "model": req.model,
-            "system": "You are a code completion engine. You are given the code before the cursor and, when present, the code after it. Output ONLY the code that belongs exactly at the cursor so it joins both sides seamlessly. Start exactly where the code stops — never repeat code from before the cursor, and never continue, rewrite, or complete the code that follows it. Match the language, indentation, and naming style of the surrounding code. Be concise: output the shortest completion that finishes the statement or block — a few lines at most, exactly one completion. No explanations, no markdown formatting, no conversational text. If nothing sensible fits, output nothing.",
-            "prompt": req.prompt,
-            "stream": false,
-            "options": {
-                "num_predict": 64,
-                "temperature": 0.2,
-                "stop": ["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"]
-            }
-        });
-
-        assert!(body["system"].as_str().unwrap().contains("code completion engine"));
-        assert_eq!(body["prompt"], "import");
-        assert!(body["options"]["stop"].as_array().unwrap().contains(&serde_json::json!("Let me")));
-    }
-
-    #[test]
     fn test_ai_complete_stop_tokens_include_conversational_triggers() {
         let all_backend_stops = [
             // Ollama stops
@@ -12157,8 +11535,6 @@ mod tests {
             vec!["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
             // OpenRouter stops
             vec!["\n\n", "```", "Here is", "Sure", "I'll", "Explanation"],
-            // OpenCode stops
-            vec!["<|im_end|>", "```", "Here is", "Sure", "I'll", "Let me", "Explanation"],
         ];
 
         // Every backend's stop array must contain the core conversational triggers
@@ -12167,8 +11543,8 @@ mod tests {
             assert!(stops.contains(&"Here is"), "Every backend needs 'Here is' stop");
             assert!(stops.contains(&"I'll"), "Every backend needs 'I'll' stop");
         }
-        // Local backends (ollama, llamacpp, opencode) must include ChatML end-of-turn
-        for stops in [&all_backend_stops[0], &all_backend_stops[1], &all_backend_stops[3]] {
+        // Local backends (ollama, llamacpp) must include ChatML end-of-turn
+        for stops in [&all_backend_stops[0], &all_backend_stops[1]] {
             assert!(stops.contains(&"<|im_end|>"), "Local backends need ChatML end-of-turn stop");
         }
     }

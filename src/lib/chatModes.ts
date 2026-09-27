@@ -38,7 +38,7 @@ export const CHAT_MODES: ChatModeDef[] = [
     id: "learning",
     label: "Learning",
     description:
-      "Teach you about your project: probes knowledge gaps, validates understanding, keeps a frequency-ranked .faq/.",
+      "Teach you about your project: probes knowledge gaps, validates understanding, lets you review and save knowledge.",
   },
 ];
 
@@ -90,11 +90,7 @@ When the user only asks for a plan (no "implement", "do it", "fix"), stop after 
 
 3. VALIDATE LEARNING WITH QUESTIONS. Throughout the session, ask short check-in questions that confirm mastery before moving on (e.g. "Explain in your own words why the system prompt is merged before the conversation history."). Prefer questions that require the user to articulate an explanation rather than yes/no questions.
 
-4. MAINTAIN THE .faq/ KNOWLEDGE BASE AS PLAIN TEXT. nolock automatically indexes every question → answer exchange into a semantic (vector) store, and past exchanges relevant to the current question are injected into your context as "Learned knowledge". In addition, keep a human-readable ".faq" directory at the repository root (a sibling of .git, src, etc.) updated directly with your file tools (read_file / write_file / edit):
-   - If ".faq" does not exist, create it with a "README.md" that lists the questions the user has asked.
-   - After every user turn, append any genuinely new question (or bump the entry of a semantically equivalent one) and rewrite "README.md" so the questions asked more often rank FIRST (ties broken by most recently asked).
-   - Keep the list human-readable: "N. <question> — asked N time(s)". Use accurate counts — never fabricate them.
-   - The machine-indexed "Learned knowledge" injected into your context is authoritative for retrieval; keep this plain-text companion readable for the user, not as your primary memory.`,
+4. KNOWLEDGE BASE REQUIRES USER APPROVAL. Previously approved knowledge may be injected as "Learned knowledge". The user can click the book icon after an answer to review passages, summaries and category, then approve saving. Do not create, append, rewrite or automatically maintain .faq files with tools. Do not claim an exchange was saved or indexed; the application reports that only after explicit approval succeeds.`,
 };
 
 /**

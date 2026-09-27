@@ -1,19 +1,11 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { getSecret, setSecret } from "../lib/secrets";
-import { BACKENDS, isPlanningBackend, resolveBackendUrl } from "../lib/backends";
+import { BACKENDS, isPlanningBackend, resolveBackendUrl, migrateRemovedProviders } from "../lib/backends";
 import ModelPullPanel from "./ModelPullPanel";
-import Select from "./Select";
 
 interface Props {
   visible: boolean;
   onClose: () => void;
-}
-
-interface RouterItem {
-  id: string;
-  name: string;
-  description: string;
 }
 
 export default function ModelProvidersPanel({ visible, onClose }: Props) {
@@ -21,40 +13,17 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
   const [url, setUrl] = useState("http://localhost:11434");
   const [apiKey, setApiKey] = useState("");
   const keyLoadRef = useRef(0);
-  const [routerName, setRouterName] = useState("");
-  const [routers, setRouters] = useState<RouterItem[]>([]);
-  const [loadingRouters, setLoadingRouters] = useState(false);
-  const [routerError, setRouterError] = useState<string | null>(null);
-  const [routersLoaded, setRoutersLoaded] = useState(false);
-  const [modelAffinity, setModelAffinity] = useState(true);
 
   useEffect(() => {
     if (!visible) return;
+    migrateRemovedProviders();
 
     const currentBackend = localStorage.getItem("nolock.backend") || "ollama";
-    const savedUrl = localStorage.getItem("nolock.url") || "";
-    // Migration: older versions saved the DigitalOcean management-API URL
-    // (api.digitalocean.com/v2/gen-ai), which is NOT the inference endpoint.
-    // The inference API lives at inference.do-ai.run/v1 — correct it here.
-    let loadedUrl = savedUrl;
-    if (currentBackend === "digitalocean") {
-      const doDefault = BACKENDS.find((b) => b.value === "digitalocean")?.defaultUrl;
-      if (!savedUrl || savedUrl.includes("api.digitalocean.com")) {
-        loadedUrl = doDefault || "https://inference.do-ai.run/v1";
-        localStorage.setItem("nolock.url", loadedUrl);
-      }
-    }
     setBackend(currentBackend);
-    setUrl(loadedUrl || resolveBackendUrl(currentBackend));
+    setUrl(resolveBackendUrl(currentBackend));
     setApiKey("");
-    setRouterName(localStorage.getItem("nolock.routerName") || "");
-    setRouters([]);
-    setRouterError(null);
-    setRoutersLoaded(false);
-    // Model affinity (session pinning) is enabled by default.
-    setModelAffinity(localStorage.getItem("nolock.digitaloceanModelAffinity") !== "false");
 
-    // Ignore stale keychain reads after switching providers or typing a key.
+    // Ignore stale session reads after switching providers or typing a key.
     const keyRequest = ++keyLoadRef.current;
     (async () => {
       const storedApiKey = await getSecret(`apiKey.${currentBackend}`);
@@ -75,43 +44,6 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     void getSecret(`apiKey.${value}`).then((key) => {
       if (keyLoadRef.current === keyRequest) setApiKey(key || "");
     });
-      setRouters([]);
-      setRouterError(null);
-      setRoutersLoaded(false);
-    }
-  };
-
-  /** Fetch the DigitalOcean inference routers in the authenticated account. */
-  const loadRouters = async () => {
-    if (!apiKey.trim()) {
-      setRouterError("Enter your API key first, then load routers.");
-      return;
-    }
-    setLoadingRouters(true);
-    setRouterError(null);
-    try {
-      const result = await invoke<RouterItem[]>("fetch_digitalocean_routers", {
-        req: { api_key: apiKey },
-      });
-      setRouters(result);
-    } catch (err) {
-      setRouterError(err instanceof Error ? err.message : String(err));
-      setRouters([]);
-    } finally {
-      setLoadingRouters(false);
-      setRoutersLoaded(true);
-    }
-  };
-
-  /** Select a router — the router becomes the chat model (`router:{name}`).
-   *  The FIM (completion) model is intentionally left untouched so the user can
-   *  configure chat and inline completion independently. */
-  const selectRouter = (name: string) => {
-    setRouterName(name);
-    const routerModel = name ? `router:${name}` : "";
-    localStorage.setItem("nolock.routerName", name);
-    if (name) {
-      localStorage.setItem("nolock.chatModel", routerModel);
     }
   };
 
@@ -119,8 +51,6 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
     localStorage.setItem("nolock.backend", backend);
     localStorage.setItem("nolock.url", url);
     setSecret(`apiKey.${backend}`, apiKey);
-    localStorage.setItem("nolock.routerName", routerName);
-    localStorage.setItem("nolock.digitaloceanModelAffinity", String(modelAffinity));
     // Notify the bottom bar / status readers that the provider changed.
     window.dispatchEvent(new CustomEvent("nolock:settings-changed"));
     onClose();
@@ -166,7 +96,7 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
             placeholder="http://localhost:11434"
           />
 
-          {(backend === "openrouter" || backend === "opencode" || backend === "digitalocean") && (
+          {backend === "openrouter" && (
             <>
               <label className="field-label" htmlFor="mp-api-key">API Key</label>
               <input
@@ -175,88 +105,17 @@ export default function ModelProvidersPanel({ visible, onClose }: Props) {
                 type="password"
                 value={apiKey}
                 onChange={(e) => { keyLoadRef.current++; setApiKey(e.target.value); }}
-                placeholder={backend === "openrouter" ? "sk-or-..." : backend === "digitalocean" ? "dop_v1_..." : "sk-oc-..."}
+                placeholder="sk-or-..."
               />
               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                {backend === "openrouter"
-                  ? "Required for OpenRouter API."
-                  : backend === "digitalocean"
-                  ? "DigitalOcean personal access token (or model access key). Stored securely in your OS keychain."
-                  : "Required for the remote OpenCode Zen API. Leave blank for local servers."}
+                Required for OpenRouter. Kept for this session only. Re-enter after restarting.
               </span>
             </>
           )}
 
           {(backend === "ollama" || backend === "llamacpp") && <ModelPullPanel backend={backend} url={url} />}
 
-          {/* DigitalOcean Router Selection */}
-          {backend === "digitalocean" && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <label className="field-label" style={{ margin: 0 }}>Inference Router</label>
-                <button
-                  className="btn-secondary"
-                  onClick={loadRouters}
-                  disabled={loadingRouters}
-                  style={{ fontSize: 11, padding: "4px 10px" }}
-                >
-                  {loadingRouters ? "Loading…" : "Load routers"}
-                </button>
-              </div>
 
-              {routerError && (
-                <div style={{ fontSize: 11, color: "var(--text-error)", padding: "6px 0" }}>
-                  {routerError}
-                </div>
-              )}
-
-              {routers.length > 0 && (
-                <Select
-                  value={routerName}
-                  onChange={selectRouter}
-                  options={routers.map((router) => ({
-                    value: router.id,
-                    label: router.description
-                      ? `${router.name} — ${router.description}`
-                      : router.name,
-                  }))}
-                  placeholder="Select a router..."
-                  style={{ marginTop: 6 }}
-                />
-              )}
-
-              {routersLoaded && !routerError && routers.length === 0 && (
-                <div style={{ fontSize: 11, color: "var(--text-warning)", padding: "6px 0" }}>
-                  No routers found in your account. Create one in the DigitalOcean control panel
-                  (Inference → Inference Router), or check that your token has the{" "}
-                  <code>genai:read</code> scope.
-                </div>
-              )}
-
-              <label style={{ marginTop: 10, display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: 12, color: "var(--text-secondary)" }}>
-                <input
-                  type="checkbox"
-                  checked={modelAffinity}
-                  onChange={(e) => setModelAffinity(e.target.checked)}
-                  style={{ accentColor: "var(--accent)", marginTop: 2, flexShrink: 0 }}
-                />
-                <span>
-                  Pin model across agent tool calls (Model Affinity)
-                  <span style={{ display: "block", fontSize: 10, color: "var(--text-muted)" }}>
-                    Keeps the Inference Router on a single model during multi-step tool usage,
-                    preventing mid-session model switches that can break tool-call formats.
-                    Recommended for agentic workflows.
-                  </span>
-                </span>
-              </label>
-
-              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4 }}>
-                Selecting a router sets it as your chat and completion model (e.g.{" "}
-                <code>router:my-router</code>). You can also type a specific model ID in the Chat
-                Model / FIM model panels.
-              </span>
-            </div>
-          )}
         </div>
         <div className="modal-footer">
           <button className="btn-secondary" onClick={onClose}>Cancel</button>

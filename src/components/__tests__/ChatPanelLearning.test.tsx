@@ -5,8 +5,7 @@
 //   - the user's question is first used to semantically retrieve past
 //     question → answer pairs (faq_search) and the hits are injected into the
 //     ai_chat request context as "Learned knowledge";
-//   - after the assistant finishes, the completed Q→A exchange is persisted
-//     back into the vector store (faq_upsert);
+//   - completed exchanges are only persisted after explicit review approval;
 //   - the plain-text .faq/README still works as a fallback when the semantic
 //     search is unavailable.
 // ---------------------------------------------------------------------------
@@ -42,7 +41,7 @@ function setup(overrides: { faqSearchHits?: any[]; noProjectRoot?: boolean } = {
 }
 
 describe("ChatPanel learning mode", () => {
-  it("injects semantically retrieved Q→A pairs and indexes the exchange", async () => {
+  it("retrieves knowledge but only indexes a completed exchange after approval", async () => {
     let aiChatReq: AiChatArgs | null = null;
     let upsertArgs: any = null;
     setup();
@@ -61,9 +60,10 @@ describe("ChatPanel learning mode", () => {
           },
         ]);
       }
-      if (cmd === "faq_upsert") {
+      if (cmd === "faq_review_preview") return Promise.resolve({ review: null, categories: [] });
+      if (cmd === "faq_review_save") {
         upsertArgs = args;
-        return Promise.resolve({ id: 1, question: args.question, answer: args.answer, frequency: 4 });
+        return Promise.resolve({ ...args.review, revision: 1 });
       }
       if (cmd === "ai_chat") {
         aiChatReq = args as AiChatArgs;
@@ -90,19 +90,19 @@ describe("ChatPanel learning mode", () => {
     expect(userText).toContain("How does the tool loop stop?");
     expect(userText).toContain("When does the agent loop stop?");
 
-    // The completed exchange was persisted into the vector store.
+    await screen.findByRole("button", { name: "Review knowledge" });
+    expect(upsertArgs).toBeNull();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "faq_upsert")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Review knowledge" }));
+    await screen.findByLabelText("Chunk 1 text");
+    expect(upsertArgs).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Approve and save" }));
     await waitFor(() => expect(upsertArgs).not.toBeNull());
-    expect(upsertArgs.query).toBeUndefined();
-    expect(upsertArgs.question).toContain("When does the agent loop stop?");
-    expect(upsertArgs.answer).toBe("Let me teach you about that.");
+    expect(upsertArgs.review.question).toBe("When does the agent loop stop?");
+    expect(upsertArgs.review.answer).toBe("Let me teach you about that.");
+    expect(upsertArgs.review.chunks[0].text).toBe("Let me teach you about that.");
     expect(upsertArgs.config.topK).toBe(3);
-    // Provenance: the model that produced the answer is recorded.
-    expect(typeof upsertArgs.model).toBe("string");
-    expect(upsertArgs.backend).toBe("ollama");
-    // Visible in-chat confirmation that the exchange was indexed.
-    await waitFor(() => {
-      expect(screen.getByText(/Indexed to Knowledge Base/)).toBeInTheDocument();
-    });
+    await screen.findByRole("button", { name: "Review saved knowledge" });
   });
 
   it("falls back to the plain-text .faq README when the semantic store is unavailable", async () => {

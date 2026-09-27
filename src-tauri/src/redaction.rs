@@ -1,5 +1,5 @@
 //! Session-scoped registry of secret values the backend has legitimately
-//! touched (keychain reads, vault lookups, CLI exports), and the redaction
+//! touched (explicit API requests), and the redaction
 //! applied at every model boundary: chat payloads, tool results and terminal
 //! transcripts. Values never leave this process through the registry — it only
 //! answers one question: "does this text contain a secret nolock handled?"

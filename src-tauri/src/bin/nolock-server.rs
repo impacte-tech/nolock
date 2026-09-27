@@ -265,13 +265,10 @@ args!(GitDiffArgs { root_path: String, path: String, since_ts: u64 });
 args!(LintArgs { path: String, prefs: Option<main_impl::linter::LinterPrefs> });
 args!(ModelInfoArgs { req: main_impl::ModelInfoRequest });
 args!(FetchModelsArgs { req: main_impl::FetchModelsRequest });
-args!(FetchRoutersArgs { req: main_impl::FetchRoutersRequest });
 args!(CompletionArgs { req: main_impl::CompletionRequest });
 args!(ChatArgs { req: main_impl::ChatRequest });
 args!(TermCmdArgs { command: String });
 args!(TermCatArgs { command: String, category: String });
-args!(SecretSetArgs { service: String, key: String, value: String });
-args!(SecretGetArgs { service: String, key: String });
 args!(McpSaveArgs { root_path: String, config: main_impl::mcp_servers::Config });
 args!(PtySpawnArgs { id: String, shell: Option<String>, command: Option<String>, cwd: Option<String>, cols: u16, rows: u16 });
 args!(PtyWriteArgs { id: String, data: String });
@@ -546,10 +543,7 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             let a: FetchModelsArgs = parse(command, args)?;
             ok(main_impl::web_bridge::fetch_models(a.req).await)
         }
-        "fetch_digitalocean_routers" => {
-            let a: FetchRoutersArgs = parse(command, args)?;
-            ok(main_impl::web_bridge::fetch_digitalocean_routers(a.req).await)
-        }
+
         "ai_complete" => {
             let a: CompletionArgs = parse(command, args)?;
             ok(main_impl::web_bridge::ai_complete(a.req).await)
@@ -574,6 +568,20 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         "faq_search" => {
             let a: FaqSearchArgs = parse(command, args)?;
             ok(main_impl::web_bridge::faq_search(a.root_path, a.backend, a.url, a.api_key, a.query, a.config).await)
+        }
+        "faq_review_preview" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args { root_path: String, question: String, answer: String }
+            let a: Args = parse(command, args)?;
+            ok(main_impl::faq::review::preview(a.root_path, a.question, a.answer))
+        }
+        "faq_review_save" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args { root_path: String, backend: String, url: String, api_key: String, review: main_impl::faq::review::Review, config: main_impl::faq::FaqConfig }
+            let a: Args = parse(command, args)?;
+            ok(main_impl::faq::review::save(a.root_path, a.backend, a.url, a.api_key, a.review, a.config).await)
         }
         "faq_upsert" => {
             let a: FaqUpsertArgs = parse(command, args)?;
@@ -638,19 +646,9 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             ok(state.term_memory.save_category(a.command, a.category))
         }
 
-        // Host keychain only; frontend keeps session-only values if unavailable.
-        "store_secret" => {
-            let a: SecretSetArgs = parse(command, args)?;
-            ok(main_impl::secrets::store_secret(a.service, a.key, a.value))
-        }
-        "get_secret" => {
-            let a: SecretGetArgs = parse(command, args)?;
-            ok(main_impl::secrets::get_secret(a.service, a.key))
-        }
-        "delete_secret" => {
-            let a: SecretGetArgs = parse(command, args)?;
-            ok(main_impl::secrets::delete_secret(a.service, a.key))
-        }
+
+
+
         // ----- RLHF dir (web data dir instead of Tauri app data dir)
         "get_rlhf_dir" => {
             let dir = data_dir().join(".rlhf");

@@ -1,3 +1,4 @@
+pub mod review;
 // ---------------------------------------------------------------------------
 // FAQ Learning-mode vector store — SQLite + sqlite-vec.
 //
@@ -341,13 +342,14 @@ async fn embed_text(
     model: &str,
     text: &str,
 ) -> Result<Vec<f64>, String> {
+    super::ensure_model_backend(backend)?;
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
         return Err("Nothing to embed".into());
     }
     let model = if model.trim().is_empty() { DEFAULT_EMBEDDING_MODEL } else { model.trim() };
     let body = if backend == "ollama" {
-        serde_json::json!({ "model": model, "input": trimmed })
+        serde_json::json!({ "model": model, "input": trimmed, "truncate": false })
     } else {
         serde_json::json!({ "model": model, "input": [trimmed] })
     };

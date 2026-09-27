@@ -250,7 +250,7 @@ describe("FIM E2E — debug scenarios", () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0].insertText).toBe("return a + b;\n}");
     // Should have made 3 invoke calls: getSecret + FIM + retry
-    expect(mockInvoke).toHaveBeenCalledTimes(3);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
   });
 
   it("returns empty when both FIM and raw prefix return empty (worst case)", async () => {
@@ -272,7 +272,7 @@ describe("FIM E2E — debug scenarios", () => {
     );
 
     expect(result.items).toHaveLength(0);
-    expect(mockInvoke).toHaveBeenCalledTimes(3); // getSecret + FIM + fallback
+    expect(mockInvoke).toHaveBeenCalledTimes(2); // FIM + fallback
   });
 
   it("discards stale responses during fallback (request counter changes)", async () => {
@@ -349,7 +349,7 @@ describe("FIM E2E — Monaco boundary cases", () => {
 
     expect(result.items).toHaveLength(1);
     // When no suffix, FIM tokens should NOT be in the prompt
-    const req = mockInvoke.mock.calls[1][1].req;
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.prompt).not.toContain("<|fim_prefix|>");
   });
 
@@ -367,7 +367,7 @@ describe("FIM E2E — Monaco boundary cases", () => {
     );
 
     expect(result.items).toHaveLength(1);
-    const req = mockInvoke.mock.calls[1][1].req;
+    const req = mockInvoke.mock.calls[0][1].req;
     // Should use FIM tokens since there's content after cursor
     expect(req.prompt).toContain("<|fim_prefix|>");
     expect(req.prompt).toContain("<|fim_suffix|>");
@@ -459,7 +459,7 @@ describe("FIM E2E — raw-mode edge cases", () => {
       model, position as any, {} as any, createCancellationToken(),
     );
 
-    const req = mockInvoke.mock.calls[1][1].req;
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.system_prompt).toBeUndefined();
   });
 
@@ -476,7 +476,7 @@ describe("FIM E2E — raw-mode edge cases", () => {
       model, position as any, {} as any, createCancellationToken(),
     );
 
-    const req = mockInvoke.mock.calls[1][1].req;
+    const req = mockInvoke.mock.calls[0][1].req;
     expect(req.system_prompt).toBeUndefined();
   });
 

@@ -9,7 +9,7 @@
 //! Routing policy lives in a per-project `.routers/switchyard.json` file (next to
 //! `.agents/`), so routes are versioned project config. The file is deliberately
 //! secret-free: targets reference `(backend, model)` only, and credentials keep
-//! coming from the request's `providers` map / OS keychain at request time.
+//! coming from the request's `providers` map at request time.
 //!
 //! Supported algorithms ("general routers"):
 //!   - `passthrough`   — always call one configured target.

@@ -34,8 +34,6 @@ const DEFAULT_BACKEND_URLS: &[(&str, &str)] = &[
     ("ollama", "http://localhost:11434"),
     ("llamacpp", "http://localhost:8080"),
     ("openrouter", "https://openrouter.ai/api/v1"),
-    ("opencode", "https://opencode.ai/zen/v1"),
-    ("digitalocean", "https://inference.do-ai.run/v1"),
 ];
 
 fn print_usage() {
@@ -44,7 +42,7 @@ fn print_usage() {
          USAGE:\n  \
          nolock-cli [FLAGS] --message <text>\n\n\
          FLAGS:\n  \
-         --backend <ollama|openrouter|opencode|digitalocean|llamacpp>  (default: ollama)\n  \
+         --backend <ollama|openrouter|llamacpp>  (default: ollama)\n  \
          --url <url>                    backend endpoint (default ~ localhost:11434)\n  \
          --model <model>                main agent model (default: nemotron-nano-9b-v2)\n  \
          --message <text>               the user prompt (required)\n  \
@@ -57,7 +55,6 @@ fn print_usage() {
          --max-iterations <int>         tool-loop iterations (default 10)\n  \
          --referenced-agents <a,b>      pre-spawn @agent mentions\n  \
          --api-key <key>                API key for cloud backends\n  \
-         --keychain                     read API keys from the OS keychain\n  \
                                         (service com.nolock.app, keys apiKey.<backend>)\n  \
          --reasoning-retries <int>      thinking-only retry budget (default 8)\n  \
          --no-color                     disable ANSI in streamed output\n"
@@ -74,17 +71,7 @@ fn parse_args(args: &[String]) -> Result<HashMap<String, String>, String> {
                 print_usage();
                 std::process::exit(0);
             }
-            if key == "keychain" {
-                // Valueless boolean flag: `--keychain` or `--keychain 1`.
-                let value = args
-                    .get(i + 1)
-                    .filter(|v| !v.starts_with("--"))
-                    .map(|v| v.clone())
-                    .unwrap_or_else(|| "1".to_string());
-                map.insert(key.to_string(), value);
-                i += if args.get(i + 1).is_some_and(|v| !v.starts_with("--")) { 2 } else { 1 };
-                continue;
-            }
+
             if i + 1 < args.len() {
                 map.insert(key.to_string(), args[i + 1].clone());
                 i += 2;
@@ -98,34 +85,18 @@ fn parse_args(args: &[String]) -> Result<HashMap<String, String>, String> {
     Ok(map)
 }
 
-/// Read a keychain secret, tolerating an unavailable keyring backend (headless).
-fn keychain_value(key: &str) -> Option<String> {
-    main_impl::secrets::read_keychain(main_impl::secrets::KEYCHAIN_SERVICE, key)
-        .ok()
-        .flatten()
-}
-
-/// Resolve a provider's API key the way nolock does: OS keychain first, then
-/// opencode's shared auth store (`~/.local/share/opencode/auth.json`).
+/// Explicit environment configuration only; no credential-store integration.
 fn provider_api_key(backend: &str) -> Option<String> {
-    let from_keychain = keychain_value(&format!("apiKey.{}", backend));
-    if from_keychain.is_some() {
-        return from_keychain;
-    }
-    main_impl::secrets::read_opencode_auth_key(backend).ok().flatten()
+    std::env::var(format!("NOLOCK_{}_API_KEY", backend.to_uppercase())).ok()
 }
 
 /// Build the per-provider endpoint map the same way the frontend does
 /// (`buildProvidersMap` in ChatPanel.tsx), so Switchyard routing can resolve any
-/// target backend's url + api key. Keys come from the OS keychain when `--keychain`.
-fn build_providers(use_keychain: bool) -> HashMap<String, ProviderConfig> {
+/// target backend's url + api key. Keys come from explicit environment variables.
+fn build_providers() -> HashMap<String, ProviderConfig> {
     let mut providers = HashMap::new();
     for (backend, url) in DEFAULT_BACKEND_URLS {
-        let api_key = if use_keychain {
-            provider_api_key(backend).unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let api_key = provider_api_key(backend).unwrap_or_default();
         providers.insert(
             backend.to_string(),
             ProviderConfig {
@@ -160,11 +131,9 @@ fn build_request(args: &HashMap<String, String>) -> Result<ChatRequest, String> 
         .unwrap_or_default();
 
     let backend = args.get("backend").cloned().unwrap_or_else(|| "ollama".to_string());
-    let use_keychain = args.get("keychain").map(|v| v == "1" || v == "true").unwrap_or(false);
 
     // Resolve the main request's API key: explicit --api-key wins, then the
-    // NOLOCK_OPENROUTER_API_KEY env var (for openrouter), then keychain/opencode
-    // auth (when --keychain).
+    // NOLOCK_OPENROUTER_API_KEY environment variable.
     let api_key = args
         .get("api-key")
         .cloned()
@@ -173,13 +142,7 @@ fn build_request(args: &HashMap<String, String>) -> Result<ChatRequest, String> 
                 .ok()
                 .filter(|_| backend == "openrouter")
         })
-        .or_else(|| {
-            if use_keychain {
-                provider_api_key(&backend)
-            } else {
-                None
-            }
-        });
+        .or_else(|| provider_api_key(&backend));
 
     Ok(ChatRequest {
         backend,
@@ -193,7 +156,7 @@ fn build_request(args: &HashMap<String, String>) -> Result<ChatRequest, String> 
             .unwrap_or_else(|| "nemotron-nano-9b-v2".to_string()),
         messages,
         api_key,
-        providers: build_providers(use_keychain),
+        providers: build_providers(),
         tool_configs: HashMap::new(),
         tools_enabled: tools,
         temperature: args.get("temperature").and_then(|v| v.parse().ok()),
@@ -207,7 +170,6 @@ fn build_request(args: &HashMap<String, String>) -> Result<ChatRequest, String> 
             .get("max-iterations")
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
-        model_affinity: Some(true),
         referenced_agents,
         reasoning_retries: args.get("reasoning-retries").and_then(|v| v.parse().ok()),
     })

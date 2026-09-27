@@ -31,10 +31,10 @@ describe("composeChatSystemPrompt", () => {
     expect(out).toContain("PLANNING MODE");
   });
 
-  it("returns the learning block (plain-text .faq maintenance)", () => {
+  it("returns the learning block (explicit knowledge approval)", () => {
     const out = composeChatSystemPrompt(null, "learning");
     expect(out).toContain("LEARNING MODE");
-    expect(out).toContain("MAINTAIN THE .faq/ KNOWLEDGE BASE AS PLAIN TEXT");
+    expect(out).toContain("KNOWLEDGE BASE REQUIRES USER APPROVAL");
   });
 
   it("covers the four learning behaviors", () => {
@@ -42,7 +42,7 @@ describe("composeChatSystemPrompt", () => {
     expect(block).toContain("TEACH ADVERSARIALLY");
     expect(block).toContain("DETECT KNOWLEDGE GAPS");
     expect(block).toContain("VALIDATE LEARNING WITH QUESTIONS");
-    expect(block).toContain("MAINTAIN THE .faq/ KNOWLEDGE BASE AS PLAIN TEXT");
+    expect(block).toContain("KNOWLEDGE BASE REQUIRES USER APPROVAL");
   });
 
   it("prepends the custom prompt and appends the mode block", () => {

@@ -120,6 +120,23 @@ describe("ChatPanel", () => {
     });
   });
 
+  it.each(["learning", "building", "planning"])("only offers manual knowledge saving in %s mode", async mode => {
+    localStorage.setItem("nolock.chatMode", mode);
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "faq_search") return Promise.resolve([]);
+      if (cmd === "read_file") return Promise.resolve("");
+      if (cmd === "get_model_info") return Promise.resolve({ context_length: 8192 });
+      return Promise.resolve({ content: "Reviewed response", tool_calls: [] });
+    });
+    render(<ChatPanel rootPath="/project" onClose={vi.fn()} onOpenUrl={vi.fn()}/>);
+    fireEvent.change(screen.getByPlaceholderText(/Ask the AI/), { target: { value: "Question" } });
+    fireEvent.click(screen.getByText("Send"));
+    await screen.findByText("Reviewed response");
+    if (mode === "learning") expect(await screen.findByRole("button", { name: "Review knowledge" })).toBeInTheDocument();
+    else expect(screen.queryByRole("button", { name: "Review knowledge" })).not.toBeInTheDocument();
+    expect(mockInvoke.mock.calls.some(([cmd]) => cmd === "faq_upsert" || cmd === "faq_review_save")).toBe(false);
+  });
+
   it("shows error message when invoke fails", async () => {
     mockInvoke.mockRejectedValue(new Error("Connection refused"));
 

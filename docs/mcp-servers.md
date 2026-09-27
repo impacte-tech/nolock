@@ -4,7 +4,7 @@ Open a project, then **MCP → Manage MCP servers**. Add local stdio commands or
 remote HTTP(S) endpoints, including localhost. Connections are project-specific.
 They are stored in `~/.config/nolock/mcp/mcp.project.<hash>.json` with mode 0600
 on Unix. Headers and environment values are ordinary configuration in this file.
-Previous keychain MCP settings migrate on first access; vault entries are not deleted.
+MCP settings are loaded from the local configuration file. No password manager is accessed.
 
 New launches of `codex`, `claude`, and `opencode` in Nolock terminals receive enabled
 connections through temporary native configuration overlays. Existing host settings,
@@ -106,3 +106,7 @@ Counter normalization follows the native formats: [Codex usage counters](https:/
 and [OpenCode stored usage](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/session.ts).
 OpenCode stores visible output separately from reasoning, so Nolock combines them
 for its inclusive output column.
+
+### Adding a connection
+
+Choose Remote server and paste its URL, or choose Local program and enter its command. Put each command argument on its own line; spaces within a line stay part of that argument. Optional headers and environment variables use name/value rows. JSON import remains under Advanced and replaces the project configuration. Restart agents after saving.

@@ -62,14 +62,7 @@ subsequent builds reuse Docker layers (dependency cache) and are much faster.
 - **Terminal** — real PTY in the container (bash).
 - **Notebooks** — work if `python3` + `ipykernel` are available; create envs
   from the Notebook panel (they land in the project's `.venvs/`).
-- **Model-provider authentication** — use the host OS keychain when available. In headless containers
-  without a keychain, credentials stay in browser memory for the current app
-  session, with a visible warning; re-enter them after reload. No new plaintext
-  browser or server secret files are written. Older `secrets.json` files are not
-  imported automatically: migrate any needed values securely and remove the
-  old file and backups yourself. Credential actions are desktop-only.
-- **Browser panel** — desktop-only (native webview); it reports a friendly
-  error on the web. The web app already runs in a browser.
+- **Model-provider authentication** — provider keys entered in the UI stay in memory for the app session and must be re-entered after restart or sign-out. Nolock does not read or write the host keychain. Existing vault entries are left untouched.
 
 ## Local dry run
 

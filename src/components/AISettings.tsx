@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { BACKENDS, resolveBackendUrl, migrateRemovedProviders } from "../lib/backends";
 import { getSecret, setSecret } from "../lib/secrets";
 import ModelSelector from "./ModelSelector";
 
@@ -13,34 +13,18 @@ interface AIConfig {
   url: string;
   completionModel: string;
   chatModel: string;
-  /** Per-backend API keys: { openrouter: "sk-or-...", opencode: "sk-oc-..." } */
+  /** Per-backend API keys: { openrouter: "sk-or-..." } */
   apiKeys: Record<string, string>;
   toolsEnabled: string[];
-  /** Selected DigitalOcean router name (used as `router:{name}`). */
-  routerName?: string;
 }
 
-interface RouterItem {
-  id: string;
-  name: string;
-  description: string;
-}
-
-/** Per-tool configuration (provider, api keys, etc.). Stored in the host secret store. */
+/** Per-tool configuration (provider, api keys, etc.). Kept in the current app session. */
 interface ToolConfig {
   [toolId: string]: {
     provider?: string;
     api_key?: string;
   };
 }
-
-const BACKENDS = [
-  { value: "ollama", label: "Ollama", defaultUrl: "http://localhost:11434" },
-  { value: "llamacpp", label: "llama.cpp", defaultUrl: "http://localhost:8080" },
-  { value: "openrouter", label: "OpenRouter", defaultUrl: "https://openrouter.ai/api/v1" },
-  { value: "opencode", label: "OpenCode Zen", defaultUrl: "https://opencode.ai/zen/v1" },
-  { value: "digitalocean", label: "DigitalOcean Inference Router", defaultUrl: "https://inference.do-ai.run/v1" },
-];
 
 const WEB_SEARCH_PROVIDERS = [
   { value: "duckduckgo", label: "DuckDuckGo (experimental)", description: "Free, no API key. Uses Instant Answer API — limited results, best for broad topics." },
@@ -67,15 +51,12 @@ export default function AISettings({ visible, onClose }: Props) {
     chatModel: "",
     apiKeys: {},
     toolsEnabled: [],
-    routerName: "",
   });
   const [toolConfig, setToolConfig] = useState<ToolConfig>({});
-  const [routers, setRouters] = useState<RouterItem[]>([]);
-  const [loadingRouters, setLoadingRouters] = useState(false);
-  const [routerError, setRouterError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible) return;
+    migrateRemovedProviders();
 
     const oldModel = localStorage.getItem("nolock.model");
     const toolsRaw = localStorage.getItem("nolock.toolsEnabled");
@@ -85,75 +66,36 @@ export default function AISettings({ visible, onClose }: Props) {
     const backend = localStorage.getItem("nolock.backend") || "ollama";
     const apiKeys: Record<string, string> = {};
     // Load per-backend API keys
-    for (const b of ["openrouter", "opencode", "digitalocean"]) {
+    for (const b of ["openrouter"]) {
       apiKeys[b] = "";
     }
     setConfig({
       backend,
-      url: localStorage.getItem("nolock.url") || "http://localhost:11434",
+      url: resolveBackendUrl(backend),
       completionModel: localStorage.getItem("nolock.completionModel") || oldModel || "",
       chatModel: localStorage.getItem("nolock.chatModel") || oldModel || "",
       apiKeys,
       toolsEnabled: toolsRaw ? JSON.parse(toolsRaw) : [],
-      routerName: localStorage.getItem("nolock.routerName") || "",
     });
     void getSecret("toolConfig").then((raw) => setToolConfig(raw ? JSON.parse(raw) : {}));
 
-    // Then asynchronously upgrade from OS keychain if available
+    // Load credentials already entered in this session
     (async () => {
-      const keychainUpdates: Record<string, string> = {};
-      for (const b of ["openrouter", "opencode", "digitalocean"]) {
+      const sessionUpdates: Record<string, string> = {};
+      for (const b of ["openrouter"]) {
         const storedKey = await getSecret(`apiKey.${b}`);
         if (storedKey != null) {
-          keychainUpdates[b] = storedKey;
+          sessionUpdates[b] = storedKey;
         }
       }
-      if (Object.keys(keychainUpdates).length > 0) {
+      if (Object.keys(sessionUpdates).length > 0) {
         setConfig((prev) => ({
           ...prev,
-          apiKeys: { ...prev.apiKeys, ...keychainUpdates },
+          apiKeys: { ...prev.apiKeys, ...sessionUpdates },
         }));
       }
     })();
   }, [visible]);
-
-  // Fetch DigitalOcean routers when backend is digitalocean and API key is available
-  useEffect(() => {
-    if (config.backend !== "digitalocean") return;
-    if (!config.apiKeys.digitalocean) {
-      setRouters([]);
-      setRouterError(null);
-      return;
-    }
-
-    const fetchRouters = async () => {
-      setLoadingRouters(true);
-      setRouterError(null);
-      try {
-        const result = await invoke<RouterItem[]>("fetch_digitalocean_routers", {
-          req: { api_key: config.apiKeys.digitalocean },
-        });
-        setRouters(result);
-        // If no router is selected and we have routers, select the first one
-        if (!config.routerName && result.length > 0) {
-          const routerModel = `router:${result[0].id}`;
-          setConfig((prev) => ({
-            ...prev,
-            routerName: result[0].id,
-            chatModel: routerModel,
-            completionModel: routerModel,
-          }));
-        }
-      } catch (err) {
-        setRouterError(err instanceof Error ? err.message : String(err));
-        setRouters([]);
-      } finally {
-        setLoadingRouters(false);
-      }
-    };
-
-    fetchRouters();
-  }, [config.backend, config.apiKeys.digitalocean]);
 
   /** Update a specific tool's config field */
   const updateToolConfig = (toolId: string, field: string, value: string) => {
@@ -170,12 +112,10 @@ export default function AISettings({ visible, onClose }: Props) {
     localStorage.setItem("nolock.chatModel", config.chatModel);
     localStorage.setItem("nolock.toolsEnabled", JSON.stringify(config.toolsEnabled));
     localStorage.setItem("nolock.model", config.completionModel);
-    if (config.routerName) {
-      localStorage.setItem("nolock.routerName", config.routerName);
-    }
 
-    // Store credentials in the host secret store; failures stay session-only.
-    // Fire-and-forget: close modal immediately, keychain writes happen async
+
+    // Keep credentials in the app session.
+    // Credentials are kept only in memory for this app session.
     for (const [backend, key] of Object.entries(config.apiKeys)) {
       setSecret(`apiKey.${backend}`, key);
     }
@@ -200,8 +140,8 @@ export default function AISettings({ visible, onClose }: Props) {
     });
   };
 
-  const supportsTools = config.backend === "ollama" || config.backend === "openrouter" || config.backend === "digitalocean" || config.backend === "llamacpp";
-  const needsApiKey = config.backend === "openrouter" || config.backend === "opencode" || config.backend === "digitalocean";
+  const supportsTools = config.backend === "ollama" || config.backend === "openrouter" || config.backend === "llamacpp";
+  const needsApiKey = config.backend === "openrouter";
 
   if (!visible) return null;
 
@@ -279,65 +219,12 @@ export default function AISettings({ visible, onClose }: Props) {
                 type="password"
                 value={config.apiKeys[config.backend] || ""}
                 onChange={(e) => setConfig({ ...config, apiKeys: { ...config.apiKeys, [config.backend]: e.target.value } })}
-                placeholder={config.backend === "openrouter" ? "sk-or-..." : config.backend === "digitalocean" ? "dop_v1_..." : "sk-oc-..."}
+                placeholder="sk-or-..."
               />
               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                {config.backend === "openrouter"
-                  ? "Required for OpenRouter API."
-                  : config.backend === "digitalocean"
-                  ? "Required for DigitalOcean Inference Router API. Get your key at cloud.digitalocean.com"
-                  : "Required for the remote OpenCode Zen API. Leave blank for local servers."}
+                Required for OpenRouter API.
               </span>
             </>
-          )}
-
-          {/* DigitalOcean Router Selection */}
-          {config.backend === "digitalocean" && (
-            <div style={{ marginTop: 12 }}>
-              <label className="field-label">Inference Router</label>
-              {loadingRouters ? (
-                <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 0" }}>
-                  Loading routers...
-                </div>
-              ) : routerError ? (
-                <div style={{ fontSize: 12, color: "var(--text-error)", padding: "8px 0" }}>
-                  Error: {routerError}
-                </div>
-              ) : routers.length === 0 ? (
-                <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "8px 0" }}>
-                  No routers found. Please check your API key.
-                </div>
-              ) : (
-                <select
-                  className="field-input"
-                  value={config.routerName || ""}
-                  onChange={(e) => {
-                    const name = e.target.value;
-                    const routerModel = name ? `router:${name}` : "";
-                    setConfig({
-                      ...config,
-                      routerName: name,
-                      chatModel: routerModel,
-                      completionModel: routerModel,
-                    });
-                  }}
-                  style={{ cursor: "pointer" }}
-                >
-                  <option value="">Select a router...</option>
-                  {routers.map((router) => (
-                    <option key={router.id} value={router.id}>
-                      {router.name}
-                      {router.description ? ` — ${router.description}` : ""}
-                    </option>
-                  ))}
-                </select>
-              )}
-              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4 }}>
-                Select a router from your DigitalOcean account. The router routes each request to the
-                best-fit model. You can also type a specific model ID (e.g. <code>llama3.3-70b-instruct</code>)
-                in the model fields above.
-              </span>
-            </div>
           )}
 
           {/* --- Agent Tools --- */}
@@ -346,7 +233,7 @@ export default function AISettings({ visible, onClose }: Props) {
             <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginBottom: 8 }}>
               {supportsTools
                 ? "Enable tools the AI agent can use during chat. The model decides when to call them."
-                : "Tool calling is only supported with Ollama, llama.cpp, OpenRouter and DigitalOcean backends."}
+                : "Tool calling is only supported with Ollama, llama.cpp and OpenRouter backends."}
             </span>
             {AVAILABLE_TOOLS.map((tool) => (
               <label

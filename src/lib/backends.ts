@@ -13,7 +13,7 @@ export interface BackendInfo {
   needsApiKey: boolean;
   /**
    * Role of this provider:
-   * - "planning" — hosted/online providers (OpenRouter, OpenCode Zen, DigitalOcean)
+   * - "planning" — hosted/online providers (OpenRouter)
    *   used as the main orchestrator model that plans, delegates, and synthesizes.
    * - "executor" — local providers (Ollama, llama.cpp) used as small, cheap task
    *   executors for sub-agents.
@@ -25,8 +25,6 @@ export const BACKENDS: BackendInfo[] = [
   { value: "ollama", label: "Ollama", defaultUrl: "http://localhost:11434", needsApiKey: false, role: "executor" },
   { value: "llamacpp", label: "llama.cpp", defaultUrl: "http://localhost:8080", needsApiKey: false, role: "executor" },
   { value: "openrouter", label: "OpenRouter", defaultUrl: "https://openrouter.ai/api/v1", needsApiKey: true, role: "planning" },
-  { value: "opencode", label: "OpenCode Zen", defaultUrl: "https://opencode.ai/zen/v1", needsApiKey: true, role: "planning" },
-  { value: "digitalocean", label: "DigitalOcean Inference Router", defaultUrl: "https://inference.do-ai.run/v1", needsApiKey: true, role: "planning" },
 ];
 
 /** Whether a backend is a hosted/online "planning" provider (vs a local executor). */
@@ -87,41 +85,47 @@ export async function seedLlamacppUrlFromServer(): Promise<void> {
 
 /** The backend used for chat requests (per-panel override falls back to the global backend). */
 export function getChatBackend(): string {
+  migrateRemovedProviders();
   return localStorage.getItem("nolock.chatBackend") || localStorage.getItem("nolock.backend") || "ollama";
 }
 
 /**
- * Whether a backend is a hosted/cloud provider (OpenRouter, OpenCode Zen,
- * DigitalOcean Inference Router) as opposed to a local server (Ollama,
+ * Whether a backend is a hosted/cloud provider (OpenRouter) as opposed to a local server (Ollama,
  * llama.cpp). Cloud providers have large context windows and should not be
  * subject to the small-local-model tool-result / max-token heuristics.
  */
 export function isCloudBackend(backend: string): boolean {
-  return backend !== "ollama" && backend !== "llamacpp";
+  return backend === "openrouter";
 }
 
 /** The backend used for FIM completion requests. */
 export function getFimBackend(): string {
+  migrateRemovedProviders();
   return localStorage.getItem("nolock.fitmBackend") || localStorage.getItem("nolock.backend") || "ollama";
 }
 
-/**
- * Format a model id for display. A DigitalOcean inference router is stored as
- * `router:{name}` (the value sent to the API); display it in a friendlier
- * namespaced form: `digital-ocean:inference-router:{name}`.
- */
-export function formatModelLabel(backend: string, model: string): string {
-  if (backend === "digitalocean" && model.startsWith("router:")) {
-    return `digital-ocean:inference-router:${model.slice("router:".length)}`;
-  }
-  return model;
-}
+/** Model ids are displayed as returned by the provider. */
+export function formatModelLabel(_backend: string, model: string): string { return model; }
 
-/**
- * Whether the DigitalOcean Inference Router should be pinned to a single model
- * across the agent tool loop (the `X-Model-Affinity` header). Enabled by
- * default; the user can turn it off in the Model Providers panel.
- */
-export function getDigitalOceanModelAffinity(): boolean {
-  return localStorage.getItem("nolock.digitaloceanModelAffinity") !== "false";
+export function isSupportedBackend(value: string | null): boolean {
+  return BACKENDS.some(b => b.value === value);
+}
+/** Retired providers cannot silently reuse their URL, key or model with a new provider. */
+export function migrateRemovedProviders(): void {
+  const global = localStorage.getItem("nolock.backend");
+  const removedGlobal = !!global && !isSupportedBackend(global);
+  for (const [key, model] of [["nolock.chatBackend", "nolock.chatModel"], ["nolock.fitmBackend", "nolock.completionModel"]]) {
+    const value = localStorage.getItem(key);
+    if ((value && !isSupportedBackend(value)) || (!value && removedGlobal)) {
+      localStorage.setItem(key, "ollama");
+      localStorage.removeItem(model);
+      localStorage.removeItem("nolock.model");
+    }
+  }
+  if (removedGlobal) {
+    localStorage.setItem("nolock.backend", "ollama");
+    localStorage.removeItem("nolock.url");
+    localStorage.removeItem("nolock.model");
+    localStorage.removeItem("nolock.apiKey");
+  }
 }

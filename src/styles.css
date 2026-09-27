@@ -5906,3 +5906,19 @@ select.field-input {
 .session-conversation-source select { min-width: 0; max-width: 100%; padding: 6px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); }
 .session-summary-reasoning { padding: 8px 0; color: var(--text-muted); }
 .session-terminal-output { padding: 16px; margin: 12px 0 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); line-height: 1.75; tab-size: 4; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; font-size: 12px; }
+
+.faq-review-overlay { z-index: 10000; }
+.faq-review { width: min(850px, 94vw); max-height: 90vh; }
+.faq-review .modal-body { overflow-y: auto; }
+.faq-review fieldset { border: 0; padding: 0; min-width: 0; }
+.faq-review label { display: block; margin: 12px 0; }
+.faq-review textarea, .faq-review input:not([type=checkbox]) { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); padding: 8px; }
+.faq-review textarea { resize: vertical; }
+.faq-review pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.faq-review-chunk { border: 1px solid var(--border); padding: 12px; margin: 14px 0; }
+.faq-review-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.faq-review { display: flex; flex-direction: column; overflow: hidden; }
+.faq-review .modal-header, .faq-review .modal-footer { flex-shrink: 0; }
+.mcp-setting-row { display: flex; align-items: end; gap: 8px; margin: 10px 0; }
+.mcp-setting-row label { flex: 1; min-width: 0; }
+@media (max-width: 600px) { .mcp-setting-row { flex-wrap: wrap; } }

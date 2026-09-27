@@ -3,8 +3,10 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import AuthGate from "./components/AuthGate";
 import { IS_WEB } from "./lib/webEnv";
-import { seedLlamacppUrlFromServer } from "./lib/backends";
+import { seedLlamacppUrlFromServer, migrateRemovedProviders } from "./lib/backends";
 import "./styles.css";
+
+migrateRemovedProviders();
 
 // On the web target the whole app is gated behind the login page (AuthGate).
 // The desktop build renders App directly — no auth.

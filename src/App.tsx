@@ -89,13 +89,7 @@ interface OpenFile {
 
 export default function App() {
   const termCounter = useRef(0);
-  const [secretStorageWarning, setSecretStorageWarning] = useState("");
-  useEffect(() => {
-    const warn = (event: Event) => setSecretStorageWarning((event as CustomEvent<string>).detail);
-    window.addEventListener("nolock:secret-storage-warning", warn);
-    void migrateLegacySecrets();
-    return () => window.removeEventListener("nolock:secret-storage-warning", warn);
-  }, []);
+  useEffect(() => { void migrateLegacySecrets(); }, []);
   const [mobileLayout, setMobileLayout] = useState(() => window.matchMedia?.("(max-width: 760px)")?.matches ?? false);
   useEffect(() => {
     const query = window.matchMedia?.("(max-width: 760px)");
@@ -1260,7 +1254,6 @@ export default function App() {
         <ChatPanel onRunShell={runShellCommand} onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} rootPath={rootPath} style={{ flex: ratioFlex(chatPts), display: hasChat ? undefined : "none" }} onOpenAgentManager={() => setShowAgentManager(true)} />
       </div>
 
-      {secretStorageWarning && <div role="alert">{secretStorageWarning}</div>}
       <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} rootPath={rootPath} />
 
       <ModelProvidersPanel visible={showModelProviders} onClose={() => setShowModelProviders(false)} />

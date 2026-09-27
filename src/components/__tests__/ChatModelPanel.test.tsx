@@ -28,7 +28,7 @@ describe("ChatModelPanel — Chat Mode", () => {
     );
     fireEvent.click(screen.getByRole("option", { name: "Learning" }));
 
-    await waitFor(() => expect(screen.getByText(/maintains a plain-text/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/offers a book button/)).toBeInTheDocument());
 
     fireEvent.click(screen.getByText("Save"));
     expect(localStorage.getItem("nolock.chatMode")).toBe("learning");

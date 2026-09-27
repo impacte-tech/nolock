@@ -107,7 +107,6 @@ fn request(root: Option<&str>, message: &str, tools: Vec<String>, model: &str) -
         system_prompt: None,
         root_path: root.map(String::from),
         max_iterations: 8,
-        model_affinity: Some(true),
         referenced_agents: Vec::new(),
         reasoning_retries: Some(6),
     }
@@ -1146,30 +1145,9 @@ impl main_impl::EventSink for RecordingSink {
     fn emit_iteration_usage(&self, _id: Option<&str>, _payload: &main_impl::IterationUsagePayload) {}
 }
 
-/// Resolve the OpenRouter API key from the OS keychain — the SAME storage the
-/// user's UI writes to (service `com.nolock.app`, account `apiKey.openrouter`,
-/// via the Model Providers panel). The e2e validation must exercise the real
-/// user-configured credential path, so there is deliberately NO fallback to
-/// opencode's auth.json or an env var: if the key is not in the keychain, the
-/// test FAILS completely (no silent skip).
+/// Live tests require an explicitly supplied API key.
 fn openrouter_key() -> String {
-    match main_impl::secrets::read_keychain(
-        main_impl::secrets::KEYCHAIN_SERVICE,
-        "apiKey.openrouter",
-    ) {
-        Ok(Some(key)) if !key.trim().is_empty() => key,
-        Ok(_) => panic!(
-            "OpenRouter API key not found in the OS keychain. Store it via the UI \
-             (Model Providers panel → OpenRouter → API key), which writes to the \
-             keychain under service '{}', account 'apiKey.openrouter'.",
-            main_impl::secrets::KEYCHAIN_SERVICE
-        ),
-        Err(e) => panic!(
-            "Failed to read the OpenRouter API key from the OS keychain: {}. \
-             Store it via the UI (Model Providers panel → OpenRouter → API key).",
-            e
-        ),
-    }
+    std::env::var("NOLOCK_OPENROUTER_API_KEY").expect("Set NOLOCK_OPENROUTER_API_KEY for live tests")
 }
 
 /// Build the provider map the Switchyard router resolves targets against.
@@ -1219,7 +1197,6 @@ fn switchyard_chat_request(
         system_prompt: None,
         root_path: Some(root.to_string()),
         max_iterations: 4,
-        model_affinity: Some(true),
         referenced_agents,
         reasoning_retries: Some(4),
     }
@@ -1267,7 +1244,7 @@ async fn run_chat_retry_on_429(
 /// the `random` general router) redirects the main chat to one of OpenRouter's
 /// Nemotron models.
 #[tokio::test]
-#[ignore = "requires network + OpenRouter API key stored in the OS keychain (UI Model Providers panel)"]
+#[ignore = "requires network + OpenRouter NOLOCK_OPENROUTER_API_KEY"]
 async fn switchyard_routes_chat_to_nemotron_family_on_openrouter() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let router_path = root.join(".routers").join("switchyard.json");
@@ -1330,7 +1307,7 @@ async fn switchyard_routes_chat_to_nemotron_family_on_openrouter() {
 /// E2E: a `passthrough` route always selects its single target — validates the
 /// config's passthrough algorithm against a real backend.
 #[tokio::test]
-#[ignore = "requires network + OpenRouter API key stored in the OS keychain (UI Model Providers panel)"]
+#[ignore = "requires network + OpenRouter NOLOCK_OPENROUTER_API_KEY"]
 async fn switchyard_passthrough_routes_to_exact_model() {
     let key = openrouter_key();
 
@@ -1392,7 +1369,7 @@ async fn switchyard_passthrough_routes_to_exact_model() {
 /// E2E: a `subagent`-purpose route redirects sub-agent requests to the
 /// configured target — validates the config's subagent routing.
 #[tokio::test]
-#[ignore = "requires network + OpenRouter API key stored in the OS keychain (UI Model Providers panel)"]
+#[ignore = "requires network + OpenRouter NOLOCK_OPENROUTER_API_KEY"]
 async fn switchyard_subagent_route_redirects_sub_agent() {
     let key = openrouter_key();
 

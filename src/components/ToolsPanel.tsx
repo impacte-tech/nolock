@@ -82,7 +82,7 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
 
   // Determine if the current chat backend supports tools
   const backend = (typeof window !== "undefined" ? getChatBackend() : null) || "ollama";
-  const supportsTools = backend === "ollama" || backend === "openrouter" || backend === "digitalocean" || backend === "llamacpp";
+  const supportsTools = backend === "ollama" || backend === "openrouter" || backend === "llamacpp";
 
   const loadCustomTools = useCallback(async () => {
     if (!rootPath) return;
@@ -197,7 +197,7 @@ export default function ToolsPanel({ visible, onClose, rootPath = "" }: Props) {
           <span style={{ fontSize: 12, color: "var(--text-muted)", display: "block", marginBottom: 8, lineHeight: 1.5 }}>
             {supportsTools
               ? "Choose what the agent may use during chat — the model decides when to call each tool."
-              : "Tool calling is only supported with Ollama, llama.cpp, OpenRouter and DigitalOcean backends."}
+              : "Tool calling is only supported with Ollama, llama.cpp and OpenRouter backends."}
           </span>
 
           {TOOL_GROUPS.map((group) => {

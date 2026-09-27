@@ -81,7 +81,7 @@ export default function StatusBar({ showChat, onToggleChat, rootPath }: Props) {
           const resp = await fetch(`${url}/health`);
           ok = resp.ok;
         } else {
-          ok = true; // openrouter / opencode / digitalocean assumed OK
+          ok = true; // OpenRouter status is checked when a request is made
         }
         if (cancelled) return;
         setBackend({
