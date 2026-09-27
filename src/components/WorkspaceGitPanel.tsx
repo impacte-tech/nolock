@@ -19,6 +19,24 @@ export default function WorkspaceGitPanel({ rootPath, open, onToggle, style }: P
   const [diffError, setDiffError] = useState("");
   const [refreshKey, refresh] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState<"branch" | "worktree" | null>(null);
+  const [branchName, setBranchName] = useState("");
+  const [worktreePath, setWorktreePath] = useState("");
+  const [creatingBusy, setCreatingBusy] = useState(false);
+  const [createMessage, setCreateMessage] = useState("");
+  const project = useRef(rootPath); project.current = rootPath;
+  useEffect(() => { setCreating(null); setBranchName(""); setWorktreePath(""); setCreateMessage(""); }, [rootPath]);
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (creatingBusy) return;
+    const root = rootPath;
+    setCreatingBusy(true); setCreateMessage("");
+    try {
+      const result = await invoke<string>("git_workspace_create", { rootPath: root, branch: branchName.trim(), worktreePath: creating === "worktree" ? worktreePath.trim() : null });
+      if (project.current === root) { setCreateMessage(result); setCreating(null); refresh(n => n + 1); }
+    } catch (e) { if (project.current === root) setCreateMessage(String(e)); }
+    finally { setCreatingBusy(false); }
+  };
   const selection = useRef(selected); selection.current = selected;
   useEffect(() => { setStatus(null); setSelected(null); setDiff(null); setError(""); }, [rootPath]);
 
@@ -59,7 +77,7 @@ export default function WorkspaceGitPanel({ rootPath, open, onToggle, style }: P
     return () => { cancelled = true; clearTimeout(timer); window.removeEventListener("focus", focus); document.removeEventListener("visibilitychange", focus); };
   }, [rootPath, open, refreshKey, selected]);
 
-  if (!open) return <aside className="workspace-git-rail"><button onClick={onToggle} title="Open workspace Git changes" aria-label="Open Git changes"><BranchIcon/><span>Git</span></button></aside>;
+  if (!open) return <aside className="workspace-git-rail"><button onClick={onToggle} title="Open workspace Git changes" aria-label="Open Git changes"><BranchIcon/></button></aside>;
   const groups: { title: string; area: Area; files: FileStatus[] }[] = [
     { title: "Staged", area: "staged", files: status?.files.filter((f) => !f.untracked && f.staged !== " ") ?? [] },
     { title: "Changes", area: "unstaged", files: status?.files.filter((f) => f.untracked || f.unstaged !== " ") ?? [] },
@@ -70,6 +88,18 @@ export default function WorkspaceGitPanel({ rootPath, open, onToggle, style }: P
       <button onClick={() => refresh((n) => n + 1)} title="Refresh Git status" aria-label="Refresh Git status" disabled={loading}>↻</button>
       <button onClick={onToggle} title="Collapse Git panel" aria-label="Collapse Git panel">›</button>
     </header>
+    <div className="workspace-git-actions">
+      <button className="btn-secondary" disabled={!status || creatingBusy} onClick={() => { setCreating("branch"); setCreateMessage(""); }}>New feature branch</button>
+      <button className="btn-secondary" disabled={!status || creatingBusy} onClick={() => { setCreating("worktree"); setCreateMessage(""); }}>New worktree</button>
+    </div>
+    {creating && <form className="workspace-git-create" onSubmit={create}>
+      <label>Branch name<input autoFocus required maxLength={200} placeholder="feat/my-feature" value={branchName} disabled={creatingBusy} onChange={e => setBranchName(e.target.value)} /></label>
+      {creating === "worktree" && <label>Worktree folder<input required placeholder="/path/to/new-worktree" value={worktreePath} disabled={creatingBusy} onChange={e => setWorktreePath(e.target.value)} /></label>}
+      <small>{creating === "branch" ? "Create and switch to a branch from HEAD." : "Create a branch from HEAD in a separate folder. This workspace stays open."}</small>
+      <button className="btn-primary" disabled={creatingBusy || !branchName.trim() || (creating === "worktree" && !worktreePath.trim())}>{creatingBusy ? "Creating…" : "Create"}</button>
+      <button type="button" className="btn-secondary" disabled={creatingBusy} onClick={() => setCreating(null)}>Cancel</button>
+    </form>}
+    {createMessage && <p className="workspace-git-empty" role="status">{createMessage}</p>}
     {!rootPath ? <p className="workspace-git-empty">Open a folder to review its changes.</p> : error ? <p className="workspace-git-empty" role="status">{error}</p> : <>
       <div className="workspace-git-repo" title={status?.repository}><span>{status?.branch || "Reading repository…"}</span><small>Working tree · live</small></div>
       <div className="workspace-git-files">

@@ -71,6 +71,48 @@ describe("terminal workspace", () => {
     return { instances, activeId, rootPath: "/layout", terminalPercent: 30, onSelect: vi.fn(), onClose: vi.fn(), onCreate: vi.fn(), onEditorTerminal: vi.fn(), onRename: vi.fn(), resizeHandle: null, children: <div>Files</div> };
   }
 
+  it("renames without restarting a PTY and cancels or rejects empty names", async () => {
+    const props = workspaceProps([{ id: "one", label: "One", active: true }], "one");
+    const view = render(<TerminalWorkspace {...props} editorTerminalId={null} />);
+    await waitFor(() => expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === "pty_spawn")).toHaveLength(1));
+    fireEvent.click(view.getByRole("button", { name: "Rename One" }));
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "  Build logs  " } });
+    fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" });
+    expect(props.onRename).toHaveBeenCalledWith("one", "Build logs");
+    props.onRename.mockClear();
+    fireEvent.click(view.getByRole("button", { name: "Rename One" }));
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "Cancelled" } });
+    fireEvent.keyDown(view.getByRole("textbox"), { key: "Escape" });
+    expect(props.onRename).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole("button", { name: "Rename One" }));
+    fireEvent.change(view.getByRole("textbox"), { target: { value: "   " } });
+    fireEvent.blur(view.getByRole("textbox"));
+    expect(props.onRename).not.toHaveBeenCalled();
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === "pty_spawn")).toHaveLength(1);
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === "pty_kill")).toHaveLength(0);
+  });
+
+  it("records new terminals immediately and preserves stop choices when adding terminals", async () => {
+    const one = { id: "one", label: "One", active: true };
+    const props = workspaceProps([one], "one");
+    const view = render(<TerminalWorkspace {...props} editorTerminalId={null} />);
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("pty_spawn", expect.anything()));
+    expect(view.getByRole("button", { name: "Stop recording" })).toHaveAttribute("aria-pressed", "true");
+    const ptyId = mockInvoke.mock.calls.find(([cmd]) => cmd === "pty_spawn")![1].id;
+    const output = mockListen.mock.calls.find(([event]) => event === "pty-output")![1];
+    act(() => output({ payload: { id: ptyId, data: "first output" } }));
+    await flushTerminalActivity();
+    expect(mockInvoke).toHaveBeenCalledWith("append_terminal_session_events", expect.objectContaining({ events: expect.arrayContaining([expect.objectContaining({ kind: "output", text: "first output" })]) }));
+    fireEvent.click(view.getByRole("button", { name: "Stop recording" }));
+    view.rerender(<TerminalWorkspace {...props} instances={[one, { id: "two", label: "Two", active: false }]} editorTerminalId={null} />);
+    expect(view.getAllByRole("button", { name: "Stop recording", hidden: true })).toHaveLength(1);
+    expect(view.getAllByRole("button", { name: "Record transcript" })).toHaveLength(1);
+    act(() => output({ payload: { id: ptyId, data: "after stop" } }));
+    await flushTerminalActivity();
+    const events = mockInvoke.mock.calls.filter(([cmd]) => cmd === "append_terminal_session_events").flatMap(([, args]) => args.events);
+    expect(events.some((event: any) => event.text === "after stop")).toBe(false);
+  });
+
   it("preserves every process when rearranging and moving into and out of the editor", async () => {
     const instances = [{ id: "one", label: "One", active: true }, { id: "two", label: "Two", active: false }];
     const props = workspaceProps(instances, "one");
@@ -82,7 +124,7 @@ describe("terminal workspace", () => {
     view.rerender(<TerminalWorkspace {...props} editorTerminalId={null} />);
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === "pty_spawn")).toHaveLength(2);
     expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === "pty_kill")).toHaveLength(0);
-    expect(view.getAllByRole("button", { name: "Record transcript" })).toHaveLength(2);
+    expect(view.getAllByRole("button", { name: "Stop recording" })).toHaveLength(2);
   });
 
   it("remembers the chosen arrangement across remounts", async () => {
@@ -143,10 +185,10 @@ describe("terminal workspace", () => {
 });
 
 
-it("records metadata by default and output only after opt-in, following the shared session", async () => {
+it("records only metadata while recording is disabled, following the shared session", async () => {
   resetTauriMocks(); mockInvoke.mockResolvedValue(undefined);
   const instance = { id: "privacy", label: "Terminal", active: true };
-  const view = render(<TerminalView instance={instance} rootPath="/privacy" />);
+  const view = render(<TerminalView instance={instance} rootPath="/privacy" recording={false} />);
   await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("pty_spawn", expect.anything()));
   const ptyId = mockInvoke.mock.calls.find(([cmd]) => cmd === "pty_spawn")![1].id;
   const output = mockListen.mock.calls.find(([event]) => event === "pty-output")![1];

@@ -26,6 +26,7 @@ pub mod redaction;
 pub mod mcp_servers;
 pub mod terminal_agents;
 pub mod agent_usage;
+pub mod agent_conversations;
 pub mod validation;
 
 /// Public entry points for the headless web server (`bin/nolock-server.rs`).
@@ -10611,6 +10612,7 @@ pub fn run() {
             delete_session,
             archive_session,
             workspace_git::git_workspace_status,
+            workspace_git::git_workspace_create,
             workspace_git::git_workspace_diff,
             git_session_files,
             git_session_file_diff,
@@ -10631,6 +10633,7 @@ pub fn run() {
             agent_file_policy::agent_check_file_access,
             terminal_agents::terminal_agent_capabilities,
             agent_usage::agent_usage,
+            agent_conversations::read_agent_conversation,
             mcp_servers::list_mcp_servers,
             mcp_servers::save_mcp_servers,
             terminal_sessions::append_terminal_session_events,

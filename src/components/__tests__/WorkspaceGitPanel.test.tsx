@@ -33,3 +33,26 @@ describe("workspace Git", () => {
     expect(screen.getByText("Open a folder to review its changes.")).toBeInTheDocument();
   });
 });
+
+it("creates a feature branch or worktree with explicit arguments and displays errors", async () => {
+  mockInvoke.mockImplementation(async command => command === "git_workspace_status" ? { repository: "/repo", branch: "main", files: [] } : "Created");
+  await act(async () => { render(<WorkspaceGitPanel rootPath="/repo" open onToggle={vi.fn()} />); });
+  fireEvent.click(screen.getByText("New feature branch"));
+  fireEvent.change(screen.getByLabelText("Branch name"), { target: { value: "feat/test" } });
+  await act(async () => { fireEvent.click(screen.getByText("Create")); });
+  expect(mockInvoke).toHaveBeenCalledWith("git_workspace_create", { rootPath: "/repo", branch: "feat/test", worktreePath: null });
+  fireEvent.click(screen.getByText("New worktree"));
+  fireEvent.change(screen.getByLabelText("Worktree folder"), { target: { value: "/tmp/new worktree" } });
+  mockInvoke.mockImplementation(async command => {
+    if (command === "git_workspace_create") throw new Error("Branch already exists");
+    return { repository: "/repo", branch: "main", files: [] };
+  });
+  await act(async () => { fireEvent.click(screen.getByText("Create")); });
+  expect(mockInvoke).toHaveBeenCalledWith("git_workspace_create", { rootPath: "/repo", branch: "feat/test", worktreePath: "/tmp/new worktree" });
+  expect(screen.getByText(/Branch already exists/)).toBeInTheDocument();
+  expect(screen.getByLabelText("Worktree folder")).toHaveValue("/tmp/new worktree");
+});
+it("shows only the icon on the collapsed Git rail", () => {
+  render(<WorkspaceGitPanel rootPath="/repo" open={false} onToggle={vi.fn()} />);
+  expect(screen.getByRole("button", { name: "Open Git changes" }).textContent).toBe("");
+});

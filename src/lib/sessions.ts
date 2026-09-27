@@ -24,6 +24,8 @@ export interface SessionToolCall {
 
 /** A single logged conversation entry persisted in a session file. */
 export interface SessionLogMessage {
+  /** Reasoning saved by a coding agent, separate from its visible answer. */
+  reasoning?: string;
   role: "user" | "assistant" | "system";
   /** Full API content (may include injected context). */
   content: string;
@@ -333,4 +335,29 @@ export function formatSessionTime(ts: number): string {
   const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   if (sameDay) return time;
   return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
+}
+export interface AgentConversation {
+  candidates: { id: string; title: string; createdAt: number }[];
+  selectedId: string | null;
+  messages: SessionLogMessage[];
+  warning?: string | null;
+}
+export function conversationSelectionKey(rootPath: string, sessionId: string): string {
+  return `nolock.agent-conversation.${JSON.stringify([rootPath, sessionId])}`;
+}
+export async function readAgentConversation(rootPath: string, sessionId: string): Promise<AgentConversation> {
+  let nativeId: string | null = null;
+  try { nativeId = localStorage.getItem(conversationSelectionKey(rootPath, sessionId)); } catch {}
+  const result = await invoke<AgentConversation>("read_agent_conversation", { rootPath, sessionId, nativeId });
+  return result && Array.isArray(result.messages) && Array.isArray(result.candidates) ? result : { candidates: [], selectedId: null, messages: [] };
+}
+
+/** Supported native history providers; generic CLI recordings retain their transcript fallback. */
+export function agentConversationLabel(name?: string): string | null {
+  switch (name) {
+    case "opencode": return "OpenCode";
+    case "codex": return "Codex";
+    case "claude": case "claude-code": return "Claude Code";
+    default: return null;
+  }
 }

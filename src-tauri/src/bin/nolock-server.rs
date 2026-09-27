@@ -460,6 +460,12 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             ok(main_impl::terminal_sessions::read_terminal_session_events(a.root_path, a.session_id))
         }
         // ----- Sessions (direct reuse)
+        "read_agent_conversation" => {
+            #[derive(serde::Deserialize)] #[serde(rename_all = "camelCase")]
+            struct Args { root_path: String, session_id: String, native_id: Option<String> }
+            let a: Args = parse(command, args)?;
+            ok(main_impl::agent_conversations::read_agent_conversation(a.root_path, a.session_id, a.native_id).await)
+        }
         "agent_usage" => {
             let a: RootArgs = parse(command, args)?;
             ok(main_impl::agent_usage::agent_usage(a.root_path).await)
@@ -486,6 +492,12 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
         }
 
         // ----- Git session diffs (direct reuse)
+        "git_workspace_create" => {
+            #[derive(serde::Deserialize)] #[serde(rename_all = "camelCase")]
+            struct Args { root_path: String, branch: String, worktree_path: Option<String> }
+            let a: Args = parse(command, args)?;
+            ok(main_impl::workspace_git::git_workspace_create(a.root_path, a.branch, a.worktree_path))
+        }
         "git_workspace_status" => {
             #[derive(serde::Deserialize)] #[serde(rename_all = "camelCase")]
             struct Args { root_path: String }

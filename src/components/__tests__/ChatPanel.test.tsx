@@ -1,3 +1,4 @@
+import SessionsPanel from "../SessionsPanel";
 // ---------------------------------------------------------------------------
 // Smoke tests for ChatPanel component (with Tauri API mocks)
 // ---------------------------------------------------------------------------
@@ -373,7 +374,7 @@ describe("ChatPanel", () => {
     });
   });
 
-  it("shows tool calls in the session summary opened from the picker", async () => {
+  it("shows tool calls in the session summary opened from Sessions", async () => {
     // list_sessions returns the record exactly as the Rust backend serializes
     // it: camelCase message keys, snake_case tool-call result fields. The
     // fixture mirrors that shape (67 tool calls) without touching disk.
@@ -385,10 +386,9 @@ describe("ChatPanel", () => {
       return Promise.resolve(null);
     });
 
-    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} rootPath="/tmp/proj" />);
+    render(<SessionsPanel visible onClose={vi.fn()} rootPath="/tmp/proj" />);
 
-    // Open the session picker and click the session (the list loads async).
-    fireEvent.click(screen.getByTitle("Sessions"));
+    // Open a result from the top-level session browser.
     const item = await screen.findByText("Help me to review the security aspects of this project");
     fireEvent.click(item);
 
@@ -475,10 +475,9 @@ describe("ChatPanel", () => {
       return Promise.resolve(null);
     });
 
-    render(<ChatPanel onClose={vi.fn()} onOpenUrl={vi.fn()} rootPath="/tmp/proj" />);
+    render(<SessionsPanel visible onClose={vi.fn()} rootPath="/tmp/proj" />);
 
     // Open the summary of the current session — no tool calls persisted yet.
-    fireEvent.click(screen.getByTitle("Sessions"));
     fireEvent.click(await screen.findByText("Live session"));
     await waitFor(() => {
       expect(screen.getByText(/Tool calls/)).toBeInTheDocument();
@@ -493,10 +492,8 @@ describe("ChatPanel", () => {
       if (cmd === "ai_chat") return Promise.resolve({ content: "ok", tool_calls: [] });
       return Promise.resolve(null);
     });
-    fireEvent.change(screen.getByPlaceholderText(/Ask the AI/), { target: { value: "go" } });
-    fireEvent.click(screen.getByText("Send"));
 
-    // The debounced auto-save fires (~800ms) → listSessions → summary refresh.
+    // The session browser refreshes persisted records while the summary is open.
     await waitFor(
       () => {
         expect(screen.getAllByText("list_directory").length).toBeGreaterThanOrEqual(1);
