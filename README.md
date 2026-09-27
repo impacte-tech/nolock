@@ -26,7 +26,7 @@
 
 **nolock** is a desktop IDE that puts you in full control. It combines a full-featured code editor (powered by Monaco), a real terminal emulator, an AI agent chat panel, a native web browser, and a workspace-wide file search — all running locally with no telemetry, no accounts, and no lock-in.
 
-Connect it to your preferred AI backend (Ollama, llama.cpp, OpenRouter, or OpenCode Zen) for inline code completions and agentic chat with tool-calling capabilities (web search, file read, directory listing).
+Connect it to your preferred AI backend (Ollama, llama.cpp, or OpenRouter) for inline code completions and agentic chat with tool-calling capabilities (web search, file read, directory listing).
 
 ---
 
@@ -62,7 +62,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 |---|---|---|
 | **Tauri 2** | A framework for building desktop applications with a web frontend and a Rust backend. | The core application framework — manages windows, system tray, native menus, IPC between frontend and backend, and application lifecycle. |
 | **serde / serde_json** | A serialization/deserialization framework for Rust. | Handles all JSON serialization for IPC commands, AI API requests/responses, and configuration persistence. |
-| **reqwest** | An ergonomic, batteries-included HTTP client for Rust. | Makes HTTP requests to AI backends (Ollama, llama.cpp, OpenRouter, OpenCode Zen) for chat completions, code completions, and model information. |
+| **reqwest** | An ergonomic, batteries-included HTTP client for Rust. | Makes HTTP requests to AI backends (Ollama, llama.cpp, OpenRouter) for chat completions, code completions, and model information. |
 | **switchyard-libsy** | NVIDIA NeMo Switchyard's embeddable routing library — the "general routers" (random, passthrough, llm-classifier) that pick which model/backend serves a request. | Routes main-chat and sub-agent requests across models/providers at runtime. Policy is per-project `.routers/switchyard.json`; nolock keeps its own transport, libsy only decides the target. |
 | **nemo-fabric-core** | NVIDIA NeMo Fabric's core config & runtime contracts for agents. | Validates every agent file in `.agents/` against the typed `AgentConfig` contract and normalizes agent-to-agent runs (see `src-tauri/src/fabric.rs`). |
 
@@ -79,7 +79,6 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 | **Ollama** | A local server for running large language models on your own machine with a simple REST API. | Supports both inline code completions (via `/api/generate` with Fill-In-The-Middle) and multi-turn chat (via `/api/chat`) with tool calling. |
 | **llama.cpp** | A C/C++ implementation of LLM inference optimized for consumer hardware. | Supports code completions via its `/completion` endpoint with Fill-In-The-Middle support. |
 | **OpenRouter** | A unified API gateway that provides access to dozens of AI models from multiple providers. | Supports chat completions and tool calling through the OpenAI-compatible `/chat/completions` endpoint. |
-| **OpenCode Zen** | An AI inference service with some models offering a generous free tier. | Supports code completions and chat via its `/api/generate` endpoint. |
 
 ### Search & Data
 
@@ -105,7 +104,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **File Explorer** — Tree-based file browser with directory expansion, refresh, file-type color coding, and file/directory CRUD operations (create, rename, delete, copy).
 - **Native Browser Panel** — Embedded web browser using a native OS webview (not an iframe) — browse any site without leaving the app.
 - **Resizable Panels** — All panels (explorer, editor, terminal, browser, chat) are fully resizable with drag handles.
-- **Multi-Backend AI** — Switch between Ollama, llama.cpp, OpenRouter, and OpenCode Zen for completions and chat.
+- **Multi-Backend AI** — Switch between Ollama, llama.cpp, and OpenRouter for completions and chat.
 - **Switchyard Router** — Route requests across models/providers at runtime with NVIDIA NeMo Switchyard's embedded "general routers" (random, passthrough, llm-classifier). Per-project policy lives in `.routers/switchyard.json`; open via <kbd>Ctrl+A, Y</kbd>.
 - **Privacy-First** — No telemetry, no accounts, no cloud dependency. Everything runs on your machine.
 
@@ -381,7 +380,6 @@ After installation, configure your preferred AI backend:
    - **Ollama** — Default, runs locally at `http://localhost:11434`
    - **llama.cpp** — Runs locally at `http://localhost:8080`
    - **OpenRouter** — Requires an API key from [openrouter.ai](https://openrouter.ai)
-   - **OpenCode Zen** — Remote at `https://opencode.ai/zen/v1`, some models available with a free tier
 3. Enter your model names and save.
 
 ### Multi-Provider Model Configuration
@@ -395,13 +393,13 @@ configured independently (URL + API key), and each `@agent` can be sourced from 
 
 | Role | Providers | Purpose |
 |---|---|---|
-| **Planning** (online) | OpenRouter, OpenCode Zen, DigitalOcean Inference Router | The main orchestrator model — plans, delegates to sub-agents, and synthesizes answers. Use a strong hosted model here. |
+| **Planning** (online) | OpenRouter | The main orchestrator model — plans, delegates to sub-agents, and synthesizes answers. Use a strong hosted model here. |
 | **Task Executor** (local) | Ollama, llama.cpp | Small, cheap models that run focused sub-agent tasks and report back with a concise answer. Saves tokens on long agentic runs. |
 
 - **Model Providers** panel (`Ctrl+A, P`) shows every provider with its role badge.
 - **Chat Model** panel (`Ctrl+A, M`) labels the chat model as the *Planning provider*.
 
-> **Recommended setup:** pick an online provider (OpenRouter / DigitalOcean) as the
+> **Recommended setup:** pick an online provider (OpenRouter) as the
 > planning provider for the main chat model, and configure your `.agents/` files to run
 > on local executor models (Ollama / llama.cpp). The planning model delegates focused
 > tasks to these local sub-agents, so you only pay (in tokens or GPU) for the sub-agent's
@@ -465,7 +463,7 @@ This is the heart of the token-saving design:
 
 **Net effect:** the main model only ever pays for each sub-agent's *final answer*, not
 its entire tool-call trace — a large saving on long agentic runs. Each provider's API
-key is stored independently (OS keychain), so a sub-agent can route to a different
+key is kept independently in app-session memory, so a sub-agent can route to a different
 provider than the main model without leaking credentials.
 
 #### Switchyard Router — runtime model routing
@@ -479,7 +477,7 @@ untouched); Switchyard only *picks the target*.
 
 Policy is stored per-project in **`.routers/switchyard.json`** (versioned project
 config, like `.agents/`). Targets reference `(backend, model)` only — credentials keep
-coming from your provider URLs / OS keychain, so no secrets live in the file.
+coming from your provider URLs / session credentials, so no secrets live in the file.
 
 ```jsonc
 {
@@ -524,16 +522,7 @@ Ultra as the costlier capable fallback.
 
 ##### E2E: routing against OpenRouter
 
-The e2e harness validates the Switchyard route against a real OpenRouter key. The key
-**must** be stored in the OS keychain — the same storage the UI writes to — and the
-tests **fail completely** (no silent skip) if it's missing:
-
-```bash
-# 1. Store the key via the UI: Model Providers panel → OpenRouter → API key.
-#    This writes to the OS keychain (service com.nolock.app, account apiKey.openrouter).
-# 2. Run the validation:
-./e2e/run.sh switchyard-e2e
-```
+The e2e harness uses `NOLOCK_OPENROUTER_API_KEY` from the environment. Set it in your shell before running `./e2e/run.sh switchyard-e2e`; live tests fail if it is missing. Keys entered in the UI last only for that app session.
 
 This runs three tests against real OpenRouter:
 - `switchyard_routes_chat_to_nemotron_family_on_openrouter` — the repo's `random`
@@ -543,8 +532,7 @@ This runs three tests against real OpenRouter:
 - `switchyard_subagent_route_redirects_sub_agent` — a `subagent`-purpose route
   redirects sub-agent requests to the configured target.
 
-The headless CLI can also read keys from the keychain with `--keychain` (keys
-`apiKey.<backend>`), mirroring the GUI's `Model Providers` panel.
+The headless CLI accepts `--api-key` or `NOLOCK_OPENROUTER_API_KEY`. It does not access password managers or agent authentication stores.
 
 ### Recommended Ollama Models
 

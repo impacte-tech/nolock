@@ -186,11 +186,7 @@ pub async fn fetch_models(
     super::fetch_models(req).await
 }
 
-pub async fn fetch_digitalocean_routers(
-    req: super::FetchRoutersRequest,
-) -> Result<Vec<super::RouterItem>, String> {
-    super::fetch_digitalocean_routers(req).await
-}
+
 
 pub async fn ai_complete(req: super::CompletionRequest) -> Result<String, String> {
     super::ai_complete(req).await

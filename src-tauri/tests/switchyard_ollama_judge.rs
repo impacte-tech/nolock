@@ -7,7 +7,7 @@
 //!   - hard task → Ultra (capable-high)
 //!
 //! Requires: a running Ollama with `oamazonasgabriel/nemotron-nano-9b-v2:q4-km-16gbGPU`,
-//! an OpenRouter API key in the OS keychain,and network access. Run with:
+//! an OpenRouter NOLOCK_OPENROUTER_API_KEY,and network access. Run with:
 //!
 //!   cargo test --test switchyard_ollama_judge -- --ignored --nocapture
 
@@ -51,12 +51,7 @@ impl EventSink for RecordingSink {
 }
 
 fn chat_request(root: &str, message: &str) -> ChatRequest {
-    let key = main_impl::secrets::read_keychain(
-        main_impl::secrets::KEYCHAIN_SERVICE,
-        "apiKey.openrouter",
-    )
-    .expect("read keychain")
-    .expect("openrouter key must be in the keychain");
+    let key = std::env::var("NOLOCK_OPENROUTER_API_KEY").expect("Set NOLOCK_OPENROUTER_API_KEY for live tests");
     let mut providers = HashMap::new();
     providers.insert(
         "openrouter".to_string(),
@@ -83,7 +78,6 @@ fn chat_request(root: &str, message: &str) -> ChatRequest {
         system_prompt: None,
         root_path: Some(root.to_string()),
         max_iterations: 2,
-        model_affinity: Some(true),
         referenced_agents: Vec::new(),
         reasoning_retries: Some(2),
     }
@@ -129,7 +123,7 @@ async fn routed_model(root: &str, message: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-#[ignore = "requires Ollama + OpenRouter API key in the OS keychain"]
+#[ignore = "requires Ollama + OpenRouter NOLOCK_OPENROUTER_API_KEY"]
 async fn ollama_judge_routes_simple_task_to_efficient() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let routed = routed_model(root.to_string_lossy().as_ref(), "write a hello world program").await;
@@ -148,7 +142,7 @@ async fn ollama_judge_routes_simple_task_to_efficient() {
 }
 
 #[tokio::test]
-#[ignore = "requires Ollama + OpenRouter API key in the OS keychain"]
+#[ignore = "requires Ollama + OpenRouter NOLOCK_OPENROUTER_API_KEY"]
 async fn ollama_judge_routes_hard_task_to_capable() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let routed = routed_model(
@@ -174,7 +168,7 @@ async fn ollama_judge_routes_hard_task_to_capable() {
 /// the judge routes to the capable tier must select Nemotron Ultra — validating
 /// cost-aware selection picks the (only) capable target and the judge directs to it.
 #[tokio::test]
-#[ignore = "requires Ollama + OpenRouter API key in the OS keychain"]
+#[ignore = "requires Ollama + OpenRouter NOLOCK_OPENROUTER_API_KEY"]
 async fn ollama_judge_routes_complex_task_to_ultra() {
     let root = std::env::temp_dir().join(format!("nolock_sy_ollama_ultra_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -220,7 +214,7 @@ async fn ollama_judge_routes_complex_task_to_ultra() {
 /// and hard tasks to Ultra. Retries up to 3 times per task since the judge is
 /// non-deterministic.
 #[tokio::test]
-#[ignore = "requires Ollama + OpenRouter API key in the OS keychain"]
+#[ignore = "requires Ollama + OpenRouter NOLOCK_OPENROUTER_API_KEY"]
 async fn ollama_judge_custom_three_tier_routing() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let cases = [

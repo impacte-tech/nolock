@@ -8,7 +8,7 @@ it("offers project MCPs and session tracking without a broker or secrets UI", as
   vi.mocked(invoke).mockResolvedValue({mcpServers:{}});
   render(<McpPanel visible onClose={vi.fn()} rootPath="/project" />);
   expect(await screen.findByText("Add MCP server")).toBeInTheDocument();
-  expect(screen.getByText("Agent sessions")).toBeInTheDocument();
+  expect(screen.getByText("Using connections in a terminal")).toBeInTheDocument();
   expect(screen.queryByText("Secrets Broker")).not.toBeInTheDocument();
   expect(invoke).toHaveBeenCalledWith("list_mcp_servers", {rootPath:"/project"});
 });

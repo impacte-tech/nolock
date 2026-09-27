@@ -9,7 +9,7 @@ import {
 } from "../lib/models";
 
 interface Props {
-  /** The backend provider value ("openrouter" | "opencode" | "ollama" | "llamacpp") */
+  /** The backend provider value ("openrouter" | "ollama" | "llamacpp") */
   provider: string;
   /** Server URL for the provider */
   url: string;
@@ -28,11 +28,11 @@ interface Props {
 /**
  * A filterable model selector component.
  *
- * For all supported providers (OpenRouter, OpenCode Zen, Ollama, llama.cpp), this component:
+ * For all supported providers (OpenRouter, Ollama, llama.cpp), this component:
  * - Fetches available models from the provider API
  * - Displays a list of models the user can click to select
  *
- * For OpenRouter and OpenCode Zen, additional filter toggles are shown:
+ * For OpenRouter, additional filter toggles are shown:
  * - "Free models only" and "Zero data retention only"
  *
  * For Ollama and llama.cpp, filters are hidden since all local models are free and private.
@@ -58,11 +58,9 @@ export default function ModelSelector({
   const toggleRef = useRef<HTMLButtonElement>(null);
 
   // Whether model listing + filtering is supported for this provider.
-  // DigitalOcean is excluded from listing — its "model" is an inference router
-  // (selected separately), not a conventional model list.
-  const supportsListing = provider === "openrouter" || provider === "opencode" || provider === "ollama" || provider === "llamacpp";
+  const supportsListing = provider === "openrouter" || provider === "ollama" || provider === "llamacpp";
   // Whether this provider supports pricing/privacy filters (only remote providers)
-  const supportsFilters = provider === "openrouter" || provider === "opencode";
+  const supportsFilters = provider === "openrouter";
 
   // Load saved filter preferences on mount
   useEffect(() => {
@@ -92,7 +90,7 @@ export default function ModelSelector({
 
   // Apply client-side filters whenever models or filters change.
   // For OpenRouter, the ZDR filter is applied server-side via the ?zdr=true param,
-  // but the free filter is always client-side. For OpenCode Zen, both are client-side.
+  // but the free filter is always client-side.
   useEffect(() => {
     if (!supportsListing) {
       setFilteredModels([]);

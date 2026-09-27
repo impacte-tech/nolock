@@ -95,17 +95,7 @@ fn write_config(path: &Path, config: &Config) -> Result<(), String> {
 pub fn load(root: &str) -> Result<Config, String> {
     let path = config_path(root)?;
     if !path.exists() {
-        // One-time compatibility with the old MCP store, not a credential broker.
-        // Existing vault credentials are never deleted by this migration.
-        let old = super::secrets::read_keychain(super::secrets::KEYCHAIN_SERVICE, &project_key(root)?)
-            .map_err(|_| "Could not migrate previous MCP settings. Unlock the keychain or save a new configuration.")?;
-        let config = match old {
-            Some(value) => serde_json::from_str(&value).map_err(|_| "Invalid previous MCP settings.")?,
-            None => Config::default(),
-        };
-        validate(&config)?;
-        write_config(&path, &config)?;
-        return Ok(config);
+        return Ok(Config::default());
     }
     let bytes = std::fs::read(&path).map_err(|_| "Cannot read MCP settings.")?;
     if bytes.len() > 64 * 1024 { return Err("MCP settings exceed the size limit.".into()); }

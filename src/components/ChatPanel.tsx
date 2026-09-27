@@ -1,3 +1,4 @@
+import FaqReviewButton from "./FaqReviewButton";
 import { activeSessionId, setActiveSessionId, flushTerminalActivity } from "../lib/terminalSessions";
 import AgentFileProtectionNotice from "./AgentFileProtectionNotice";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
@@ -11,7 +12,7 @@ import ToolAutocomplete from "./ToolAutocomplete";
 import { countTokens } from "../lib/tokenizer";
 import { renderMath, protectMath } from "../lib/math";
 import { getSecret } from "../lib/secrets";
-import { getChatBackend, resolveBackendUrl, getDigitalOceanModelAffinity, isCloudBackend, BACKENDS } from "../lib/backends";
+import { getChatBackend, resolveBackendUrl, isCloudBackend, BACKENDS } from "../lib/backends";
 import {
   type HookRunState,
   type ToolCallLog as HookToolCallLog,
@@ -53,7 +54,7 @@ import {
   composeChatSystemPrompt,
   getChatMode,
 } from "../lib/chatModes";
-import { readFaqReadme, faqSearch, faqUpsert, getFaqConfig } from "../lib/faq";
+import { readFaqReadme, faqSearch, getFaqConfig, displayFaqQuestion } from "../lib/faq";
 
 // ---------------------------------------------------------------------------
 // Markdown renderer — used to format assistant responses with code blocks,
@@ -974,27 +975,6 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
 
-  /**
-   * Learning mode: persist every completed question → answer exchange into the
-   * `.faq` vector store (SQLite + sqlite-vec). Only LEARNING mode accumulates
-   * knowledge — Building/Planning conversations are not indexed. Fire-and-
-   * forget — the chat UI must never block on embedding.
-   */
-  const [kbStatus, setKbStatus] = useState<{ ok: boolean; text: string } | null>(null);
-  const learnFromExchange = (question: string, answer: string, model: string, backend: string) => {
-    if (chatMode !== "learning" || !rootPath || !question.trim() || !answer.trim()) return;
-    void (async () => {
-      try {
-        await faqUpsert(rootPath, question.trim(), answer.trim(), model, backend, getFaqConfig());
-        setKbStatus({
-          ok: true,
-          text: `Indexed to Knowledge Base (.faq): "${question.trim().slice(0, 40)}${question.trim().length > 40 ? "…" : ""}"`,
-        });
-      } catch (e: any) {
-        setKbStatus({ ok: false, text: `Knowledge Base error: ${String(e)}` });
-      }
-    })();
-  };
   const sendingRef = useRef(false); // guards against concurrent sendMessage calls
   const stopRequestedRef = useRef(false); // set to true when user clicks stop
   const unlistenRef = useRef<(() => void) | null>(null); // stored stream-token unlisten callback
@@ -1023,9 +1003,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
     { name: string; status: "start" | "done" | "error"; path?: string; arguments?: string; result?: string }[]
   >([]);
 
-  /** The model the DigitalOcean Inference Router selected (from the
-   *  x-model-router-selected-model header), surfaced so reasoning models can
-   *  be identified when they "overthink". */
+  /** Actual model reported by the provider, when available. */
   const [routedModel, setRoutedModel] = useState<string | null>(null);
   /** Synchronous mirror of `routedModel` so the response-finalization callback
    *  (which runs in a stale closure) can read the actual routed model and attach
@@ -1865,7 +1843,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
         systemPrompt: effectiveSystemPrompt || undefined,
         rootPath: rootPath || undefined,
         maxIterations: 1,
-        modelAffinity: getDigitalOceanModelAffinity(),
+
         providers: await buildProvidersMap(),
       };
 
@@ -2375,7 +2353,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
     // relevant to the CURRENT question from the semantic vector store
     // (SQLite + sqlite-vec) and surface them to the agent so it teaches toward
     // what the user has previously asked. Falls back to the plain-text
-    // `.faq/README.md` the chat model keeps when no index / embedding backend
+    // legacy `.faq/README.md` when no index / embedding backend
     // is available yet (best-effort — a missing or empty index yields no extra
     // context).
     if (chatMode === "learning" && rootPath) {
@@ -2387,7 +2365,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
             const asked = h.similarity != null
               ? `similarity ${(h.similarity * 100).toFixed(1)}%, asked ${h.frequency}×`
               : `asked ${h.frequency}×`;
-            return `Q: ${h.question}\nA: ${h.answer}\n[${asked}]`;
+            return `Q: ${displayFaqQuestion(h.question)}\nA: ${h.answer}\n[${asked}]`;
           }).join("\n\n");
         }
       } catch (e) {
@@ -2643,7 +2621,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
         systemPrompt: effectiveSystemPrompt || undefined,
         rootPath: rootPath || undefined,
         maxIterations: parseInt(localStorage.getItem("nolock.toolMaxIterations") || "10", 10),
-        modelAffinity: getDigitalOceanModelAffinity(),
+
         providers: await buildProvidersMap(),
         // Reasoning-only retry budget from the Chat Model panel (default 8).
         reasoningRetries: parseInt(localStorage.getItem("nolock.reasoningRetries") || "8", 10),
@@ -2807,7 +2785,6 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
           return msgs;
         });
         // Learning mode: index this completed Q→A exchange for future retrieval.
-        learnFromExchange(input, responseText, routedModelRef.current || "", backend);
         scanAgentCommands(result.tool_calls as unknown as HookToolCallLog[]);
       }
     } catch (e: any) {
@@ -2855,7 +2832,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
         <div className="chat-header-title">
           <span>Agent Chat</span>
           {routedModel && (
-            <span className="routed-model" title="Model selected by the DigitalOcean Inference Router">
+            <span className="routed-model" title="Model reported by the provider">
               via {routedModel}
             </span>
           )}
@@ -2890,7 +2867,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
               <>
                 <br /><br />
                 <strong>Learning mode is on.</strong> The agent will teach you about your
-                code, probe your understanding, and keep a ranked <strong>.faq/</strong>
+                code, probe your understanding, and let you review knowledge for <strong>.faq/</strong>
                 knowledge base in the project root.
                 <br />
                 Every answered exchange is indexed automatically — open{" "}
@@ -3018,6 +2995,11 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
                         </button>
                       </>
                     )}
+                    {chatMode === "learning" && !m.hookResult && (!m.dpoResponses || !!m.dpoChoice) && <FaqReviewButton
+                      rootPath={rootPath}
+                      question={(() => { const prompt = messages.slice(0, i).reverse().find(message => message.role === "user"); return prompt?.displayContent ?? prompt?.content ?? ""; })()}
+                      answer={m.content} model={m.model || ""} backend={getChatBackend()}
+                    />}
                   </div>
                 )}
 
@@ -3303,29 +3285,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
           </div>
         )}
 
-        {kbStatus && (
-          <div
-            className={`kb-status${kbStatus.ok ? "" : " error"}`}
-            role="status"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              fontSize: 11,
-              padding: "4px 10px",
-              marginBottom: 4,
-              borderRadius: 6,
-              color: kbStatus.ok ? "var(--text-muted)" : "var(--danger, #c0392b)",
-              background: kbStatus.ok ? "var(--bg-secondary)" : "var(--danger-bg, rgba(192,57,43,0.08))",
-              border: kbStatus.ok ? "1px solid var(--border)" : "1px solid rgba(192,57,43,0.3)",
-              maxWidth: "100%",
-              wordBreak: "break-word",
-            }}
-          >
-            <span>{kbStatus.ok ? "✓" : "✕"}</span>
-            <span>{kbStatus.text}</span>
-          </div>
-        )}
+
 
         {shellNotice && <p role="status" style={{ color: "var(--text-muted)", fontSize: 11, padding: "4px 0" }}>{shellNotice}</p>}
         <div className="chat-input-wrapper">

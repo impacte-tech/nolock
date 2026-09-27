@@ -1,7 +1,7 @@
 /**
  * Model fetching utilities for AI model providers.
  *
- * Fetches available models from provider APIs (OpenRouter, OpenCode Zen, Ollama, llama.cpp)
+ * Fetches available models from provider APIs (OpenRouter, Ollama, llama.cpp)
  * via the Rust backend (to avoid CORS restrictions in the webview).
  * Provides filtering by free models and zero-data-retention models (remote providers only).
  */
@@ -51,7 +51,7 @@ interface RustModelListItem {
  * Also populates the localStorage price cache so the session summary can
  * estimate costs for whichever model the user actually chats with.
  *
- * @param provider - The backend provider value ("openrouter" | "opencode" | …)
+ * @param provider - The backend provider value ("openrouter" | …)
  * @param baseUrl  - Server URL
  * @param apiKey   - API key (required for OpenRouter)
  * @param filters  - Optional filters to apply server-side (if supported)
@@ -62,9 +62,7 @@ export async function fetchModels(
   apiKey?: string,
   filters?: ModelFilters,
 ): Promise<ModelInfo[]> {
-  // DigitalOcean is intentionally excluded — its "models" are inference routers
-  // selected via a dedicated dropdown, not a conventional model list.
-  const supportedProviders = ["openrouter", "opencode", "ollama", "llamacpp"];
+  const supportedProviders = ["openrouter", "ollama", "llamacpp"];
   if (!supportedProviders.includes(provider)) {
     return [];
   }

@@ -1,18 +1,9 @@
 // ---------------------------------------------------------------------------
 // FAQ knowledge base — the "Learning" chat mode.
 //
-// Learning mode keeps the repository's `.faq/` directory as plain text that
-// the chat model itself maintains: its system prompt instructs it to create
-// the directory, track every question the user asks, and rewrite a ranked
-// README so the most-asked questions rank first.
-//
-// On top of that plain-text layer, nolock also maintains a semantic vector
-// index (SQLite + sqlite-vec in the Rust backend — see src-tauri/src/faq.rs).
-// Each exchange is embedded and stored so future questions can be retrieved by
-// similarity (plus frequency/hybrid re-ranking) and injected back into the
-// conversation. This module exposes the config plumbing and the thin Tauri
-// command wrappers for that index.
-// ---------------------------------------------------------------------------
+// Learning mode retrieves approved knowledge from a per-project SQLite index.
+// New exchanges are saved through the book-button review flow (faqReview.ts).
+// Existing README knowledge remains a read-only retrieval fallback.
 
 import { invoke } from "@tauri-apps/api/core";
 import { getChatBackend, resolveBackendUrl } from "./backends";
@@ -39,8 +30,7 @@ export function faqReadmePath(rootPath: string): string {
 
 /**
  * Read the FAQ README (if the chat model has created one). Best-effort: a
- * missing/uncreated `.faq/` simply returns "" — the Learning system prompt
- * directs the model to create and maintain it.
+ * missing/uncreated `.faq/` simply returns "". New knowledge uses explicit review.
  */
 export async function readFaqReadme(rootPath: string): Promise<string> {
   if (!rootPath) return "";
@@ -403,4 +393,9 @@ export async function nameFaqCategories(rootPath: string, list: FaqCategoryList,
   if (failures.length && isCurrent()) {
     throw new Error(`Could not name ${failures.length} categor${failures.length === 1 ? "y" : "ies"} using ${model} (${backend}). ${failures[0]} Your questions are saved. Refresh to retry, or rename by hand.`);
   }
+}
+
+/** Keep the internal reviewed-exchange key out of user-visible knowledge text. */
+export function displayFaqQuestion(question: string): string {
+  return question.replace(/\n\[Reviewed exchange [a-f0-9]{64} · chunk (\d+)\]$/, "\nPassage $1");
 }

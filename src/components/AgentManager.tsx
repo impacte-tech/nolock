@@ -531,8 +531,6 @@ changes and verify your result with the configured validation commands.
               <option value="ollama">Ollama (local executor)</option>
               <option value="llamacpp">llama.cpp (local executor)</option>
               <option value="openrouter">OpenRouter (online planning)</option>
-              <option value="opencode">OpenCode Zen (online planning)</option>
-              <option value="digitalocean">DigitalOcean Inference Router (online planning)</option>
             </select>
             <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block" }}>
               When this agent runs as a sub-agent, it uses this provider instead of the main chat backend.

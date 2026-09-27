@@ -1,0 +1,15 @@
+# Reviewing knowledge in Learning mode
+
+Completed assistant responses in Learning mode have a book button after thumbs up/down. Open a project first. Click the book to review an exchange; responding in Learning mode no longer automatically saves exchanges or instructs the model to rewrite FAQ files.
+
+The review preserves the original question and answer and proposes answer passages split at paragraph boundaries, with a configurable maximum of 100–8,000 Unicode characters (default 2,000). Character counts are not embedding-model token counts. Long code blocks can span passages. Summary suggestions are excerpts of each passage's first line, up to 160 characters; they are not model-generated summaries. Edit them before approving.
+
+Edit, split, merge, remove, or reorder passages. Edit each summary. Choose an existing category or edit the suggested category name (derived from the question); a new category is created only on approval. Reset chunks regenerates them from the preserved original and discards passage edits. Any difference in concatenated passage text requires an explicit acknowledgement before saving. This is an exact-text coverage check, not a semantic guarantee that an edit means the same thing.
+
+Approve and save sends the question, approved summaries, and passages to the configured embedding provider. Only after every embedding succeeds are the category, passages, vectors, and preserved source published in a single transaction. Failure keeps the draft open for retry and does not publish partial passages. Ollama receives `truncate: false` so over-limit inputs fail instead of silently truncating. Other providers must reject over-limit inputs according to their API; the client cannot prove their internal behavior. Original source remains local unless it is also part of approved embedding input.
+
+Reopening the same question/answer from the book button loads its saved review. Approval updates that review rather than adding another copy. Concurrent edits are rejected; reopen the review to load the latest revision. Previewing or cancelling writes nothing, including when the project has no FAQ database. While approval is saving, editing and closing are disabled to prevent an ambiguous cancellation after publication.
+
+The database remains `.faq/nolock-faq.db` and is gitignored. Reviewed passages participate in the existing FAQ retrieval and manually assigned category. Chunking and summaries do not change the current ranking formula or guarantee complete future prompt context. Source-identical exchanges share one reviewed record. A changed answer is a distinct review. Existing entries and legacy FAQ CRUD remain available; reviewing again republishes the approved draft.
+
+This implements the approval flow, not the full `faq-hardening.md` proposal. Safe model-wide index migrations, project policy files, semantic summary generation, and user-adjustable ranking weights are separate work. Review saves reject dimension changes and changes to the embedding model used for reviewed entries, rather than rebuilding the index.
