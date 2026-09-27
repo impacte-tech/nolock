@@ -56,5 +56,28 @@ export async function readTerminalActivity(rootPath: string, sessionId: string):
 }
 /** Presentation only: transcripts are never turned into chat/model messages. */
 export function terminalDisplayText(text: string): string {
-  return text.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
+  return text
+    .replace(/\x1b[PX^_][\s\S]*?\x1b\\/g, "")
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[ -/]*[@-Z\\-_]/g, "")
+    .replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+}
+
+export interface TerminalLogEntry { id: string; terminalId: string; label: string; createdAt: number; text: string }
+/** Group output chunks into readable blocks without inventing user/assistant roles. */
+export function terminalLogEntries(events: TerminalSessionEvent[]): TerminalLogEntry[] {
+  const entries: TerminalLogEntry[] = [];
+  const current = new Map<string, TerminalLogEntry>();
+  for (const event of events) {
+    if (event.kind !== "output") { current.delete(event.terminalId); continue; }
+    let entry = current.get(event.terminalId);
+    if (!entry || event.createdAt - entry.createdAt > 30 || entry.text.length > 12000) {
+      entry = { id: event.id, terminalId: event.terminalId, label: event.label, createdAt: event.createdAt, text: "" };
+      entries.push(entry); current.set(event.terminalId, entry);
+    }
+    entry.text += event.text ?? "";
+  }
+  return entries.map(entry => ({ ...entry, text: terminalDisplayText(entry.text).trim() })).filter(entry => entry.text);
 }

@@ -25,7 +25,7 @@ interface TerminalViewProps {
   active?: boolean;
 }
 
-export default function TerminalView({ instance, rootPath, recording = false, active = false }: TerminalViewProps) {
+export default function TerminalView({ instance, rootPath, recording = true, active = false }: TerminalViewProps) {
   const termRef = useRef<HTMLDivElement>(null);
   const fitAddon = useRef<FitAddon | null>(null);
   const termInstance = useRef<Terminal | null>(null);
@@ -183,14 +183,17 @@ export function TerminalWorkspace({ instances, activeId, editorTerminalId, rootP
     setLayoutState(next);
     try { localStorage.setItem(TERMINAL_LAYOUT_KEY, next); } catch { /* storage unavailable */ }
   }, []);
-  const [recorded, setRecorded] = useState<Set<string>>(() => new Set());
+  const [recordingDisabled, setRecordingDisabled] = useState<Set<string>>(() => new Set());
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const beginRename = (terminal: TerminalInstance) => { setRenameDraft(terminal.label); setRenaming(terminal.id); };
+  const commitRename = (id: string) => { if (renameDraft.trim()) onRename(id, renameDraft.trim()); setRenaming(null); };
   const [error, setError] = useState("");
   useEffect(() => {
-    const failed = (event: Event) => { setError((event as CustomEvent<string>).detail); setRecorded(new Set()); };
+    const failed = (event: Event) => { setError((event as CustomEvent<string>).detail); setRecordingDisabled(new Set(instances.map(instance => instance.id))); };
     window.addEventListener("nolock:terminal-tracking-error", failed);
     return () => window.removeEventListener("nolock:terminal-tracking-error", failed);
-  }, []);
+  }, [instances]);
   const promoted = instances.some((t) => t.id === editorTerminalId) ? editorTerminalId : null;
   const lower = instances.filter((t) => t.id !== promoted);
   const selected = lower.some((t) => t.id === activeId) ? activeId : lower[0]?.id;
@@ -205,7 +208,7 @@ export function TerminalWorkspace({ instances, activeId, editorTerminalId, rootP
     {hasLower && <div style={{ gridRow: 2, gridColumn: "1 / -1" }}>{resizeHandle}</div>}
     {instances.length > 0 && <div className="terminal-workspace-toolbar" style={{ gridRow: hasLower ? 3 : 2, gridColumn: "1 / -1" }}>
       <div className="terminal-workspace-tabs" role="tablist" aria-label="Terminals">
-        {instances.map((t) => <button type="button" role="tab" aria-selected={t.id === activeId} key={t.id} onClick={() => onSelect(t.id)} onDoubleClick={() => setRenaming(t.id)} title="Double-click to rename">{t.label}{t.id === promoted ? " ↗" : ""}</button>)}
+        {instances.map((t) => <button type="button" role="tab" aria-selected={t.id === activeId} key={t.id} onClick={() => onSelect(t.id)} onDoubleClick={() => beginRename(t)} title="Double-click to rename">{t.label}{t.id === promoted ? " ↗" : ""}</button>)}
       </div>
       <span className="terminal-count">{instances.length} terminals</span>
       <button className="terminal-icon-button" type="button" onClick={onCreate} title="New terminal" aria-label="New terminal"><TerminalIcon kind="add" /></button>
@@ -222,12 +225,13 @@ export function TerminalWorkspace({ instances, activeId, editorTerminalId, rootP
         gridColumn: inEditor ? "1 / -1" : 1 + (index % columns),
       }} onFocusCapture={() => onSelect(inst.id)} onMouseDown={() => onSelect(inst.id)}>
         <div className="terminal-pane-controls">
-          {renaming === inst.id ? <input autoFocus aria-label={`Name for ${inst.id}`} value={inst.label} maxLength={80} onChange={(e) => onRename(inst.id, e.target.value)} onBlur={() => setRenaming(null)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") setRenaming(null); }} /> : <span className="terminal-pane-name" title="Double-click to rename" onDoubleClick={() => setRenaming(inst.id)}>{inst.label}</span>}
-          <button className="terminal-icon-button terminal-record" type="button" aria-label={recorded.has(inst.id) ? "Stop recording" : "Record transcript"} aria-pressed={recorded.has(inst.id)} title={recorded.has(inst.id) ? "Stop recording transcript" : "Record transcript — output may contain secrets"} onClick={() => setRecorded((prev) => { const next = new Set(prev); next.has(inst.id) ? next.delete(inst.id) : next.add(inst.id); return next; })}><TerminalIcon kind="record" /></button>
+          {renaming === inst.id ? <input autoFocus aria-label={`Name for ${inst.id}`} value={renameDraft} maxLength={80} onChange={(e) => setRenameDraft(e.target.value)} onBlur={() => commitRename(inst.id)} onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") commitRename(inst.id); if (e.key === "Escape") setRenaming(null); }} /> : <span className="terminal-pane-name" title="Double-click to rename" onDoubleClick={() => beginRename(inst)}>{inst.label}</span>}
+          <button className="terminal-icon-button" type="button" aria-label={`Rename ${inst.label}`} title="Rename terminal" onClick={() => beginRename(inst)}>✎</button>
+          <button className="terminal-icon-button terminal-record" type="button" aria-label={!recordingDisabled.has(inst.id) ? "Stop recording" : "Record transcript"} aria-pressed={!recordingDisabled.has(inst.id)} title={!recordingDisabled.has(inst.id) ? "Stop recording transcript" : "Record transcript — output may contain secrets"} onClick={() => setRecordingDisabled((prev) => { const next = new Set(prev); next.has(inst.id) ? next.delete(inst.id) : next.add(inst.id); return next; })}><TerminalIcon kind="record" /></button>
           <button className="terminal-icon-button" type="button" aria-label={inEditor ? "Show files" : `Move ${inst.label} to editor`} title={inEditor ? "Restore file editor" : "Move terminal to editor"} aria-pressed={inEditor} onClick={() => onEditorTerminal(inEditor ? null : inst.id)}><TerminalIcon kind={inEditor ? "restore" : "expand"} /></button>
           <button className="terminal-icon-button" type="button" aria-label={`Close ${inst.label}`} title="Close terminal" onClick={() => onClose(inst.id)}><TerminalIcon kind="close" /></button>
         </div>
-        <div className="terminal-emulator-slot"><TerminalView instance={inst} rootPath={rootPath} active={inst.id === activeId} recording={recorded.has(inst.id)} /></div>
+        <div className="terminal-emulator-slot"><TerminalView instance={inst} rootPath={rootPath} active={inst.id === activeId} recording={!recordingDisabled.has(inst.id)} /></div>
       </div>;
     })}
   </div>;

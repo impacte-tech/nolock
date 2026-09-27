@@ -16,7 +16,7 @@ import ModelProvidersPanel from "./components/ModelProvidersPanel";
 import ChatModelPanel from "./components/ChatModelPanel";
 import FIMModelPanel from "./components/FIMModelPanel";
 import ToolsPanel from "./components/ToolsPanel";
-import AgentSessionsPanel from "./components/AgentSessionsPanel";
+import SessionsPanel from "./components/SessionsPanel";
 import McpPanel from "./components/McpPanel";
 import RlhfPanel from "./components/RlhfPanel";
 import SwitchyardPanel from "./components/SwitchyardPanel";
@@ -115,7 +115,7 @@ export default function App() {
   const [showChatModel, setShowChatModel] = useState(false);
   const [showFIMModel, setShowFIMModel] = useState(false);
   const [showTools, setShowTools] = useState(false);
-  const [showAgentSessions, setShowAgentSessions] = useState(false);
+  const [showSessions, setShowSessions] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [showRlhf, setShowRlhf] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -613,7 +613,7 @@ export default function App() {
           if (showFIMModel) setShowFIMModel(false);
           if (showTools) setShowTools(false);
           if (showMcp) setShowMcp(false);
-          if (showAgentSessions) setShowAgentSessions(false);
+          if (showSessions) setShowSessions(false);
           if (showSettings) setShowSettings(false);
           if (showTermMemory) { setShowTermMemory(false); }
           return;
@@ -885,7 +885,7 @@ export default function App() {
         if (showFIMModel) setShowFIMModel(false);
         if (showTools) setShowTools(false);
           if (showMcp) setShowMcp(false);
-          if (showAgentSessions) setShowAgentSessions(false);
+          if (showSessions) setShowSessions(false);
         if (showSettings) setShowSettings(false);
         if (showTermMemory) {
           setShowTermMemory(false);
@@ -899,7 +899,7 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, closeTerminal, cycleTerminal, activeTermId, showModelProviders, showChatModel, showFIMModel, showTools, showMcp, showAgentSessions, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch, showFaq]);
+  }, [openFolder, refreshFolder, createTerminal, closeTerminal, cycleTerminal, activeTermId, showModelProviders, showChatModel, showFIMModel, showTools, showMcp, showSessions, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch, showFaq]);
 
   // --- Menu ---
   const menus = [
@@ -930,13 +930,16 @@ export default function App() {
         { label: "New Terminal", action: () => createTerminal(), shortcut: "Ctrl+T, O" },
         { label: "Next Terminal", action: cycleTerminal, shortcut: "Ctrl+T, N" },
         { label: "Close Terminal", disabled: terminals.length === 0, action: () => { if (activeTermId) closeTerminal(activeTermId); }, shortcut: "Ctrl+T, W" },
-        { label: "Agent Sessions...", action: () => setShowAgentSessions(true) },
         { label: "Terminal Memory", action: () => setShowTermMemory(true), shortcut: "Ctrl+T, M" },
         ...terminals.map((t) => ({
           label: t.label,
           action: () => setActiveTermId(t.id),
         })),
       ],
+    },
+    {
+      label: "Sessions",
+      items: [{ label: "Search Sessions...", action: () => setShowSessions(true) }],
     },
     {
       label: "Browser",
@@ -1263,7 +1266,7 @@ export default function App() {
       <ModelProvidersPanel visible={showModelProviders} onClose={() => setShowModelProviders(false)} />
       <ChatModelPanel visible={showChatModel} onClose={() => setShowChatModel(false)} />
       <FIMModelPanel visible={showFIMModel} onClose={() => setShowFIMModel(false)} />
-      <AgentSessionsPanel visible={showAgentSessions} rootPath={rootPath} onClose={() => setShowAgentSessions(false)} />
+      <SessionsPanel visible={showSessions} rootPath={rootPath} onClose={() => setShowSessions(false)} />
       <McpPanel visible={showMcp} onClose={() => setShowMcp(false)} rootPath={rootPath} />
       <ToolsPanel visible={showTools} onClose={() => setShowTools(false)} rootPath={rootPath} />
       <HooksPanel visible={showHooks} onClose={() => setShowHooks(false)} rootPath={rootPath} />

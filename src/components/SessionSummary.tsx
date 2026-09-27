@@ -1,6 +1,11 @@
-import { readTerminalActivity, terminalDisplayText, type TerminalSessionEvent } from "../lib/terminalSessions";
+import { MarkdownContent } from "./ChatPanel";
+import { readTerminalActivity, terminalLogEntries, type TerminalSessionEvent } from "../lib/terminalSessions";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
+  readAgentConversation,
+  agentConversationLabel,
+  conversationSelectionKey,
+  type AgentConversation,
   type SessionRecord,
   type SessionLogMessage,
   summarizeUsage,
@@ -31,28 +36,11 @@ interface Props {
   onClose: () => void;
 }
 
-const PREVIEW_CHARS = 400;
+const PREVIEW_CHARS = 1600;
 
 function truncateText(s: string, max: number): string {
   const t = s.replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max)}…` : t;
-}
-
-/** One tool call row in the message log. */
-function ToolCallRow({ call }: { call: { name: string; arguments: string } }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="session-summary-toolcall">
-      <span className="session-summary-toolcall-chevron">{open ? "\u25BC" : "\u25B6"}</span>
-      <span className="session-summary-toolcall-name">{call.name}</span>
-      {!open && call.arguments && (
-        <span className="session-summary-toolcall-summary">{truncateText(call.arguments, 80)}</span>
-      )}
-      {open && call.arguments && (
-        <pre className="session-summary-toolcall-args">{call.arguments}</pre>
-      )}
-    </div>
-  );
 }
 
 /** A single message entry in the log. */
@@ -61,9 +49,9 @@ function LogMessage({ msg }: { msg: NonNullable<SessionRecord["messages"]>[numbe
   const raw = msg.displayContent || msg.content || "";
   const showToggle = raw.length > PREVIEW_CHARS;
   return (
-    <div className={`session-summary-msg session-summary-msg-${msg.role}`}>
+    <article aria-label={msg.role === "user" ? "User prompt" : msg.role === "assistant" ? "Model response" : "System message"} className={`session-summary-msg session-summary-msg-${msg.role}`}>
       <div className="session-summary-msg-header">
-        <span className={`session-summary-msg-role ${msg.role}`}>{msg.role}</span>
+        <span className={`session-summary-msg-role ${msg.role}`}>{msg.role === "user" ? "You" : msg.role === "assistant" ? "Model" : "System"}</span>
         {msg.model && <span className="session-summary-msg-model" title={msg.model}>{msg.model}</span>}
         {msg.tokens != null && msg.tokens > 0 && (
           <span className="session-summary-msg-tokens">{msg.tokens.toLocaleString()} tok</span>
@@ -72,26 +60,21 @@ function LogMessage({ msg }: { msg: NonNullable<SessionRecord["messages"]>[numbe
           {msg.createdAt ? formatSessionTime(msg.createdAt) : ""}
         </span>
       </div>
-      {raw && (
-        <div className="session-summary-msg-body" onClick={() => showToggle && setExpanded((e) => !e)}>
-          {showToggle ? (
-            <p className="session-summary-msg-text">
-              {expanded ? raw : truncateText(raw, PREVIEW_CHARS)}
-              {!expanded && <span className="session-summary-msg-more"> (click to expand)</span>}
-            </p>
-          ) : (
-            <p className="session-summary-msg-text">{raw}</p>
-          )}
+      {raw && <>
+        <div className={`session-summary-msg-body${showToggle && !expanded ? " session-summary-msg-collapsed" : ""}`}>
+          {msg.role === "assistant" ? <MarkdownContent text={raw} /> : <p className="session-summary-msg-text">{raw}</p>}
         </div>
-      )}
+        {showToggle && <button className="session-message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "Show less" : "Show full message"}</button>}
+      </>}
+      {msg.reasoning && <details className="session-summary-reasoning"><summary>Reasoning</summary><p className="session-summary-msg-text">{msg.reasoning}</p></details>}
       {msg.toolCalls && msg.toolCalls.length > 0 && (
         <div className="session-summary-toolcalls">
           {msg.toolCalls.map((tc, i) => (
-            <ToolCallRow key={i} call={tc} />
+            <ToolCallLogRow key={i} call={tc} />
           ))}
         </div>
       )}
-    </div>
+    </article>
   );
 }
 
@@ -500,9 +483,28 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
     const timer = setInterval(refresh, 2000);
     return () => { cancelled = true; clearInterval(timer); window.removeEventListener("nolock:terminal-session-updated", refresh); };
   }, [rootPath, session.id]);
+  const nativeLabel = agentConversationLabel(session.agent?.name);
+  const [native, setNative] = useState<AgentConversation | null>(null);
+  const [nativeError, setNativeError] = useState("");
+  const [nativeRevision, setNativeRevision] = useState(0);
+  useEffect(() => {
+    setNative(null); setNativeError("");
+    if (!nativeLabel) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try { const result = await readAgentConversation(rootPath, session.id); if (!cancelled) { setNative(result); setNativeError(""); } }
+      catch (e) { if (!cancelled) setNativeError(String(e)); }
+      finally { if (!cancelled) timer = setTimeout(refresh, 2000); }
+    };
+    void refresh();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [rootPath, session.id, nativeLabel, nativeRevision]);
   const terminals = [...new Set(terminalEvents.map((event) => event.terminalId))];
   const usageSummary = summarizeUsage(session.usage);
-  const messages = session.messages ?? [];
+  const messages = native?.selectedId ? native.messages : session.messages ?? [];
+  const recordedEntries = useMemo(() => terminalLogEntries(terminalEvents), [terminalEvents]);
+  const terminalEntries = native?.selectedId ? [] : recordedEntries;
   // Session-wide search — filters the tool call log, changed files and chat log.
   const [query, setQuery] = useState("");
   const isMatch = useMemo(() => makeMatcher(query), [query]);
@@ -515,13 +517,17 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
       (m) =>
         isMatch(m.displayContent) ||
         isMatch(m.content) ||
-        isMatch(m.model) ||
+        isMatch(m.model) || isMatch(m.reasoning) ||
         (m.toolCalls ?? []).some(
           (tc) =>
             isMatch(tc.name) || isMatch(tc.arguments) || isMatch(tc.result_snippet) || isMatch(tc.result_full),
         ),
     );
   }, [messages, searching, isMatch]);
+
+  const visibleTerminalEntries = terminalEntries.filter(entry => isMatch(entry.text) || isMatch(entry.label));
+  const logCount = messages.length + terminalEntries.length;
+  const visibleLogCount = visibleMessages.length + visibleTerminalEntries.length;
 
   // The overlay fills the whole window and only closes via its X button —
   // no Escape or click-outside handling.
@@ -542,8 +548,8 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
               {" · updated "}{formatSessionTime(session.updatedAt)}
             </span>
             <span className="session-summary-stats">
-              {session.messageCount} msg{session.messageCount === 1 ? "" : "s"}
-              {" · "}{session.toolCallCount} tool call{session.toolCallCount === 1 ? "" : "s"}
+              {messages.length} msg{messages.length === 1 ? "" : "s"}
+              {" · "}{messages.reduce((count, message) => count + (message.toolCalls?.length ?? 0), 0)} tool calls
               {session.contextWindow > 0 && (
                 <> {" · "}{formatTokens(session.tokenUsage)} / {formatTokens(session.contextWindow)} tok context</>
               )}
@@ -599,18 +605,17 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
           <div className="session-summary-section-title">Terminal activity</div>
           {session.agent ? <>
             <p>{session.agent.name} · {session.agent.terminalId} · {session.agent.cwd}</p>
-            <p>{session.agent.interrupted ? "Interrupted" : session.status === "active" ? "Running" : `Exited (${session.agent.exitCode ?? "unknown"})`}. Agent output is recorded automatically. Native conversation history remains managed by the coding agent; token usage is unavailable.</p>
+            <p>{session.agent.interrupted ? "Interrupted" : session.status === "active" ? "Running" : `Exited (${session.agent.exitCode ?? "unknown"})`}. Agent output is recorded automatically. Conversation history and recorded output appear in Conversation log below.</p>
             {session.agent.transcriptTruncated && <p role="status">Recording reached the 8 MiB limit. The agent continued running.</p>}
             {session.agent.recordingFailed && <p role="alert">Part of this session could not be recorded.</p>}
           </> : <p>Terminal activity attached to this chat session. Submissions count Enter presses.</p>}
           {terminalError && <p role="alert">Could not load terminal activity.</p>}
           {terminals.map((id) => {
             const events = terminalEvents.filter((event) => event.terminalId === id);
-            const output = terminalDisplayText(events.filter((event) => event.kind === "output").map((event) => event.text ?? "").join(""));
             return <details key={id}>
               <summary>{events[events.length - 1].label} · {events.filter((event) => event.kind === "input").length} submissions · {events.length} events</summary>
               <ul>{events.filter((event) => event.kind !== "output" && event.kind !== "input").map((event) => <li key={event.id}>{formatSessionTime(event.createdAt)} · {event.kind}</li>)}</ul>
-              {output ? <><p>{session.agent ? "Agent transcript" : "Opt-in transcript"}{output.length > 100000 ? " (last 100,000 characters)" : ""}</p><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 280, overflow: "auto" }}>{output.slice(-100000)}</pre></> : <p>No transcript recorded.</p>}
+
             </details>;
           })}
         </div>}
@@ -722,19 +727,37 @@ export default function SessionSummary({ session, onClose, rootPath = "" }: Prop
             Conversation log
             <span className="session-summary-section-sub">
               {searching
-                ? `${visibleMessages.length} of ${messages.length} message${messages.length === 1 ? "" : "s"} match${visibleMessages.length === 1 ? "es" : ""}`
-                : `${messages.length} message${messages.length === 1 ? "" : "s"} — user prompts and tool calls are logged without exception`}
+                ? `${visibleLogCount} of ${logCount} entries match`
+                : `${messages.length} messages${terminalEntries.length ? ` · ${terminalEntries.length} terminal output block${terminalEntries.length === 1 ? "" : "s"}` : ""}`}
+              {native?.selectedId ? ` · ${nativeLabel} conversation history` : ""}
             </span>
           </div>
-          {messages.length === 0 ? (
-            <div className="session-summary-empty">No messages logged yet.</div>
-          ) : visibleMessages.length === 0 ? (
+          {nativeLabel && <div className="session-conversation-source">
+            {nativeError && <p role="alert">{nativeError}</p>}
+            {native?.warning && <p role="status">{native.warning}</p>}
+            {!!native?.candidates.length && <label>{nativeLabel} conversation
+              <select aria-label={`${nativeLabel} conversation`} value={native.selectedId ?? ""} onChange={e => {
+                try { localStorage.setItem(conversationSelectionKey(rootPath, session.id), e.target.value); } catch {}
+                setNativeRevision(n => n + 1);
+              }}><option value="" disabled>Select a conversation</option>{native.candidates.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.title} · {formatSessionTime(candidate.createdAt)} · {candidate.id.slice(-8)}</option>)}</select>
+            </label>}
+            {native && !native.selectedId && <p>{native.candidates.length ? "Multiple conversations overlap this recording. Select the correct conversation above." : "No structured conversation found for this recording yet."}</p>}
+            {native?.selectedId && <p>Matched by working directory and recording time. Native history may include earlier messages from a resumed conversation.</p>}
+          </div>}
+          {native?.selectedId && recordedEntries.length > 0 && <details className="session-conversation-source"><summary>Original terminal recording</summary>{recordedEntries.filter(entry => isMatch(entry.text) || isMatch(entry.label)).map(entry => <div key={entry.id}><small>{entry.label} · {formatSessionTime(entry.createdAt)}</small><pre className="session-terminal-output">{entry.text}</pre></div>)}</details>}
+          {logCount === 0 ? (
+            <div className="session-summary-empty">{session.agent ? "Waiting for conversation messages or recorded terminal output." : "No messages logged yet."}</div>
+          ) : visibleLogCount === 0 ? (
             <div className="session-summary-empty">No messages match &ldquo;{query.trim()}&rdquo;.</div>
           ) : (
             <div className="session-summary-messages">
-              {visibleMessages.map((m, i) => (
-                <LogMessage key={i} msg={m} />
-              ))}
+              {[
+                ...visibleMessages.map((msg, i) => ({ key: `message-${i}`, time: msg.createdAt ?? session.createdAt, node: <LogMessage msg={msg} /> })),
+                ...visibleTerminalEntries.map(entry => ({ key: `terminal-${entry.id}`, time: entry.createdAt, node: <div className="session-summary-msg session-summary-msg-terminal">
+                  <div className="session-summary-msg-header"><span className="session-summary-msg-role">Terminal output</span><span>{entry.label}</span><span className="session-summary-msg-time">{formatSessionTime(entry.createdAt)}</span></div>
+                  <details><summary>View recorded output ({entry.text.length.toLocaleString()} characters)</summary><pre className="session-terminal-output">{entry.text}</pre></details>
+                </div> })),
+              ].sort((a, b) => a.time - b.time).map(entry => <div key={entry.key}>{entry.node}</div>)}
             </div>
           )}
         </div>

@@ -5,6 +5,8 @@ src-tauri/target/
 *.vsix
 .planning/
 .sessions/
+.faq/*.db
+.faq/*.db-*
 src-tauri/gen/
 .venv-rlhf/
 # Local UI preview harnesses (unbuilt component scratch previews)

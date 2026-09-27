@@ -4928,25 +4928,29 @@ select.field-input {
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  /* Keep content clear of the scrollbar and the section edge. */
-  padding-right: 8px;
+  gap: 24px;
+  /* Reserve scrollbar space so live updates never shift message widths. */
+  scrollbar-gutter: stable;
+  padding: 12px 12px 20px 0;
 }
 
 .session-summary-msg {
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: 10px;
+  padding: 16px 18px;
   background: var(--bg-surface);
   flex-shrink: 0;
 }
 
 .session-summary-msg-user {
-  border-left: 2px solid var(--accent);
+  border-left: 3px solid var(--accent);
+  margin-left: 28px;
+  background: var(--bg-secondary);
 }
 
 .session-summary-msg-assistant {
-  border-left: 2px solid var(--text-muted);
+  border-left: 3px solid var(--text-muted);
+  margin-right: 28px;
 }
 
 .session-summary-msg-system {
@@ -4955,9 +4959,10 @@ select.field-input {
 
 .session-summary-msg-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 14px;
 }
 
 .session-summary-msg-role {
@@ -5006,13 +5011,29 @@ select.field-input {
 }
 
 .session-summary-msg-body {
-  cursor: pointer;
+  cursor: text;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.session-summary-msg-collapsed { max-height: 24rem; overflow: hidden; mask-image: linear-gradient(to bottom, black 85%, transparent); }
+.session-message-expand { margin-top: 12px; padding: 5px 0; border: 0; background: transparent; color: var(--accent); font: inherit; cursor: pointer; }
+.session-message-expand:focus-visible { outline: 1px solid var(--accent); outline-offset: 4px; }
+.session-summary-msg-body .chat-markdown { font-size: 13px; line-height: 1.75; }
+.session-summary-msg-body .chat-markdown > :first-child { margin-top: 0; }
+.session-summary-msg-body .chat-markdown > :last-child { margin-bottom: 0; }
+.session-summary-msg-body .chat-markdown p { margin: 0 0 14px; }
+.session-summary-msg-body .chat-markdown ul, .session-summary-msg-body .chat-markdown ol { margin: 12px 0; padding-left: 24px; }
+.session-summary-msg-body .chat-markdown li + li { margin-top: 6px; }
+.session-summary-msg-body .chat-markdown pre { padding: 14px; margin: 16px 0; line-height: 1.6; overflow-x: auto; }
+@media (max-width: 760px) {
+  .session-summary-msg-user, .session-summary-msg-assistant { margin-left: 0; margin-right: 0; }
+  .session-summary-msg { padding: 14px; }
 }
 
 .session-summary-msg-text {
   margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.75;
   color: var(--text-primary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -5024,7 +5045,7 @@ select.field-input {
 }
 
 .session-summary-toolcalls {
-  margin-top: 6px;
+  margin-top: 16px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -5872,3 +5893,16 @@ select.field-input {
 .agent-usage th, .agent-usage td { padding: 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
 .agent-usage th:first-child { text-align: left; white-space: normal; overflow-wrap: anywhere; min-width: 140px; }
 .agent-usage th small { display: block; color: var(--text-muted); font-weight: normal; }
+
+.sessions-search { display: flex; gap: 8px; }
+.sessions-search input { flex: 1; min-width: 0; }
+.sessions-search input, .sessions-search select, .workspace-git-create input { padding: 8px; color: var(--text-primary); background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 4px; }
+.session-match { white-space: pre-wrap; overflow-wrap: anywhere; }
+.workspace-git-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
+.workspace-git-create { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); }
+.workspace-git-create label { display: flex; flex-direction: column; gap: 4px; }
+.session-conversation-source { padding: 10px 0; font-size: 12px; color: var(--text-muted); }
+.session-conversation-source label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.session-conversation-source select { min-width: 0; max-width: 100%; padding: 6px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border); }
+.session-summary-reasoning { padding: 8px 0; color: var(--text-muted); }
+.session-terminal-output { padding: 16px; margin: 12px 0 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); line-height: 1.75; tab-size: 4; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; font-size: 12px; }

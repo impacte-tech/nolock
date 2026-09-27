@@ -37,12 +37,9 @@ import {
   serializeToolCalls,
 } from "../lib/rlhf";
 import {
-  type SessionRecord,
   type SessionUsageEntry,
   newSessionId,
-  listSessions,
   saveSession,
-  deleteSession,
   archiveSession,
   summarizeMessages,
   buildSessionMetadata,
@@ -50,9 +47,7 @@ import {
   enrichUsage,
   summarizeUsage,
   formatTokens,
-  formatSessionTime,
 } from "../lib/sessions";
-import SessionSummary from "./SessionSummary";
 import {
   type ChatMode,
   composeChatSystemPrompt,
@@ -459,98 +454,6 @@ function formatBytes(bytes: number): string {
 }
 
 /** Custom session history dropdown — matches the app's monochrome panel style. */
-function SessionPicker({
-  sessions,
-  currentId,
-  currentTitle,
-  onNew,
-  onDelete,
-  onSelect,
-}: {
-  sessions: SessionRecord[];
-  currentId: string;
-  currentTitle: string;
-  onNew: () => void;
-  onDelete: (id: string) => void;
-  onSelect: (s: SessionRecord) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
-
-  return (
-    <div className="session-picker" ref={rootRef}>
-      <button
-        className="session-picker-toggle"
-        onClick={() => setOpen((o) => !o)}
-        title="Sessions"
-      >
-        <span className="session-picker-toggle-title">{currentTitle || "New session"}</span>
-        <span className="session-picker-toggle-chevron">{open ? "\u25BE" : "\u25B8"}</span>
-      </button>
-      {open && (
-        <div className="session-picker-menu">
-          <button
-            className="session-picker-new"
-            onClick={() => { onNew(); setOpen(false); }}
-          >
-            + New session
-          </button>
-          <div className="session-picker-list">
-            {sessions.map((s) => (
-              <div
-                key={s.id}
-                className={`session-picker-item${s.id === currentId ? " current" : ""}`}
-              >
-                <div className="session-picker-item-main" onClick={() => { onSelect(s); setOpen(false); }}>
-                  <span className="session-picker-item-title">
-                    {s.summary || s.firstMessage || s.id}
-                  </span>
-                  <span className="session-picker-item-meta">
-                    {formatSessionTime(s.updatedAt)}
-                    {s.agent ? ` · ${s.agent.name} · ${s.status} · ${s.agent.terminalId}` : ` · ${s.messageCount} msgs · ${s.toolCallCount} tools`}
-                    {s.totalCost != null && s.totalCost >= 0.000001
-                      ? ` · ~$${s.totalCost.toFixed(4)}`
-                      : ""}
-                  </span>
-                  {s.contextWindow > 0 && (
-                    <span className="session-picker-item-tokens">
-                      {formatTokens(s.tokenUsage)} / {formatTokens(s.contextWindow)} tok
-                    </span>
-                  )}
-                </div>
-                <button
-                  className="session-picker-delete"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(s.id);
-                  }}
-                  title="Delete session"
-                >
-                  &times;
-                </button>
-              </div>
-            ))}
-            {sessions.length === 0 && (
-              <div className="session-picker-empty">No saved sessions yet</div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function DiffBlock({ oldText, newText }: { oldText: string; newText: string }) {
   const lines = diffLines(oldText, newText);
   return (
@@ -1634,18 +1537,8 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
 
   // ---- Sessions: project-local conversation persistence --------------------
   const [sessionId, setSessionId] = useState<string>("");
-  const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const createdAtRef = useRef<Record<string, number>>({});
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The session summary overlay shows the CURRENT persisted record — derived
-  // from the sessions list (which is refreshed after every save) instead of a
-  // snapshot taken at click time. This keeps an open summary live: tool calls
-  // and token usage persisted mid-turn appear without closing/re-opening.
-  const [summarySessionId, setSummarySessionId] = useState<string | null>(null);
-  const summarySession = useMemo(
-    () => (summarySessionId ? sessions.find((s) => s.id === summarySessionId) ?? null : null),
-    [summarySessionId, sessions],
-  );
   // Per-request / per-iteration token usage accumulated for the current session
   // (provider + model split). Persisted in the session file for cost accounting.
   const usageLogRef = useRef<SessionUsageEntry[]>([]);
@@ -1707,7 +1600,6 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
         usage: detailed,
         totalCost: summary.totalCost,
       });
-      setSessions(await listSessions(rootPath));
     } catch (e) {
       console.error("[sessions] save failed:", e);
     }
@@ -1775,45 +1667,11 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
     // A fresh session resets each sub-agent's conversation memory on the
     // backend so the next @agent trigger starts with clean context.
     try { await invoke("subagent_reset"); } catch {}
-    try { setSessions(await listSessions(rootPath)); } catch {}
   }, [rootPath, sessionId, messages, accumulatedContextTokens, maxTokens, persistSession]);
 
-  /** Delete a session by id. If it's the current one, start a fresh session. */
-  const deleteSessionById = useCallback(async (id: string) => {
-    if (id === sessionId) {
-      // Invalidate in-flight requests for the deleted session and cancel any
-      // pending auto-save so the deleted conversation can't be re-persisted.
-      sendEpochRef.current += 1;
-      stopRequestedRef.current = false;
-      if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
-      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
-      const newId = newSessionId();
-      setActiveSessionId(rootPath, newId);
-    sessionIdRef.current = newId;
-      createdAtRef.current[newId] = Math.floor(Date.now() / 1000);
-      setSessionId(newId);
-      setMessages([]);
-      setAccumulatedContextTokens(0);
-      setThinkingText("");
-      setRoutedModel(null);
-      routedModelRef.current = null;
-      usageLogRef.current = [];
-      setUsageLog([]);
-      sendingRef.current = false;
-      setLoading(false);
-      setChatBusy(false);
-      try { await invoke("subagent_reset"); } catch {}
-    }
-    await flushTerminalActivity();
-    try { await deleteSession(rootPath, id); } catch (e) { console.error(e); }
-    try { setSessions(await listSessions(rootPath)); } catch {}
-  }, [rootPath, sessionId]);
-
-  // Load the session history and start a fresh session on mount / when the
-  // project folder changes. (Messages are not restored — only metadata.)
+  // Join the active session on mount and start a fresh session on project changes.
   const mountedRootRef = useRef<string | null>(null);
   useEffect(() => {
-    let cancelled = false;
     const isProjectSwitch = mountedRootRef.current !== null && mountedRootRef.current !== rootPath;
     mountedRootRef.current = rootPath;
     if (isProjectSwitch) {
@@ -1829,17 +1687,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
     sessionIdRef.current = newId;
     createdAtRef.current[newId] ??= Math.floor(Date.now() / 1000);
     setSessionId(newId);
-    void listSessions(rootPath).then((list) => { if (!cancelled) setSessions(list); })
-      .catch((e) => console.error("[sessions] load failed:", e));
-    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rootPath]);
-
-  useEffect(() => {
-    const refresh = () => { void listSessions(rootPath).then(setSessions).catch(() => {}); };
-    window.addEventListener("nolock:terminal-session-updated", refresh);
-    const timer = setInterval(refresh, 3000);
-    return () => { clearInterval(timer); window.removeEventListener("nolock:terminal-session-updated", refresh); };
   }, [rootPath]);
 
   // Auto-save the current session (debounced) whenever the conversation changes
@@ -3013,20 +2861,6 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
           )}
         </div>
         <div className="chat-header-actions">
-          {rootPath && (
-            <SessionPicker
-              sessions={sessions}
-              currentId={sessionId}
-              currentTitle={
-                sessions.find((s) => s.id === sessionId)?.summary
-                || summarizeMessages(messages)
-                || "New session"
-              }
-              onNew={() => void startNewSession()}
-              onDelete={(id) => void deleteSessionById(id)}
-              onSelect={(s) => setSummarySessionId(s.id)}
-            />
-          )}
           {rootPath && onOpenAgentManager && (
             <button className="chat-header-btn" onClick={onOpenAgentManager} title="Manage AI Agents">
               <svg className="robot-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -3569,13 +3403,7 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
           {loading ? "Thinking..." : dpoPending ? "Choose response..." : hookBusy ? "Hook running..." : "Send"}
         </button>
       </div>
-      {summarySession && (
-        <SessionSummary
-          session={summarySession}
-          rootPath={rootPath}
-          onClose={() => setSummarySessionId(null)}
-        />
-      )}
+
     </div>
   );
 }

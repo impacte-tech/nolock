@@ -251,3 +251,71 @@ describe("SessionSummary", () => {
     });
   });
 });
+
+it("shows structured OpenCode messages, reasoning and tools in Conversation log", async () => {
+  resetTauriMocks();
+  const agent = { name: "opencode", terminalId: "t1", cwd: "/project", pid: 1, exitCode: null, transcriptTruncated: false };
+  mockInvoke.mockImplementation(async command => {
+    if (command === "read_agent_conversation") return { candidates: [{ id: "native-one", title: "Quick check-in", createdAt: 1 }], selectedId: "native-one", messages: [
+      { role: "user", content: "hey are you there?", createdAt: 1 },
+      { role: "assistant", content: "Yes, I am here!", reasoning: "Checking the request", createdAt: 2, toolCalls: [{ name: "read_file", arguments: '{"path":"a.txt"}', result_full: "file body" }] },
+    ] };
+    return [];
+  });
+  const { container } = render(<SessionSummary session={{ ...baseSession, agent, messages: [], messageCount: 0 }} rootPath="/project" onClose={vi.fn()} />);
+  await screen.findByText("hey are you there?");
+  const log = container.querySelector(".session-summary-section-log")!;
+  expect(log).toHaveTextContent("2 messages");
+  expect(log).toHaveTextContent("Yes, I am here!");
+  expect(log).toHaveTextContent("Reasoning");
+  expect(log).toHaveTextContent("read_file");
+  expect(screen.queryByText("No messages logged yet.")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText("Search messages, tool calls, files…"), { target: { value: "Checking the request" } });
+  expect(log).toHaveTextContent("Yes, I am here!");
+  expect(log).not.toHaveTextContent("hey are you there?");
+});
+
+it("organizes terminal-only output under Conversation log and strips terminal protocol noise", async () => {
+  resetTauriMocks();
+  mockInvoke.mockImplementation(async command => command === "read_terminal_session_events" ? [
+    { id: "1", terminalId: "t1", label: "Build", kind: "output", createdAt: 1, text: "\u001bP+q4d73\u001b\\\u001b_Gi=31337;AAAA\u001b\\\u001b[32mBuild " },
+    { id: "2", terminalId: "t1", label: "Build", kind: "output", createdAt: 2, text: "complete\u001b[0m\n" },
+  ] : []);
+  const { container } = render(<SessionSummary session={{ ...baseSession, messages: [], messageCount: 0 }} rootPath="/project" onClose={vi.fn()} />);
+  await screen.findByText("Build complete");
+  const log = container.querySelector(".session-summary-section-log")!;
+  expect(log).toHaveTextContent("1 terminal output block");
+  expect(log).toHaveTextContent("Terminal output");
+  expect(log).not.toHaveTextContent("AAAA");
+  expect(log).not.toHaveTextContent("q4d73");
+  expect(screen.queryByText("No messages logged yet.")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText("Search messages, tool calls, files…"), { target: { value: "missing" } });
+  expect(log).not.toHaveTextContent("Build complete");
+});
+
+it("requires selection for overlapping OpenCode histories", async () => {
+  resetTauriMocks(); localStorage.clear();
+  mockInvoke.mockImplementation(async (command, args) => {
+    if (command === "read_agent_conversation") return { candidates: [{ id: "one", title: "One", createdAt: 1 }, { id: "two", title: "Two", createdAt: 2 }], selectedId: args.nativeId, messages: args.nativeId ? [{ role: "assistant", content: "Selected history" }] : [] };
+    return [];
+  });
+  render(<SessionSummary session={{ ...baseSession, messages: [], agent: { name: "opencode", terminalId: "t", cwd: "/project", pid: 1, exitCode: null, transcriptTruncated: false } }} rootPath="/project" onClose={vi.fn()} />);
+  await screen.findByText(/Multiple conversations overlap/);
+  fireEvent.change(screen.getByLabelText("OpenCode conversation"), { target: { value: "two" } });
+  await screen.findByText("Selected history");
+  expect(mockInvoke).toHaveBeenCalledWith("read_agent_conversation", { rootPath: "/project", sessionId: "s_test", nativeId: "two" });
+});
+
+it("renders separate readable prompts and model paragraphs, lists and code", () => {
+  resetTauriMocks(); mockInvoke.mockResolvedValue([]);
+  const { container } = render(<SessionSummary session={{ ...baseSession, messages: [
+    { role: "user", content: "First line\n\nSecond paragraph" },
+    { role: "assistant", content: "First answer paragraph.\n\nSecond answer paragraph.\n\n- One\n- Two\n\n```js\nconst answer = 42;\n```" },
+  ] }} rootPath="/project" onClose={vi.fn()} />);
+  expect(screen.getByRole("article", { name: "User prompt" })).toHaveTextContent("You");
+  expect(screen.getByRole("article", { name: "Model response" })).toHaveTextContent("Model");
+  expect(container.querySelector(".session-summary-msg-user p")?.textContent).toBe("First line\n\nSecond paragraph");
+  expect(container.querySelectorAll(".session-summary-msg-assistant .chat-markdown p")).toHaveLength(2);
+  expect(container.querySelectorAll(".session-summary-msg-assistant li")).toHaveLength(2);
+  expect(container.querySelector(".session-summary-msg-assistant pre code")).toHaveTextContent("const answer = 42;");
+});

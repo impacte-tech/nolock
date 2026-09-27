@@ -438,6 +438,7 @@ it("exposes MCP and agent sessions without a Secrets menu", async () => {
   fireEvent.keyDown(window, {key:"Escape"});
   expect(screen.queryByRole("dialog", {name:"MCP"})).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", {name:"Terminal"}));
-  fireEvent.click(screen.getByText("Agent Sessions..."));
-  expect(screen.getByRole("dialog", {name:"Terminal agent sessions"})).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Sessions"));
+  fireEvent.click(screen.getByText("Search Sessions..."));
+  expect(screen.getByRole("dialog", {name:"Sessions"})).toBeInTheDocument();
 });

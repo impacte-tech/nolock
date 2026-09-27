@@ -1,4 +1,4 @@
-//! Read-only workspace Git state; independent of session timestamps.
+//! Workspace Git state and explicit branch/worktree creation.
 use serde::Serialize;
 use std::{path::{Path, Component}, process::{Command, Stdio}, io::Read};
 const LIMIT: u64 = 2 * 1024 * 1024;
@@ -37,6 +37,35 @@ fn parse(output: &str) -> Vec<FileStatus> {
     }
     files.sort_by(|a,b| a.path.cmp(&b.path)); files
 }
+/// Explicit UI action: create a branch in this checkout or a new worktree.
+#[tauri::command]
+pub fn git_workspace_create(root_path: String, branch: String, worktree_path: Option<String>) -> Result<String, String> {
+    let top = super::git_toplevel(&root_path)?;
+    let branch = branch.trim();
+    if branch.is_empty() || branch.starts_with('-') || branch.len() > 200 {
+        return Err("Enter a valid branch name.".into());
+    }
+    // Validate the literal ref, rejecting revision expressions such as @{-1}.
+    let valid = Command::new("git").current_dir(&top)
+        .args(["check-ref-format", &format!("refs/heads/{branch}")]).output().map_err(|e| e.to_string())?;
+    if !valid.status.success() || branch == "HEAD" { return Err("Enter a valid branch name.".into()); }
+    let mut command = Command::new("git");
+    command.current_dir(&top);
+    let message = if let Some(destination) = worktree_path {
+        if destination.trim().is_empty() { return Err("Enter a worktree folder.".into()); }
+        let destination = Path::new(destination.trim());
+        let destination = if destination.is_absolute() { destination.to_path_buf() } else { top.join(destination) };
+        command.args(["worktree", "add", "-b", branch, "--"]).arg(&destination).arg("HEAD");
+        format!("Created {branch} in {}", destination.display())
+    } else {
+        command.args(["switch", "-c", branch]);
+        format!("Switched to {branch}")
+    };
+    let output = command.output().map_err(|e| format!("Unable to start Git: {e}"))?;
+    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()); }
+    Ok(message)
+}
+
 #[tauri::command]
 pub fn git_workspace_status(root_path: String) -> Result<Status, String> {
     let top = super::git_toplevel(&root_path).map_err(|_| "This folder is not inside a Git working tree.".to_string())?;
@@ -68,6 +97,23 @@ pub fn git_workspace_diff(root_path: String, path: String, area: String) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn creates_branches_and_worktrees_without_overwriting_existing_branches() {
+        let root = std::env::temp_dir().join(format!("nolock-create-git-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init"], false).unwrap();
+        git(&root, &["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-m", "initial"], false).unwrap();
+        let r = root.to_string_lossy().to_string();
+        git_workspace_create(r.clone(), "feat/example".into(), None).unwrap();
+        assert_eq!(git_workspace_status(r.clone()).unwrap().branch, "feat/example");
+        assert!(git_workspace_create(r.clone(), "feat/example".into(), None).is_err());
+        assert!(git_workspace_create(r.clone(), "--detach".into(), None).is_err());
+        assert!(git_workspace_create(r.clone(), "@{-1}".into(), None).is_err());
+        let destination = root.join("separate worktree");
+        git_workspace_create(r.clone(), "feat/worktree".into(), Some(destination.to_string_lossy().to_string())).unwrap();
+        assert_eq!(git_workspace_status(destination.to_string_lossy().to_string()).unwrap().branch, "feat/worktree");
+        assert_eq!(git_workspace_status(r).unwrap().branch, "feat/example");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test] fn parses_renames_conflicts_and_unusual_paths() {
         let files = parse("RM new name\0old name\0?? :(glob)*\0UU conflict\0 M line\nbreak\0");
         assert_eq!(files.len(),4);
