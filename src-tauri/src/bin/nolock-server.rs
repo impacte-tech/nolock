@@ -783,11 +783,6 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             web_python_create_env(&state.hub, a.root_path, a.name)
         }
 
-        // ----- Browser panel: needs a native webview, desktop only
-        "create_browser_webview" | "close_browser_webview" | "update_browser_webview" => Err(
-            "The browser panel requires the nolock desktop app (native webview)".to_string(),
-        ),
-
         _ => Err(format!("Unknown command: {command}")),
     }
 }

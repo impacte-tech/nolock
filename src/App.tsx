@@ -10,7 +10,7 @@ import FolderIcon from "./components/FolderIcon";
 import Editor from "./components/Editor";
 import { TerminalWorkspace, type TerminalInstance } from "./components/Terminal";
 import ChatPanel from "./components/ChatPanel";
-import BrowserPanel from "./components/BrowserPanel";
+import { open as openExternal } from "@tauri-apps/plugin-shell";
 import MenuBar from "./components/MenuBar";
 import ModelProvidersPanel from "./components/ModelProvidersPanel";
 import ChatModelPanel from "./components/ChatModelPanel";
@@ -133,14 +133,6 @@ export default function App() {
   // --- Markdown preview: set of file paths currently showing rendered preview ---
   const [markdownPreviewFiles, setMarkdownPreviewFiles] = useState<Set<string>>(new Set());
 
-  // --- Browser panel ---
-  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
-
-  // --- Resize epoch: incremented after every drag-end to trigger a final
-  //     position sync on the browser webview (like a "page reload" for
-  //     just the webview, not the whole app). --------------------------
-  const [resizeEpoch, setResizeEpoch] = useState(0);
-
   // --- Resizable panel proportions (flex-grow values, sum = 100) ---
   // Using integer "points" that sum to 100 for the outer row layout.
   const [explorerPts, setExplorerPts] = useState(18);
@@ -148,12 +140,10 @@ export default function App() {
 
   // Inner layouts use separate ratio spaces:
   const [terminalPts, setTerminalPts] = useState(25);  // vertical: editor vs terminal
-  const [browserPts, setBrowserPts] = useState(50);    // horizontal: editor vs browser
 
   // Refs for measuring parent containers during drag
   const mainAreaRef = useRef<HTMLDivElement>(null);
   const editorAreaRef = useRef<HTMLDivElement>(null);
-  const editorMainRef = useRef<HTMLDivElement>(null);
   const editorContentRef = useRef<HTMLDivElement>(null);
 
   // --- Split editor ---
@@ -269,25 +259,14 @@ export default function App() {
   const [gitPts, setGitPts] = useState(26);
   const [editorTerminalId, setEditorTerminalId] = useState<string | null>(null);
 
-  // --- Chord state: null | 'A' | 'T' | 'B' | 'E' | 'F'
+  // --- Chord state: null | 'A' | 'T' | 'E' | 'F'
   // 'A' = waiting for second key after Ctrl+A (AI shortcuts)
   // 'T' = waiting for second key after Ctrl+T (Terminal shortcuts)
-  // 'B' = waiting for second key after Ctrl+B (Browser shortcuts)
   const [chordPrefix, setChordPrefix] = useState<string | null>(null);
 
   // --- Terminal Memory ---
   const [showTermMemory, setShowTermMemory] = useState(false);
   const lastCommandRef = useRef<string>("");
-
-  // --- Open URL in browser panel (called from ChatPanel) ---
-  const openInBrowser = useCallback((url: string) => {
-    setBrowserUrl(url);
-  }, []);
-
-  // --- Close browser panel ---
-  const closeBrowser = useCallback(() => {
-    setBrowserUrl(null);
-  }, []);
 
   const terminalCountRef = useRef(terminals.length);
   terminalCountRef.current = terminals.length;
@@ -686,19 +665,6 @@ export default function App() {
           }
         }
 
-        if (chordPrefix === "B") {
-          if (e.key === "o" || e.key === "O") {
-            e.preventDefault();
-            setChordPrefix(null);
-            if (browserUrl) {
-              closeBrowser();
-            } else {
-              setBrowserUrl("https://google.com");
-            }
-            return;
-          }
-        }
-
         if (chordPrefix === "T") {
           if (e.key === "o" || e.key === "O") {
             e.preventDefault();
@@ -815,19 +781,6 @@ export default function App() {
         return;
       }
 
-      // Ctrl+B — Chord prefix for Browser shortcuts.
-      if (e.ctrlKey && !e.shiftKey && e.key === "b") {
-        e.preventDefault();
-        if (chordPrefix === "B") {
-          // Tapped twice quickly — cancel chord
-          setChordPrefix(null);
-        } else {
-          setChordPrefix("B");
-          setTimeout(() => setChordPrefix(null), 1500);
-        }
-        return;
-      }
-
       // Ctrl+F — Chord prefix for File/Search shortcuts.
       if (e.ctrlKey && !e.shiftKey && e.key === "f") {
         e.preventDefault();
@@ -893,7 +846,7 @@ export default function App() {
     // element-level keydown listeners can intercept/consume the event.
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [openFolder, refreshFolder, createTerminal, closeTerminal, cycleTerminal, activeTermId, showModelProviders, showChatModel, showFIMModel, showTools, showMcp, showSessions, showSettings, showAgentManager, chordPrefix, browserUrl, closeBrowser, showTermMemory, showSearch, showFaq]);
+  }, [openFolder, refreshFolder, createTerminal, closeTerminal, cycleTerminal, activeTermId, showModelProviders, showChatModel, showFIMModel, showTools, showMcp, showSessions, showSettings, showAgentManager, chordPrefix, showTermMemory, showSearch, showFaq]);
 
   // --- Menu ---
   const menus = [
@@ -936,12 +889,6 @@ export default function App() {
       items: [{ label: "Search Sessions...", action: () => setShowSessions(true) }],
     },
     {
-      label: "Browser",
-      items: [
-        { label: "Toggle Browser", action: () => browserUrl ? closeBrowser() : setBrowserUrl("https://google.com"), shortcut: "Ctrl+B, O" },
-      ],
-    },
-    {
       label: "AI Integrations",
       items: [
         { label: "Toggle Agent Chat", action: () => setShowChat((v) => !v), shortcut: "Ctrl+A, O" },
@@ -976,7 +923,6 @@ export default function App() {
   //
   const hasExplorer = showExplorer;
   const hasChat = showChat;
-  const hasBrowser = browserUrl !== null;
   const hasTerminal = terminals.length > 0;
 
   // Editor area gets whatever is left from the 100-point outer pool
@@ -991,8 +937,6 @@ export default function App() {
             <>Waiting for second key... (press <strong>O</strong> for Chat, <strong>G</strong> for Agents, <strong>H</strong> for Hooks, <strong>I</strong> for AI Settings, <strong>R</strong> for RLHF, <strong>L</strong> for .faq)</>
           ) : chordPrefix === "T" ? (
             <>Waiting for second key... (press <strong>O</strong> for Terminal, <strong>L</strong> for Local, <strong>N</strong> for Next, <strong>W</strong> for Close, <strong>M</strong> for Memory)</>
-          ) : chordPrefix === "B" ? (
-            <>Waiting for second key... (press <strong>O</strong> for Browser)</>
           ) : chordPrefix === "E" ? (
             <>Waiting for second key... (press <strong>O</strong> for Explorer, <strong>S</strong> for Editor Settings)</>
           ) : (
@@ -1037,7 +981,6 @@ export default function App() {
             <ResizableHandle
               direction="horizontal"
               onDrag={makeResizeHandler(setExplorerPts, 8, 50, mainAreaRef, "width", 100, false)}
-              onDragEnd={() => setResizeEpoch((e) => e + 1)}
             />
           </>
         )}
@@ -1047,16 +990,16 @@ export default function App() {
             rootPath={rootPath} terminalPercent={terminalPts} onSelect={setActiveTermId} onClose={closeTerminal}
             onCreate={() => createTerminal()} onEditorTerminal={setEditorTerminalId}
             onRename={(id, label) => setTerminals((prev) => prev.map((t) => t.id === id ? { ...t, label } : t))}
-            resizeHandle={<ResizableHandle direction="vertical" onDrag={makeResizeHandler(setTerminalPts, 8, 80, editorAreaRef, "height", 100, true)} onDragEnd={() => setResizeEpoch((e) => e + 1)} />}
+            resizeHandle={<ResizableHandle direction="vertical" onDrag={makeResizeHandler(setTerminalPts, 8, 80, editorAreaRef, "height", 100, true)} />}
           >
-          <div className={`editor-main ${hasBrowser ? "split" : ""}`} ref={editorMainRef}
+          <div className="editor-main"
             style={{ flex: "1 1 0", width: "100%" }}
           >
             <div
               className="editor-pane"
               ref={editorPaneRef}
               style={{
-                flex: hasBrowser ? ratioFlex(100 - browserPts) : "1 1 0",
+                flex: "1 1 0",
               }}
             >
               {/* Drop zone overlays */}
@@ -1112,7 +1055,6 @@ export default function App() {
                   <ResizableHandle
                     direction="horizontal"
                     onDrag={makeResizeHandler(setSplitRatio, 20, 80, editorContentRef, "width", 100, false)}
-                    onDragEnd={() => setResizeEpoch((e) => e + 1)}
                   />
 
                   {/* Right pane */}
@@ -1219,18 +1161,6 @@ export default function App() {
               )}
             </div>
 
-            {hasBrowser && (
-              <>
-                <ResizableHandle
-                  direction="horizontal"
-                  onDrag={makeResizeHandler(setBrowserPts, 20, 80, editorMainRef, "width", 100, true)}
-                  onDragEnd={() => setResizeEpoch((e) => e + 1)}
-                />
-                <div className="browser-pane" style={{ flex: ratioFlex(browserPts) }}>
-                  {!editorTerminalId && <BrowserPanel url={browserUrl!} onClose={closeBrowser} resizeEpoch={resizeEpoch} />}
-                </div>
-              </>
-            )}
           </div>
 
           </TerminalWorkspace>
@@ -1238,20 +1168,18 @@ export default function App() {
         </div>
 
         {showGit && <ResizableHandle direction="horizontal"
-          onDrag={makeResizeHandler(setGitPts, 18, 45, mainAreaRef, "width", 100, true)}
-          onDragEnd={() => setResizeEpoch((e) => e + 1)} />}
-        <WorkspaceGitPanel rootPath={rootPath} open={showGit} onToggle={() => { setShowGit((value) => !value); setResizeEpoch((e) => e + 1); }} style={{ flex: ratioFlex(gitPts) }} />
+          onDrag={makeResizeHandler(setGitPts, 18, 45, mainAreaRef, "width", 100, true)} />}
+        <WorkspaceGitPanel rootPath={rootPath} open={showGit} onToggle={() => setShowGit((value) => !value)} style={{ flex: ratioFlex(gitPts) }} />
 
         {hasChat && (
           <>
             <ResizableHandle
               direction="horizontal"
               onDrag={makeResizeHandler(setChatPts, 15, 55, mainAreaRef, "width", 100, true)}
-              onDragEnd={() => setResizeEpoch((e) => e + 1)}
             />
           </>
         )}
-        <ChatPanel onRunShell={runShellCommand} onClose={() => setShowChat(false)} onOpenUrl={openInBrowser} rootPath={rootPath} style={{ flex: ratioFlex(chatPts), display: hasChat ? undefined : "none" }} onOpenAgentManager={() => setShowAgentManager(true)} />
+        <ChatPanel onRunShell={runShellCommand} onClose={() => setShowChat(false)} onOpenUrl={(url) => { void openExternal(url).catch(console.error); }} rootPath={rootPath} style={{ flex: ratioFlex(chatPts), display: hasChat ? undefined : "none" }} onOpenAgentManager={() => setShowAgentManager(true)} />
       </div>
 
       <StatusBar showChat={showChat} onToggleChat={() => setShowChat(!showChat)} rootPath={rootPath} />

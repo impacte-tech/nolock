@@ -443,17 +443,13 @@ html, body, #root {
   font-size: 18px;
 }
 
-/* Outer wrapper for editor + browser row (terminal sits below) */
+/* Outer wrapper for editor (terminal sits below) */
 .editor-main {
   flex: 1;
   display: flex;
-  flex-direction: column;   /* default: single column (editor only) */
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
-}
-
-.editor-main.split {
-  flex-direction: row;       /* side‑by‑side: editor | browser */
 }
 
 .editor-pane {
@@ -463,13 +459,6 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   position: relative;
-}
-
-.editor-main.split .browser-pane {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
 }
 
 .editor-tabs {
@@ -571,131 +560,6 @@ html, body, #root {
 .editor-content.md-split > :first-child {
   flex: 1;
   min-width: 0;
-}
-
-/* ===== Browser panel ===== */
-.browser-panel {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-}
-
-.browser-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border);
-  min-height: 32px;
-}
-
-.browser-btn {
-  background: var(--hover);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  padding: 3px 8px;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.browser-btn:hover {
-  background: var(--border);
-  color: var(--text-primary);
-}
-
-.browser-btn-primary {
-  background: var(--accent);
-  color: var(--bg-primary);
-  border-color: var(--accent);
-}
-
-.browser-btn-primary:hover {
-  opacity: 0.9;
-  color: var(--bg-primary);
-}
-
-.browser-url-input {
-  flex: 1;
-  font-size: 11px;
-  color: var(--text-primary);
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 3px 8px;
-  outline: none;
-  font-family: inherit;
-}
-
-.browser-url-input:focus {
-  border-color: var(--accent);
-}
-
-.browser-content {
-  flex: 1;
-  position: relative;
-  min-height: 0;
-}
-
-.browser-loading {
-  position: absolute;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  font-size: 11px;
-  color: var(--text-muted);
-  background: var(--bg-surface);
-  padding: 2px 10px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  z-index: 1;
-}
-
-/* Web build: the browser panel opens in the user's browser — show a hint. */
-.browser-web-hint {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  text-align: center;
-  color: var(--text-muted);
-}
-
-.browser-web-hint p {
-  font-size: 13px;
-  margin: 0;
-}
-
-.browser-web-url {
-  font-family: ui-monospace, 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 12px;
-  color: var(--text-secondary);
-  word-break: break-all;
-  max-width: 90%;
-}
-
-.browser-web-hint .browser-btn {
-  padding: 8px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.browser-blocked {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  background: var(--bg-primary);
 }
 
 /* ===== Terminal ===== */

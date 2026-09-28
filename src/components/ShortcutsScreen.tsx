@@ -51,12 +51,6 @@ const GROUPS: ShortcutGroup[] = [
     ],
   },
   {
-    title: "Browser",
-    items: [
-      { keys: "Ctrl+B, O", description: "Toggle browser panel" },
-    ],
-  },
-  {
     title: "Editor",
     items: [
       { keys: "Ctrl+E, O", description: "Toggle file explorer" },
