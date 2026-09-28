@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <em>Code. Chat. Terminal. Browser. All in one window — no cloud required.</em>
+  <em>Code. Chat. Terminal. All in one window — no cloud required.</em>
 </p>
 
 <p align="center">
@@ -24,7 +24,7 @@
 
 ## About
 
-**nolock** is a desktop IDE that puts you in full control. It combines a full-featured code editor (powered by Monaco), a real terminal emulator, an AI agent chat panel, a native web browser, and a workspace-wide file search — all running locally with no telemetry, no accounts, and no lock-in.
+**nolock** is a desktop IDE that puts you in full control. It combines a full-featured code editor (powered by Monaco), a real terminal emulator, an AI agent chat panel, and a workspace-wide file search — all running locally with no telemetry, no accounts, and no lock-in.
 
 Connect it to your preferred AI backend (Ollama, llama.cpp, or OpenRouter) for inline code completions and agentic chat with tool-calling capabilities (web search, file read, directory listing).
 
@@ -69,8 +69,6 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 > **NVIDIA libraries:** See **[`.docs/NVIDIA-GTC-2026.md`](.docs/NVIDIA-GTC-2026.md)** for a deep dive on how nolock embeds `nemo-fabric-core` (agent validation) and `switchyard-libsy` (model routing).
 | **portable-pty** | A cross-platform PTY (pseudo-terminal) library for Rust that works on Linux, macOS, and Windows. | Spawns and manages real interactive shell sessions (bash, zsh, etc.) with proper terminal dimensions, resizing, and signal handling. |
 | **regex** | A Rust library for regular expression matching. | Powers workspace-wide file search with regex mode, case-insensitive matching, and batch find-and-replace across files. |
-| **wry** | A cross-platform webview rendering library used by Tauri. | On Linux, creates a native GTK-based webview overlay for the in-app browser panel (supporting sites that block iframes). |
-| **GTK3 (gtk-rs)** | Rust bindings for the GTK 3 toolkit. | On Linux, manages a GtkOverlay + GtkFixed widget setup to position the native browser webview precisely within the application layout. |
 
 ### AI Backends
 
@@ -102,8 +100,7 @@ nolock is built on the shoulders of many incredible open-source projects. Below 
 - **Integrated Terminal** — Real PTY-based shell sessions with multiple tabs, resize support, and command history tracking.
 - **Terminal Memory** — Automatically records commands, tracks frequency, and lets you organize commands into categories for quick recall.
 - **File Explorer** — Tree-based file browser with directory expansion, refresh, file-type color coding, and file/directory CRUD operations (create, rename, delete, copy).
-- **Native Browser Panel** — Embedded web browser using a native OS webview (not an iframe) — browse any site without leaving the app.
-- **Resizable Panels** — All panels (explorer, editor, terminal, browser, chat) are fully resizable with drag handles.
+- **Resizable Panels** — All panels (explorer, editor, terminal, chat) are fully resizable with drag handles.
 - **Multi-Backend AI** — Switch between Ollama, llama.cpp, and OpenRouter for completions and chat.
 - **Switchyard Router** — Route requests across models/providers at runtime with NVIDIA NeMo Switchyard's embedded "general routers" (random, passthrough, llm-classifier). Per-project policy lives in `.routers/switchyard.json`; open via <kbd>Ctrl+A, Y</kbd>.
 - **Privacy-First** — No telemetry, no accounts, no cloud dependency. Everything runs on your machine.
@@ -347,8 +344,6 @@ Or run the binary directly without installing:
 ```
 
 The application will be available in your app launcher as **nolock** after installation.
-
-**Note:** On Linux, the native browser panel uses a GTK overlay widget for precise positioning. This works on all major Linux desktop environments (GNOME, KDE, XFCE, etc.).
 
 ### macOS
 
@@ -658,12 +653,6 @@ Within the search panel (`Ctrl+F, S`):
 | `Ctrl+A, R` | Human feedback (RLHF) |
 | `Ctrl+A, H` | Manage hooks |
 | `Ctrl+A, I` | Open AI settings |
-
-#### Browser (Ctrl+B chord)
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl+B, O` | Toggle browser panel |
 
 #### Direct Shortcuts
 

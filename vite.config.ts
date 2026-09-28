@@ -28,9 +28,6 @@ const webAliases = webTarget
   ? {
       "@tauri-apps/api/core": path.resolve(__dirname, "src/web/core.ts"),
       "@tauri-apps/api/event": path.resolve(__dirname, "src/web/event.ts"),
-      "@tauri-apps/api/dpi": path.resolve(__dirname, "src/web/dpi.ts"),
-      "@tauri-apps/api/webview": path.resolve(__dirname, "src/web/webview.ts"),
-      "@tauri-apps/api/window": path.resolve(__dirname, "src/web/window.ts"),
       "@tauri-apps/plugin-dialog": path.resolve(__dirname, "src/web/dialog.ts"),
       "@tauri-apps/plugin-shell": path.resolve(__dirname, "src/web/shell.ts"),
     }

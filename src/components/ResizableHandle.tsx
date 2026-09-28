@@ -5,9 +5,6 @@ interface Props {
   direction: "horizontal" | "vertical";
   /** Called on every mouse move with the delta in pixels since the last event */
   onDrag: (delta: number) => void;
-  /** Called when the drag ends (mouse up).  Useful for triggering a final
-   *  position sync on the browser webview after the layout has settled. */
-  onDragEnd?: () => void;
 }
 
 /**
@@ -24,13 +21,11 @@ interface Props {
  * document-level listeners) only runs once per `direction` change, not on
  * every render caused by the parent's state updates during drag.
  */
-export default function ResizableHandle({ direction, onDrag, onDragEnd }: Props) {
+export default function ResizableHandle({ direction, onDrag }: Props) {
   const isDragging = useRef(false);
   const lastPos = useRef(0);
   const onDragRef = useRef(onDrag);
   onDragRef.current = onDrag;
-  const onDragEndRef = useRef(onDragEnd);
-  onDragEndRef.current = onDragEnd;
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -61,7 +56,6 @@ export default function ResizableHandle({ direction, onDrag, onDragEnd }: Props)
         isDragging.current = false;
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
-        onDragEndRef.current?.();
       }
     };
 

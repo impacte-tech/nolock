@@ -2354,7 +2354,6 @@ dependencies = [
  "block2",
  "chrono",
  "futures",
- "gtk",
  "http",
  "libc",
  "nemo-fabric-core",
@@ -2377,7 +2376,6 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-shell",
  "tokio",
- "wry",
 ]
 
 [[package]]

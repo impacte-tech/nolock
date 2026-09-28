@@ -9,6 +9,7 @@ import App from "../App";
 import {
   mockInvoke,
   mockDialogOpen,
+  mockShellOpen,
   resetTauriMocks,
 } from "../test/tauri-mock";
 
@@ -38,7 +39,7 @@ describe("App", () => {
     render(<App />);
     expect(screen.getByText("Files")).toBeInTheDocument();
     expect(screen.getAllByText("Terminal").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("Browser").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText("Browser")).not.toBeInTheDocument();
     expect(screen.getAllByText("AI Integrations").length).toBeGreaterThanOrEqual(1);
   });
 
@@ -179,25 +180,6 @@ describe("App", () => {
     expect(screen.getByRole("tab", { name: "Terminal 1", selected: true })).toBeInTheDocument();
   });
 
-  it("opens browser panel on Ctrl+B, O chord", () => {
-    render(<App />);
-    // No browser initially
-    expect(screen.queryByTitle("Close browser")).not.toBeInTheDocument();
-
-    // Ctrl+B sets chord prefix
-    fireEvent.keyDown(window, { key: "b", ctrlKey: true, shiftKey: false });
-    expect(screen.getByText(/Waiting for second key/)).toBeInTheDocument();
-
-    // Press O to toggle browser
-    fireEvent.keyDown(window, { key: "O", ctrlKey: false });
-    expect(screen.getByTitle("Close browser")).toBeInTheDocument();
-
-    // Toggle off
-    fireEvent.keyDown(window, { key: "b", ctrlKey: true, shiftKey: false });
-    fireEvent.keyDown(window, { key: "O", ctrlKey: false });
-    expect(screen.queryByTitle("Close browser")).not.toBeInTheDocument();
-  });
-
   it("opens Model Providers on Ctrl+A, P chord", () => {
     render(<App />);
     expect(screen.queryByText("Provider")).not.toBeInTheDocument();
@@ -231,21 +213,15 @@ describe("App", () => {
     expect(mockDialogOpen).toHaveBeenCalledOnce();
   });
 
-  it("navigates from chat to browser", () => {
+  it("opens links in the system browser", () => {
+    mockShellOpen.mockResolvedValue(undefined);
     render(<App />);
-
-    // Open chat
-    fireEvent.keyDown(window, { key: "a", ctrlKey: true, shiftKey: false });
-    fireEvent.keyDown(window, { key: "o", ctrlKey: false });
-    expect(screen.getByText("Agent Chat")).toBeInTheDocument();
-
-    // No browser yet
-    expect(screen.queryByTitle("Close browser")).not.toBeInTheDocument();
-
-    // Simulate opening a URL from chat (this invokes the openInBrowser callback)
-    // We can't easily trigger the global click handler, but we can verify the
-    // wiring by checking the state. The ChatPanel's onOpenUrl prop is connected
-    // to App's openInBrowser which calls setBrowserUrl.
+    const link = document.createElement("a");
+    link.href = "https://example.com/";
+    document.body.appendChild(link);
+    fireEvent.click(link);
+    expect(mockShellOpen).toHaveBeenCalledWith("https://example.com/");
+    link.remove();
   });
 
   it("closes Model Providers via Escape", () => {

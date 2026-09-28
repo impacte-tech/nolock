@@ -6,7 +6,6 @@ use tauri::Emitter;
 
 use regex::Regex;
 
-mod browser;
 mod uploads;
 pub mod model_pulls;
 mod fabric;
@@ -9965,7 +9964,6 @@ pub fn run() {
         })
         .manage(pykernel::KernelState::default())
         .manage(SubAgentMemory::new())
-        .manage(browser::BrowserState::new())
         .manage(terminal_memory::TermMemory::new())
         .setup(|app| {
             // Set the window icon so the taskbar/dock shows the nolock logo
@@ -10043,9 +10041,6 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
-            browser::create_browser_webview,
-            browser::close_browser_webview,
-            browser::update_browser_webview,
             linter::run_linter,
             terminal_memory::record_command,
             terminal_memory::get_top_commands,
