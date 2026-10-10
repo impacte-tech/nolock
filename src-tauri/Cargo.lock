@@ -2351,9 +2351,11 @@ name = "nolock"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "block2",
  "chrono",
  "futures",
+ "gtk",
  "http",
  "libc",
  "nemo-fabric-core",
@@ -2376,6 +2378,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-shell",
  "tokio",
+ "wry",
 ]
 
 [[package]]

@@ -31,7 +31,12 @@ import ResizableHandle from "./components/ResizableHandle";
 import ShortcutsScreen from "./components/ShortcutsScreen";
 import SearchPanel from "./components/SearchPanel";
 import Notebook from "./components/Notebook";
+import { lazy, Suspense } from "react";
+// pdf.js (~1.3 MB min) is code-split behind a lazy import: it only loads when
+// a PDF is actually opened, keeping the boot chunk small.
+const PdfPreview = lazy(() => import("./components/PdfPreview"));
 import { MarkdownContent } from "./components/ChatPanel";
+import { isPdfFile } from "./lib/pdf";
 import nolockLogo from "./assets/nolocklogo-white.svg";
 
 // ---------------------------------------------------------------------------
@@ -332,7 +337,12 @@ export default function App() {
         return;
       }
       try {
-        const content: string = await invoke("read_file", { path: filePath });
+        // PDFs are binary — read them base64-encoded for the rendered preview
+        // (the UTF-8 `read_file` command would reject them).
+        const isPdf = isPdfFile(filePath);
+        const content: string = isPdf
+          ? await invoke("read_file_base64", { path: filePath })
+          : await invoke("read_file", { path: filePath });
         setOpenFiles((prev) => [
           ...prev,
           { path: filePath, name: fileName, content, dirty: false },
@@ -347,6 +357,9 @@ export default function App() {
 
   const saveFile = useCallback(
     async (filePath: string) => {
+      // PDFs open in a read-only rendered preview (their OpenFile slot holds
+      // base64 data, not text) — never write it back over the real bytes.
+      if (isPdfFile(filePath)) return;
       const file = openFiles.find((f) => f.path === filePath);
       if (!file) return;
       try {
@@ -399,7 +412,8 @@ export default function App() {
 
   /**
    * Renders the main view for an open file: a Colab-style notebook for
-   * `.ipynb` files, the Monaco editor for everything else.
+   * `.ipynb` files, a rendered PDF viewer for `.pdf` files, the Monaco editor
+   * for everything else.
    */
   const renderFileView = useCallback(
     (file: OpenFile) => {
@@ -413,6 +427,18 @@ export default function App() {
             onSave={() => saveFile(file.path)}
             rootPath={rootPath}
           />
+        );
+      }
+      if (isPdfFile(file.path)) {
+        return (
+          <Suspense fallback={<div className="pdf-loading">Loading PDF viewer…</div>}>
+            <PdfPreview
+              key={file.path}
+              path={file.path}
+              base64={file.content}
+              onRequestChat={() => setShowChat(true)}
+            />
+          </Suspense>
         );
       }
       return (
@@ -1133,7 +1159,7 @@ export default function App() {
 
                   <div className={`editor-content ${currentFile && markdownPreviewFiles.has(currentFile.path) ? "md-split" : ""}`}>
                     {currentFile ? (
-                      isNotebookFile(currentFile.path) ? (
+                      isNotebookFile(currentFile.path) || isPdfFile(currentFile.path) ? (
                         renderFileView(currentFile)
                       ) : (
                         <>

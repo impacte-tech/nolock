@@ -331,6 +331,10 @@ async fn dispatch(state: &Arc<AppState>, command: &str, args: serde_json::Value)
             let a: ReadFileArgs = parse(command, args)?;
             ok(main_impl::web_bridge::read_file(a.path))
         }
+        "read_file_base64" => {
+            let a: ReadFileArgs = parse(command, args)?;
+            ok(main_impl::web_bridge::read_file_base64(a.path))
+        }
         "write_file" => {
             let a: WriteFileArgs = parse(command, args)?;
             ok(main_impl::web_bridge::write_file(a.path, a.content))
