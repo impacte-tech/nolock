@@ -10,13 +10,15 @@ default-run = "nolock"
 tauri-build = { version = "=2.6.2", features = [] }
 
 [dependencies]
-tauri = { version = "=2.11.2", features = ["image-png"] }
+tauri = { version = "=2.11.2", features = ["unstable", "image-png"] }
 tauri-plugin-fs = "=2.5.1"
 tauri-plugin-shell = "=2.3.5"
 tauri-plugin-dialog = "=2.7.1"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 serde_yaml = "=0.9.34"
+# Base64 transport for binary file previews (PDF rendering in the editor).
+base64 = "0.22"
 reqwest = { version = "=0.12.28", features = ["json", "stream"] }
 futures = "0.3"
 regex = "=1.11.1"
@@ -46,6 +48,10 @@ sqlite-vec = "=0.1.9"
 [dev-dependencies]
 http = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
+gtk = { version = "=0.18.2", features = ["v3_24"] }
+wry = { version = "=0.55.1", default-features = false, features = ["protocol", "os-webview", "linux-body"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -217,6 +217,17 @@ interface Props {
 // Mutable ref set by ChatPanel so MarkdownContent can call it without props drilling
 let globalOpenUrl: ((url: string) => void) | null = null;
 
+// Mutable hook set by ChatPanel so other surfaces (e.g. the PDF preview's
+// "Ask in chat" action) can drop text into the chat input without prop
+// drilling through App. Returns false when the chat panel isn't mounted
+// (closed) so callers can fall back to the clipboard.
+let chatInputAppender: ((text: string) => void) | null = null;
+export function appendToChatInput(text: string): boolean {
+  if (!chatInputAppender) return false;
+  chatInputAppender(text);
+  return true;
+}
+
 export function MarkdownContent({ text }: { text: string }) {
   const ref = useRef<HTMLDivElement>(null);
   // Mask math spans → parse markdown → restore math (protects \, and _ from
@@ -962,6 +973,18 @@ export default function ChatPanel({ onClose, onRunShell, onOpenUrl, rootPath = "
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [shellNotice, setShellNotice] = useState("");
+
+  // Register the chat-input appender so other panels (PDF preview "Ask in
+  // chat") can drop quoted text into the input. Appends after existing text
+  // and focuses the textarea so the user can just hit Enter to ask.
+  useEffect(() => {
+    chatInputAppender = (text: string) => {
+      setInput((prev) => (prev.trim() ? `${prev}\n\n${text}` : text));
+      // Focus after the state-driven re-render paints the new value.
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    };
+    return () => { chatInputAppender = null; };
+  }, []);
   const [loading, setLoading] = useState(false);
   // Chat mode: "building" (default), "planning", or "learning". Changes the
   // behavior of the main chat agent (see src/lib/chatModes.ts). Configured in

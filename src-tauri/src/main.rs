@@ -211,6 +211,27 @@ fn read_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {}", path, e))
 }
 
+/// Max bytes `read_file_base64` will read. Sits comfortably above the 10 MB
+/// upload cap so any uploaded binary (PDF lecture notes, slides, …) previews.
+const READ_FILE_BASE64_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// Reads a file as raw bytes and returns it base64-encoded, so the frontend
+/// can render binary formats (PDF preview) that `read_file` (UTF-8) cannot.
+#[tauri::command]
+fn read_file_base64(path: String) -> Result<String, String> {
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    if bytes.len() > READ_FILE_BASE64_MAX_BYTES {
+        return Err(format!(
+            "File too large to preview ({} bytes, max {})",
+            bytes.len(),
+            READ_FILE_BASE64_MAX_BYTES
+        ));
+    }
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 #[tauri::command]
 fn write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, &content).map_err(|e| format!("Failed to write {}: {}", path, e))
@@ -9982,6 +10003,7 @@ pub fn run() {
             open_path,
             upload_file,
             read_file,
+            read_file_base64,
             write_file,
             list_directory,
             list_files_recursive,

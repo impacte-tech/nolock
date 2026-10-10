@@ -1,0 +1,212 @@
+/*
+ * PDF preview — the editor pane's rendered PDF view (PdfPreview.tsx).
+ *
+ * Pages render on white "paper" against the dark editor background. The
+ * `.textLayer` rules are the minimal subset of pdf.js's `web/pdf_viewer.css`
+ * (pdfjs-dist 4.10.38) required by the `TextLayer` class: absolutely
+ * positioned transparent spans overlaying the canvas, which is what makes
+ * PDF text selectable/copyable. Keep in sync when bumping pdfjs-dist.
+ */
+
+.pdf-preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-secondary, #0a0a0a);
+}
+
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border, #333);
+  background: var(--bg-surface, #252526);
+  flex: 0 0 auto;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.pdf-title {
+  font-size: 12px;
+  color: var(--text-primary, #ccc);
+  font-weight: 600;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pdf-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pdf-btn {
+  background: transparent;
+  color: var(--text-secondary, #aaa);
+  border: 1px solid var(--border, #3c3c3c);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.pdf-btn:hover:not(:disabled) {
+  background: var(--hover, #222222);
+  color: var(--text-primary, #fff);
+}
+
+.pdf-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pdf-btn-accent:not(:disabled) {
+  color: var(--accent, #4a9eff);
+  border-color: var(--accent, #4a9eff);
+}
+
+.pdf-zoom-label {
+  font-size: 11px;
+  color: var(--text-secondary, #aaa);
+  min-width: 38px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-pages-label {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-secondary, #888);
+}
+
+.pdf-notice {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--text-primary, #ddd);
+  background: var(--bg-surface, #252526);
+  border-bottom: 1px solid var(--border, #333);
+  flex: 0 0 auto;
+}
+
+.pdf-scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 16px 0 32px;
+}
+
+.pdf-loading,
+.pdf-error {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-secondary, #999);
+  font-size: 13px;
+}
+
+.pdf-error-detail {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-warning, #e8b830);
+  word-break: break-word;
+}
+
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.pdf-page {
+  position: relative;
+  background: #fff;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.pdf-page canvas {
+  display: block;
+}
+
+.pdf-page-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+  color: #999;
+  font-size: 12px;
+  user-select: none;
+}
+
+.pdf-page-failed canvas {
+  opacity: 0.25;
+}
+
+.pdf-page-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #c0392b;
+  font-size: 12px;
+  user-select: none;
+}
+
+/* --- pdf.js text layer (vendored subset of pdf_viewer.css) ---------------- */
+
+.pdf-page .textLayer {
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 2;
+}
+
+.pdf-page .textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.pdf-page .textLayer > :not(.markedContent),
+.pdf-page .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+}
+
+.pdf-page .textLayer ::selection {
+  background: rgba(0, 0, 255, 0.25);
+}
+
+.pdf-page .textLayer br::selection {
+  background: transparent;
+}
+
+.pdf-page .textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  user-select: none;
+}
+
+.pdf-page .textLayer.selecting .endOfContent {
+  top: 0;
+}

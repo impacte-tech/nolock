@@ -14,6 +14,10 @@ pub fn read_file(path: String) -> Result<String, String> {
     super::read_file(path)
 }
 
+pub fn read_file_base64(path: String) -> Result<String, String> {
+    super::read_file_base64(path)
+}
+
 pub fn write_file(path: String, content: String) -> Result<(), String> {
     super::write_file(path, content)
 }
